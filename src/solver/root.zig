@@ -56,4 +56,6 @@ test {
     _ = @import("order.zig");
     _ = @import("bbd.zig");
     _ = @import("subtree.zig");
+    _ = @import("jfnk.zig");
+    _ = @import("newton_sys.zig");
 }
