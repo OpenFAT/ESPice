@@ -11,6 +11,8 @@
 //! - `pub const Options = core.query.Op`
 //! - `pub const LaneOutcome = ErrorOf(solve)!converger.Result`
 //! - `pub const gminFactor = op_ladder.gminFactor`
+//! - `pub const GminStep = op_ladder.GminStep`
+//! - `pub const gminStalled = op_ladder.gminStalled`
 //! - `pub fn run(ctx: *const RunCtx, opts: Options) !Result`
 //! - `pub fn solve(ckt: *Circuit, x: []f64, options: Options, nodeset: []const Ic, ic: []const Ic) !converger.Result`
 //! - `pub fn beginSolve(ckt: *Circuit, x: []f64, options: Options) !void`
@@ -35,6 +37,10 @@ pub const LaneOutcome = root.ErrorOf(solve)!converger.Result;
 
 /// The gmin stepping rung's next factor (`op_ladder.gminFactor`).
 pub const gminFactor = op_ladder.gminFactor;
+/// One gmin descent solve (`op_ladder.GminStep`).
+pub const GminStep = op_ladder.GminStep;
+/// Whether a gmin descent has stalled (`op_ladder.gminStalled`).
+pub const gminStalled = op_ladder.gminStalled;
 
 /// Contract entry: the executor's solved `ctx.x_op`, one point per probe,
 /// and with `opts.emir` its terminal currents.

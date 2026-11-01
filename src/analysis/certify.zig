@@ -13,7 +13,7 @@
 //! tolerance-system.md, "KCL certificate"), so the bound only reports.
 //!
 //! Off by default, and comptime-gated: without `-Dcertify` the `Tally`
-//! field is void and `newton` never calls `check`.
+//! field is void and `newton` never calls `reserve` or `check`.
 //! In: a circuit, its hook and a converged x. Out: a `Point` measurement,
 //! and a panic on a gate miss.
 //! Cites #53; dev/analysis/tolerance-system.md.
@@ -24,6 +24,7 @@
 //! - `pub const Point = struct`
 //! - `pub fn scratchLen(ckt: anytype) usize`
 //! - `pub fn measure(ckt: anytype, hook: anytype, x: []const f64, t: f64, opts: converger.Options, scratch: []f64) Point`
+//! - `pub fn reserve(ckt: anytype) error{OutOfMemory}!void`
 //! - `pub fn check(ckt: anytype, hook: anytype, x: []const f64, t: f64, opts: converger.Options) void`
 
 const std = @import("std");
@@ -133,20 +134,30 @@ pub fn measure(ckt: anytype, hook: anytype, x: []const f64, t: f64, opts: conver
     return pt;
 }
 
+/// Sizes `ckt.cert.scratch` for `check`. `newton` calls it, through
+/// `Circuit.certifyReserve`, on entry under `-Dcertify`, where an
+/// allocation failure still returns to its caller.
+pub fn reserve(ckt: anytype) error{OutOfMemory}!void {
+    comptime assert(enabled);
+    const tally = &ckt.cert;
+    const need = scratchLen(ckt);
+    if (tally.scratch.len == need) return;
+    ckt.gpa.free(tally.scratch);
+    tally.scratch = &.{};
+    tally.scratch = try ckt.gpa.alloc(f64, need);
+    assert(tally.scratch.len == need);
+}
+
 /// `measure`, then panics when a row is over the converger's gate, and
 /// records the ratio in `ckt.cert`. `newton` calls it, through
 /// `Circuit.certifyPoint`, on every converged x it stages under `-Dcertify`,
 /// after every gate and before `updateStates` stages the point: a device
-/// whose eval reads its staged history would otherwise see x twice. Sizes
-/// `ckt.cert.scratch` on first use and panics if that allocation fails.
+/// whose eval reads its staged history would otherwise see x twice. Asserts
+/// that `reserve` sized `ckt.cert.scratch`.
 pub fn check(ckt: anytype, hook: anytype, x: []const f64, t: f64, opts: converger.Options) void {
     comptime assert(enabled);
     const tally = &ckt.cert;
-    const need = scratchLen(ckt);
-    if (tally.scratch.len != need) {
-        ckt.gpa.free(tally.scratch);
-        tally.scratch = ckt.gpa.alloc(f64, need) catch @panic("certify: out of memory");
-    }
+    assert(tally.scratch.len == scratchLen(ckt));
     const pt = measure(ckt, hook, x, t, opts, tally.scratch);
     if (pt.gate_row) |row| std.debug.panic(
         "certify: row {d} ({s}) |F| = {e:.3} exceeds the converger's gate {e:.3} at {s} t={e:.6}, x = {e:.6}",

@@ -30,7 +30,7 @@
 //!   `nextBreakpoint`, `setCircuitTemp`, `setHomotopy`, `paramsMoved`,
 //!   `setBypass`, `setSimState`, `recompute`, `recomputeType`,
 //!   `collectNoiseSources`, `collectParams`, `setParams`, `isolatedParams`,
-//!   `paramAt`, `typeName`, `certifyPoint`, `deviceSolve`, `workspace`,
+//!   `paramAt`, `typeName`, `certifyReserve`, `certifyPoint`, `deviceSolve`, `workspace`,
 //!   `loadCheck`, `pooled`, `configure`, `attachGpu`, `gpuContext`,
 //!   `detachGpu`, `checkpoint`, `bindPlanes`, `ownPlanes`, `qTapeLen`,
 //!   `markCurrentRowsOf`, `snapshotQTape`, `eval`, `clearPlanes`, `evalQ`,
@@ -296,6 +296,12 @@ pub const Circuit = struct {
     pub const isolatedParams = circuit_params.isolatedParams;
     pub const paramAt = circuit_params.paramAt;
     pub const typeName = circuit_params.typeName;
+
+    /// Sizes the certificate's scratch (`certify.reserve`). Only `newton`
+    /// calls it, on entry, and only under `-Dcertify`.
+    pub fn certifyReserve(self: *Circuit) error{OutOfMemory}!void {
+        return certify_mod.reserve(self);
+    }
 
     /// Certifies the converged `x` (`certify.zig`). Only `newton` calls it,
     /// and only under `-Dcertify`.

@@ -9,9 +9,11 @@
 //!
 //! Contents:
 //! - `pub const failed: converger.Result`
+//! - `pub const GminStep = struct { gmin, converged }`
 //! - `pub fn solve(ckt: *Circuit, ws: *Workspace, x: []f64, options: Options, hold: []const Force) !converger.Result`
 //! - `pub fn afterPlain(ckt, ws, x, options, hold, plain: ?converger.Result) !converger.Result`
 //! - `pub fn gminFactor(factor: f64, iterations: u16, budget: u16) f64`
+//! - `pub fn gminStalled(steps: []const GminStep, start: f64, next: f64) bool`
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -27,10 +29,25 @@ const Force = converger.Force;
 /// A rung that did not converge and counted no iterations.
 pub const failed: converger.Result = .{ .converged = false, .iterations = 0 };
 
+/// One solve of a gmin descent: the gmin tried, and whether Newton
+/// converged there.
+pub const GminStep = struct { gmin: f64, converged: bool };
+
 /// Solves at most per stepping rung. ngspice has no cap (each rung ends on
 /// its step floor); 100 ended chain_bsim4_100k's gmin stepping at 1.35e-6
 /// while every step still converged.
 const ladder_solves_max = 1000;
+
+/// Solves in a row a gmin descent may keep its factor under
+/// `stall_factor` (a decade per `stall_solves` solves) before it is stalled
+/// and source stepping takes over. ngspice's dynamic_gmin has no such exit:
+/// its factor floor ends only a failing descent, and steps that converge in
+/// the dead band of `gminFactor` freeze a small factor (chain_bsim4_100k:
+/// about 1.004, some 5,800 steps to 1e-12). A descent that recovers speeds
+/// its factor up past `stall_factor` within a few easy steps
+/// (scaling_inverter_chain_4k: 13 slow solves). Leaving departs from ngspice.
+const stall_solves = 20;
+const stall_factor = std.math.pow(f64, 10.0, 1.0 / @as(f64, stall_solves));
 
 /// The ladder from `x` as given. A circuit with a capacitor-only island
 /// (`needs_tran_op`) and no holds skips the static rungs and goes straight
@@ -118,6 +135,24 @@ pub fn gminFactor(factor: f64, iterations: u16, budget: u16) f64 {
     return factor;
 }
 
+/// True when a descent from `start` (the ladder's gmin_start) that tried
+/// `steps` and tries `next` now has kept its factor under `stall_factor`
+/// for its last `stall_solves` solves. The factor after a solve is the last
+/// good gmin over the gmin tried next, so a `ZP_OPDBG` log replays it.
+pub fn gminStalled(steps: []const GminStep, start: f64, next: f64) bool {
+    assert(start >= 0 and next >= 0);
+    assert(steps.len <= ladder_solves_max);
+    if (steps.len < stall_solves) return false;
+    var good = start;
+    for (steps, 0..) |s, i| {
+        if (s.converged) good = s.gmin;
+        if (i < steps.len - stall_solves) continue;
+        const following = if (i + 1 < steps.len) steps[i + 1].gmin else next;
+        if (good / following >= stall_factor) return false;
+    }
+    return true;
+}
+
 // ---- private ----
 
 /// Rung 2, dynamic gmin stepping (cktop.c dynamic_gmin): descend gmin by
@@ -144,7 +179,10 @@ fn gminStepping(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, options:
     // The Newton budget each step gets: NIiter's floor of 100 over itl2.
     const budget = converger.optionsFromTolerances(options.tol, options.tol.itl2).max_iter;
     var solves: u32 = 0;
+    const steps = try gpa.alloc(GminStep, ladder_solves_max);
+    defer gpa.free(steps);
     while (solves < ladder_solves_max) : (solves += 1) {
+        const tried = gmin_val;
         ckt.setHomotopy(gmin_val, 1.0);
         try ckt.computeBaseline();
         var refused = false;
@@ -165,29 +203,34 @@ fn gminStepping(ckt: *root.Circuit, ws: *converger.Workspace, x: []f64, options:
             factor = if (refused) @sqrt(factor) else @sqrt(@sqrt(factor));
             gmin_val = good_gmin / factor;
             if (have_good) @memcpy(x, x_good) else op.coldStart(ckt, x);
-            continue;
+        } else {
+            if (gmin_val <= gtarget) {
+                // dynamic_gmin removes diagGmin for the last solve: the answer
+                // must not carry the shunt.
+                ckt.setHomotopy(gtarget, 1.0);
+                try ckt.computeBaseline();
+                const clean = newtonRun(ckt, ws, x, options.tol, hold, 0.0, &.{}, null, false) catch |err| switch (err) {
+                    error.QueryCancelled, error.OutOfMemory => return err,
+                    else => failed, // A numerical failure ends the ladder.
+                };
+                total.* +|= clean.iterations;
+                if (clean.converged) return true;
+                break;
+            }
+            @memcpy(x_good, x);
+            have_good = true;
+            good_gmin = gmin_val;
+            factor = gminFactor(factor, r.iterations, budget);
+            if (gmin_val < factor * gtarget) {
+                factor = gmin_val / gtarget;
+                gmin_val = gtarget;
+            } else gmin_val /= factor;
         }
-        if (gmin_val <= gtarget) {
-            // dynamic_gmin removes diagGmin for the last solve: the answer
-            // must not carry the shunt.
-            ckt.setHomotopy(gtarget, 1.0);
-            try ckt.computeBaseline();
-            const clean = newtonRun(ckt, ws, x, options.tol, hold, 0.0, &.{}, null, false) catch |err| switch (err) {
-                error.QueryCancelled, error.OutOfMemory => return err,
-                else => failed, // A numerical failure ends the ladder.
-            };
-            total.* +|= clean.iterations;
-            if (clean.converged) return true;
-            break;
+        steps[solves] = .{ .gmin = tried, .converged = r.converged };
+        if (gminStalled(steps[0 .. solves + 1], options.tol.gmin_start, gmin_val)) {
+            if (ws.knobs.opdbg) std.debug.print("ladder: gmin stalled at {e:.3} solve={d}\n", .{ good_gmin, solves });
+            break; // To source stepping, which cold-starts.
         }
-        @memcpy(x_good, x);
-        have_good = true;
-        good_gmin = gmin_val;
-        factor = gminFactor(factor, r.iterations, budget);
-        if (gmin_val < factor * gtarget) {
-            factor = gmin_val / gtarget;
-            gmin_val = gtarget;
-        } else gmin_val /= factor;
     }
     ckt.setHomotopy(gtarget, 1.0); // Rung 3 rebuilds the baseline.
     return false;
