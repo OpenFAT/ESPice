@@ -9,13 +9,16 @@
 //! Contents:
 //! - `pub const Library = device.Library`
 //! - `pub const Tuner = variants.Tuner`
+//! - `pub const Sss = variants.Sss`
+//! - `pub const WorstCase = variants.WorstCase`
 //! - `pub const Dialect = netlist.Dialect`
+//! - `pub const ParseOptions = netlist.ParseOptions`
 //! - `pub const parseDialect, detectDialect` (dialect.zig)
 //! - `pub const Prepared = struct`
 //! - `pub fn deinit(self: *Prepared) void`
 //! - `pub const Source = union(enum)`
 //! - `pub const Bytes = struct`
-//! - `pub fn prepare(io: std.Io, session: Allocator, input: Source, dialect: Dialect, live: []const []const u8) !netlist.Netlist`
+//! - `pub fn prepare(io: std.Io, session: Allocator, input: Source, dialect: Dialect, live: []const []const u8, parse: ParseOptions) !netlist.Netlist`
 //! - `pub fn loadModels(io: std.Io, lib: *device.Library, session: Allocator, nl: netlist.Netlist, origin: []const u8, apps: []const []const u8) !void`
 //! - `pub fn build(lib: *const device.Library, sim_arena: Allocator, parse_arena: Allocator, nl: netlist.Netlist) !Prepared`
 //! - `pub fn resolveQueries(arena: Allocator, prepared: *const Prepared, directive_text: []const u8) ![]const Job`
@@ -34,6 +37,8 @@ const variants = @import("variants.zig");
 const mosra = @import("mosra.zig");
 const dialect_mod = @import("dialect.zig");
 const prepared_deck = @import("prepared_deck.zig");
+const prepared_opvars = @import("prepared_opvars.zig");
+const prepared_soa = @import("prepared_soa.zig");
 const Builder = builder.Builder;
 const Job = requests.Query;
 const NO_NODE = analyses.NO_NODE;
@@ -42,8 +47,14 @@ const NO_NODE = analyses.NO_NODE;
 pub const Library = device.Library;
 /// HSPICE `OPTIMIZE=`: the optimizer's point-to-rows adapter (variants.zig).
 pub const Tuner = variants.Tuner;
+/// A SIGMA_SCALE card, for counting its trials' failures (#239).
+pub const Sss = variants.Sss;
+/// `.wcd`: FORM's points to variant rows (#240, variants.zig).
+pub const WorstCase = variants.WorstCase;
 /// The netlist syntax a deck is read in: ngspice, HSPICE or Spectre.
 pub const Dialect = netlist.Dialect;
+/// How `prepare` reads device cards (#230).
+pub const ParseOptions = netlist.ParseOptions;
 
 /// The dialect a CLI name or short alias selects (dialect.zig).
 pub const parseDialect = dialect_mod.parseDialect;
@@ -69,6 +80,11 @@ pub const Prepared = struct {
     /// (`prepare`'s `live`); null without any. It borrows the parse arena,
     /// which must then outlive the Prepared.
     tuning: ?*variants.Tuning = null,
+    /// The deck's SIGMA_SCALE cards (#239), in the session arena.
+    sss: []const variants.Sss = &.{},
+    /// The deck's `.wcd` (#240), on the main run only. It borrows the parse
+    /// arena, which must then outlive the Prepared.
+    wcd: ?variants.WorstCase = null,
 
     /// Releases this run's circuit and every nested run's, and the tuning's
     /// templates. The deck slices stay with the session arena. Leaves
@@ -126,9 +142,12 @@ const NodeIndex = struct {
 /// when `live` is not empty. Spectre input expands its `include`s
 /// (`source.expandSpectre`) and nothing else: it splits no `.alter` runs
 /// and reads no data files. Fails with `UnknownParameter` for a `live`
-/// name no global `.param` defines, and with the file error of an
-/// unreadable deck, include or data file.
-pub fn prepare(io: std.Io, session: Allocator, input: Source, dialect: Dialect, live: []const []const u8) !netlist.Netlist {
+/// name no global `.param` defines, with the file error of an
+/// unreadable deck, include, data or `soalimits` file, and with
+/// `InvalidSoaLimits` for a `soalimits` file `prepared_soa.ratings`
+/// refuses. `parse` says how the device cards are read; every choice gives
+/// the same netlist.
+pub fn prepare(io: std.Io, session: Allocator, input: Source, dialect: Dialect, live: []const []const u8, parse: ParseOptions) !netlist.Netlist {
     const origin = switch (input) {
         .file => |path| path,
         .bytes => |bytes| bytes.origin,
@@ -138,14 +157,16 @@ pub fn prepare(io: std.Io, session: Allocator, input: Source, dialect: Dialect, 
         .bytes => |bytes| try session.dupe(u8, bytes.data),
     };
     if (dialect == .spectre) {
-        return netlist.parseLive(session, try netlist.source.expandSpectre(io, session, origin, raw), dialect, live);
+        return netlist.parseLive(session, try netlist.source.expandSpectre(io, session, origin, raw), dialect, live, parse);
     }
     const runs = try netlist.source.splitAlters(session, raw);
-    var nl = try netlist.parseLive(session, try netlist.source.expand(io, std.heap.page_allocator, session, origin, runs[0]), dialect, live);
+    var nl = try netlist.parseLive(session, try netlist.source.expand(io, std.heap.page_allocator, session, origin, runs[0]), dialect, live, parse);
     const alters = try session.alloc([]const u8, runs.len - 1);
     for (alters, runs[1..]) |*text, run| text.* = try netlist.source.expand(io, std.heap.page_allocator, session, origin, run);
     nl.deck.alters = alters;
     nl.files = try loadData(io, session, nl.deck.foreign, origin);
+    // The `.options soalimits=` file, relative to the deck (#238).
+    if (nl.deck.soa_file.len != 0) nl.soa_ratings = try prepared_soa.ratings(io, session, try deckRelative(session, origin, nl.deck.soa_file));
     return nl;
 }
 
@@ -234,7 +255,8 @@ fn ErrorOf(comptime f: anytype) type {
 }
 
 /// `build` for one run of the deck in `nl`, which must outlive the result
-/// when the deck has an HSPICE optimization (`Prepared.tuner` borrows it).
+/// when the deck has an HSPICE optimization or a `.wcd` (`Prepared.tuner`
+/// and `Prepared.wcd` borrow it).
 /// A `run.point` sets `nl`'s live values first; they are nominal again
 /// when a run with rebuilt points returns.
 fn buildRun(lib: *const device.Library, sim_arena: Allocator, parse_arena: Allocator, nl: *netlist.Netlist, run: variants.Run) BuildError!Prepared {
@@ -284,11 +306,12 @@ fn buildOne(lib: *const device.Library, sim_arena: Allocator, parse_arena: Alloc
     for (cards) |*c| {
         c.name = try sim_arena.dupe(u8, c.name);
     }
-    const card_names = try requests.CardNames.init(sim_arena, cards);
     var perm: ?[]const u32 = null;
     var circuit = try b.compilePerm(&perm);
     compiled_ok = true;
     errdefer circuit.deinit();
+    try prepared_deck.frozenIndices(parse_arena, cards, &circuit);
+    const card_names = try requests.CardNames.init(sim_arena, cards);
 
     var out = try nb.publish(sim_arena, &circuit, perm);
     if (nl.deck.saves.len > 0) try prepared_deck.keepSaved(parse_arena, &out.probes, &out.probe_labels, nl.deck.saves);
@@ -341,9 +364,11 @@ fn buildOne(lib: *const device.Library, sim_arena: Allocator, parse_arena: Alloc
         if (nl.deck.optimize != null) tuner = try variants.Tuner.init(planner);
         break :blk planned;
     } else .{};
+    // A planner of its own: the plan's left the live values nominal.
+    const wcd = if (nl.deck.wcd != null and run.point == null and run.prefix.len == 0) try variants.WorstCase.init(try variants.Planner.init(lib, sim_arena, parse_arena, nl, &circuit, cards, "")) else null;
     const tuning = if (nl.tunable.len != 0 and run.point == null and run.prefix.len == 0) try variants.Tuning.init(core.gpa, lib, sim_arena, parse_arena, nl, &circuit, cards) else null;
     errdefer if (tuning) |t| t.deinit();
-    if (plan.variants.refs.len != 0 or tuning != null) try circuit.countParams();
+    if (plan.variants.refs.len != 0 or tuning != null or wcd != null) try circuit.countParams();
     card_opts.sample = nl.deck.sample;
     card_opts.card_names = card_names;
     const queries = try analyses.queries(sim_arena, cards_rows, circuit.n, false, out.bindings, cards, card_opts, plan.fanout);
@@ -353,7 +378,8 @@ fn buildOne(lib: *const device.Library, sim_arena: Allocator, parse_arena: Alloc
         if (!@import("builtin").is_test) std.log.err("netlist: .mosra needs a .tran to stress the devices: {s}", .{nl.deck.mosra.?.line});
         return error.UnsupportedCard;
     };
-    return .{ .rebuilds = plan.rebuilds, .prepared = .{ .circuit = circuit, .tuner = tuner, .tuning = tuning, .deck = .{
+    const ov = try prepared_opvars.opVars(sim_arena, parse_arena, lib, &circuit, cards, out.probes, out.probe_labels, nl, queries);
+    return .{ .rebuilds = plan.rebuilds, .prepared = .{ .circuit = circuit, .tuner = tuner, .tuning = tuning, .wcd = wcd, .sss = try variants.sssCards(sim_arena, nl.deck), .deck = .{
         .probes = out.probes,
         .probe_labels = out.probe_labels,
         .source_node = out.source_node,
@@ -382,6 +408,14 @@ fn buildOne(lib: *const device.Library, sim_arena: Allocator, parse_arena: Alloc
             break :blk own;
         } else null,
         .stims = try prepared_deck.stims(sim_arena, nl.deck.stims),
+        .soa = if (deck_opts.soa) .{ .max_warns = deck_opts.max_warns, .limits = try prepared_soa.limits(sim_arena, nl, &nb, &circuit) } else .{},
+        .opvars = ov.vars,
+        .opvar_probes = ov.probes,
+        .opvar_labels = ov.labels,
+        .emir_ports = try prepared_deck.portCounts(sim_arena, lib, &circuit),
+        .em_recovery = deck_opts.em_recovery,
+        .card_models = try prepared_deck.cardModels(sim_arena, parse_arena, nl, cards),
+        .emir_file = if (nl.deck.emir_file) |f| try sim_arena.dupe(u8, f) else null,
     } } };
 }
 
@@ -401,6 +435,8 @@ test namesNoOutput {
 test {
     _ = dialect_mod;
     _ = prepared_deck;
+    _ = prepared_opvars;
+    _ = prepared_soa;
     _ = @import("tests/builder.zig");
     _ = @import("tests/prepared.zig");
     _ = @import("tests/models.zig");

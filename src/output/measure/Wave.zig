@@ -9,7 +9,7 @@
 //! Equations"], [CR .MEASURE (AVG, EM_AVG, ...)].
 //!
 //! Contents:
-//! - fields `result`, `analysis`, `values`, `done`
+//! - fields `result`, `analysis`, `values`, `done`, `json`
 //! - `pub const Done = struct` with `pub fn take(*Done) error{NoSuchVector}![3]f64`
 //! - `pub const Error = error{NoSuchVector}`
 //! - `pub const Jitter`, `pub const EmAvg` and `pub const RelError` (each `pub fn feed`, `result`/`value`)
@@ -23,6 +23,8 @@
 //! - `pub fn extremum(Wave, Clause, scan.Extremum.Op) Error!scan.Stat`
 //! - `pub fn jitter(Wave, Clause) error{ NoSuchVector, OutOfInterval }!Jitter`
 //! - `pub fn emAvg(Wave, Clause) Error!scan.Integral`, `pub fn rmsInteg(Wave, Clause, bool) Error!scan.Integral`
+//! - `pub fn record(Wave, []const u8, f64, results_json.Extra) Writer.Error!void`
+//! - `pub fn positiveArea(v0: f64, v1: f64, dx: f64) f64`
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -34,6 +36,8 @@ const Waveform = columns.Waveform;
 const Part = columns.Part;
 const Clause = core.MeasureClause;
 const Kind = core.query.Kind;
+const results_json = @import("json.zig");
+const Writer = std.Io.Writer;
 const Wave = @import("Wave.zig");
 
 result: core.Result,
@@ -42,6 +46,8 @@ analysis: Kind,
 values: []const f64 = &.{},
 /// What the card found while its run went, read in place of `result`.
 done: ?*Done = null,
+/// Where `evaluate` also writes each line as a JSON result.
+json: ?results_json.Json = null,
 
 /// A card's passes as its run found them (`core.Measured`), handed to the
 /// evaluator in the order it reads them. Borrows `found`.
@@ -330,6 +336,20 @@ pub fn rmsInteg(w: Wave, c: Clause, rms: bool) Error!scan.Integral {
     return s.result();
 }
 
+/// Writes card `name`'s line to `json` too, when set.
+pub fn record(w: Wave, name: []const u8, value: f64, extra: results_json.Extra) Writer.Error!void {
+    if (w.json) |j| try results_json.writeResult(j, name, value, extra, null);
+}
+
+/// Area under max(v, 0) over one linear segment from `v0` to `v1`, `dx`
+/// wide; `--emir` folds its EM_AVG halves with it too (#237).
+pub fn positiveArea(v0: f64, v1: f64, dx: f64) f64 {
+    if (v0 >= 0 and v1 >= 0) return 0.5 * (v0 + v1) * dx;
+    if (v0 <= 0 and v1 <= 0) return 0;
+    const hi = @max(v0, v1);
+    return 0.5 * hi * dx * hi / (hi - @min(v0, v1));
+}
+
 // ---- private ----
 
 fn segment(w: Wave, c: Clause, pass: scan.At) Error!f64 {
@@ -339,14 +359,6 @@ fn segment(w: Wave, c: Clause, pass: scan.At) Error!f64 {
     var s = pass;
     for (0..w.len()) |i| if (s.feed(x.get(i), y.get(i))) break;
     return s.value;
-}
-
-/// Area under max(v, 0) over one linear segment from `v0` to `v1`, `dx` wide.
-fn positiveArea(v0: f64, v1: f64, dx: f64) f64 {
-    if (v0 >= 0 and v1 >= 0) return 0.5 * (v0 + v1) * dx;
-    if (v0 <= 0 and v1 <= 0) return 0;
-    const hi = @max(v0, v1);
-    return 0.5 * hi * dx * hi / (hi - @min(v0, v1));
 }
 
 test "one crossings scan finds what when finds for each raised count" {

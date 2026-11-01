@@ -25,6 +25,7 @@ const op = @import("dc/op.zig");
 const op_lanes = @import("dc/op_lanes.zig");
 const sweep_lanes = @import("sweep/lanes.zig");
 const tran = @import("tran/tran.zig");
+const gpu_devices = @import("gpu/devices.zig");
 const exec_config = @import("exec_config.zig");
 const dispatch = @import("dispatch.zig");
 const executor = @import("executor.zig");
@@ -164,9 +165,14 @@ pub fn executeGpuBatch(self: *Executor) QueryError!types.Result {
     const g = members.len;
     // Waves bound the host: each member's circuit, run and solver state
     // exist only for its wave, and one nothing reads afterwards is freed
-    // with it. One wave unless the lanes would pass `gpu_wave_bytes`.
+    // with it. One wave unless the lanes would pass `gpu_wave_bytes`, or
+    // the device budget, which binds only where the wave would not fit
+    // the device, and then over the host's `gpu_wave_min`.
     const per_lane = gpuLaneBytes(self.topology);
-    const wave = @max(gpu_wave_min, @min(g, gpu_wave_bytes / per_lane));
+    const host_wave = @max(gpu_wave_min, @min(g, gpu_wave_bytes / per_lane));
+    const device_wave = gpu_devices.waveLanes(gpu_devices.table(), gpuLaneDeviceBytes(self.topology));
+    const wave = @min(host_wave, device_wave);
+    if (self.config.knobs.gpu_stats != .off and wave < g) std.debug.print("gpu-lanes: {d} lanes in waves of {d} (host {d}, device {d})\n", .{ g, wave, host_wave, device_wave });
     const live = try self.work.allocator().alloc(usize, @min(g, wave));
     var first: usize = 0;
     while (first < g) : (first += wave) {
@@ -393,6 +399,22 @@ pub fn gpuMembers(self: *Executor) !struct { []*Executor, []QueryError!types.Res
 /// about 2.3 KB per unknown on a 72-unknown deck; this errs high.
 fn gpuLaneBytes(topology: *const Circuit) usize {
     return 4096 * (@as(usize, topology.n) + @as(usize, topology.nnz) / 4) + 64 * 1024;
+}
+
+/// Device bytes one GPU lane holds in `GpuLanes.init`, over-estimated
+/// where its sizes are known only later: 36 n-vectors (the planes and
+/// iterates, gear 6's history ring, a probe ring over every unknown), 6
+/// nnz-planes (G, C, A and an LU fill of three times nnz), each batch's
+/// packed rows and 4 KiB of per-lane scalars and reports.
+// ponytail: the transient lane state only; HB's harmonic planes are not
+// counted.
+fn gpuLaneDeviceBytes(topology: *const Circuit) usize {
+    var bytes: usize = 8 * (36 * (@as(usize, topology.n) + 1) + 6 * (@as(usize, topology.nnz) + 1)) + 4096;
+    for (topology.batches) |b| if (b.hooks.gpu_payload) |payload| {
+        const p = payload(b.ctx);
+        bytes += p.models.len + 4 * p.model_of.len + p.instances.len + p.states.len + 8 * p.lim_x.len;
+    };
+    return bytes;
 }
 
 /// `executeBatch`'s AC-family branch: every live lane's leading

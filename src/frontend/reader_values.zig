@@ -7,9 +7,11 @@
 //! - `pub fn readValue(r: *R, f: *F, frame: *const Frame, subst_names: bool, geometry: bool) Error!Value`
 //! - `pub fn valueAt(r: *R, t: []const u8, f: *F, frame: *const Frame, subst_names: bool, geometry: bool) Error!Value`
 //! - `pub fn kvValue(r: *R, f: *F, frame: *const Frame, geometry: bool) Error!Value`
+//! - `pub fn literalValue(r: *const R, f: *F) Error!?f64`
 //! - `pub fn junkNumber(w: []const u8) bool`
 //! - `pub fn numberByte(c: u8) bool`
 //! - `pub fn refuseOperatorField(r: *R, line: []const u8, t: []const u8) Error!void`
+//! - `pub fn operatorLed(r: *const R, t: []const u8) bool`
 //! - `pub fn nameValue(r: *R, name: []const u8, frame: *const Frame, geometry: bool) Error!Value`
 //! - `pub fn exprValue(r: *R, text: []const u8, frame: *const Frame, geometry: bool) Error!Value`
 //! - `pub fn fold(r: *R, from: usize, frame: *const Frame, geometry: bool) Error!Value`
@@ -101,16 +103,7 @@ pub fn Methods(comptime S: type) type {
             // HSPICE reads a brace as a name byte, so `{...}` is a word there
             // and goes to the bare-value rules (#203).
             if ((rest[0] == '{' and !F.isWord(rest)) or rest[0] == '\'') return r.readValue(f, frame, true, geometry);
-            // A lone number literal (`w=0.5u`) needs no compile; nor does
-            // ngspice's `r=10%3`, which it reads as 10 (`junkNumber`, #200).
-            if (std.ascii.isDigit(rest[0]) or rest[0] == '.') {
-                const save = f.pos;
-                const w = f.next().?;
-                const lone = expr.numberLen(w) == w.len or (r.dialect == .ngspice and junkNumber(w));
-                if (lone and !expr.isOperator(f.nextByte() orelse ' '))
-                    return .{ .num = S.parseNum(w) orelse return error.ParseError };
-                f.pos = save;
-            }
+            if (try r.literalValue(f)) |n| return .{ .num = n };
             const mark = r.scratch.mark();
             defer r.scratch.reset(mark);
             const start = f.pos;
@@ -120,6 +113,21 @@ pub fn Methods(comptime S: type) type {
             if (ops.len == 1 and ops[0].code == .num) return .{ .num = r.scratch.consts.items[ops[0].a] };
             if (ops.len == 1 and ops[0].code == .ident) return r.nameValue(r.scratch.names.items[ops[0].a], frame, geometry);
             return r.fold(mark.ops, frame, geometry);
+        }
+
+        /// The value after `key=` when it is a lone number literal (`w=0.5u`),
+        /// which needs no compile, or ngspice's `r=10%3`, read as 10
+        /// (`junkNumber`, #200): `f` moves past it. Null, `f` unmoved, for
+        /// anything else. The line's text alone decides it, never a scope.
+        pub fn literalValue(r: *const R, f: *F) Error!?f64 {
+            const rest = f.rest();
+            if (rest.len == 0 or !(std.ascii.isDigit(rest[0]) or rest[0] == '.')) return null;
+            const save = f.pos;
+            const w = f.next().?;
+            const lone = expr.numberLen(w) == w.len or (r.dialect == .ngspice and junkNumber(w));
+            if (lone and !expr.isOperator(f.nextByte() orelse ' ')) return S.parseNum(w) orelse return error.ParseError;
+            f.pos = save;
+            return null;
         }
 
         /// Whether ngspice reads field `w` as one number token whose rest it
@@ -150,14 +158,18 @@ pub fn Methods(comptime S: type) type {
         /// read, as do X cards and dot cards. tests/frontend/lower.zig
         /// `element` refuses the same fields.
         pub fn refuseOperatorField(r: *R, line: []const u8, t: []const u8) Error!void {
-            if (!F.isWord(t)) return;
+            if (r.operatorLed(t)) return r.unsupported(line, "an operator where a name or value belongs");
+        }
+
+        /// Whether `refuseOperatorField` refuses field `t`.
+        pub fn operatorLed(r: *const R, t: []const u8) bool {
+            if (!F.isWord(t)) return false;
             const leads: []const u8 = switch (r.dialect) {
                 .ngspice => "%\\*/^|&?",
                 .hspice => "%\\",
                 .spectre => "",
             };
-            if (std.mem.indexOfScalar(u8, leads, t[0]) == null) return;
-            return r.unsupported(line, "an operator where a name or value belongs");
+            return std.mem.indexOfScalar(u8, leads, t[0]) != null;
         }
 
         /// A bare name: substituted when a scope defines it.

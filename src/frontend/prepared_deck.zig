@@ -1,7 +1,7 @@
 //! The published deck tables. In: the parse arena's `.meas`, `.stim`,
-//! `.ic` and `.save` cards and the builder's AC overrides. Out: the same
-//! rows copied into the session arena, on circuit rows, so the deck outlives
-//! the parse.
+//! `.ic` and `.save` cards, the builder's AC overrides and card table, and
+//! the frozen circuit. Out: the same rows copied into the session arena, on
+//! circuit rows and frozen batch positions, so the deck outlives the parse.
 //! Cites: none (house deck layout, core/deck.zig).
 //!
 //! Contents:
@@ -10,6 +10,9 @@
 //! - `pub fn nodeRows(arena: Allocator, nb: *const builder.NetBuilder, items: []const netlist.Ic) Allocator.Error![]const core.Ic`
 //! - `pub fn measures(arena: Allocator, cards: []const core.Measure) Allocator.Error![]const core.Measure`
 //! - `pub fn acOverrides(arena: Allocator, cards: []const requests.CardRef, names: []const []const u8, values: []const f64) error{ OutOfMemory, InvalidAcOverride }![]const core.AcOverride`
+//! - `pub fn frozenIndices(scratch: Allocator, cards: []requests.CardRef, circuit: *const device.Circuit) !void`
+//! - `pub fn cardModels(sim_arena: Allocator, scratch: Allocator, nl: *const netlist.Netlist, cards: []const requests.CardRef) !requests.CardNames`
+//! - `pub fn portCounts(arena: Allocator, lib: *const device.Library, circuit: *const device.Circuit) ![]const u32`
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -18,6 +21,7 @@ const core = @import("core");
 const requests = core.query;
 const netlist = @import("netlist");
 const builder = @import("builder");
+const device = @import("device");
 const NO_NODE = netlist.none;
 
 /// Narrows the published outputs to the `.save` labels, in place. The
@@ -109,6 +113,42 @@ pub fn acOverrides(
         } else return error.InvalidAcOverride;
     }
     return overrides;
+}
+
+/// Renumbers each card's `index` from its add ordinal to its instance's
+/// place in the frozen batch, which a mixed batch partitions
+/// (`Hooks.original_ids`): the index every tape, hook and `ParamRef` reads.
+pub fn frozenIndices(scratch: Allocator, cards: []requests.CardRef, circuit: *const device.Circuit) !void {
+    for (circuit.batches, circuit.batch_types) |b, t| {
+        const ids: []const u32 = if (b.hooks.original_ids) |original| original(b.ctx) else &.{};
+        if (ids.len == 0) continue;
+        std.debug.assert(ids.len == b.count);
+        const at = try scratch.alloc(u32, ids.len);
+        for (ids, 0..) |id, k| at[id] = @intCast(k);
+        for (cards) |*c| if (c.type == t) {
+            c.index = at[c.index];
+        };
+    }
+}
+
+/// `Deck.card_models`: the `.model` card each card names, by its name, for
+/// `--emir` (#237). A binned card's is its bin's.
+pub fn cardModels(sim_arena: Allocator, scratch: Allocator, nl: *const netlist.Netlist, cards: []const requests.CardRef) !requests.CardNames {
+    var by_name: std.StringHashMapUnmanaged([]const u8) = .empty;
+    for (nl.order) |e| {
+        const dev = nl.device(e);
+        if (dev.model) |m| try by_name.put(scratch, dev.name, m.name);
+    }
+    var named: std.ArrayList(requests.CardRef) = .empty;
+    for (cards) |c| if (by_name.get(c.name)) |m| try named.append(scratch, .{ .type = c.type, .index = c.index, .name = try sim_arena.dupe(u8, m) });
+    return requests.CardNames.init(sim_arena, named.items);
+}
+
+/// `Deck.emir_ports`: each batch's port count, from its type's vtable.
+pub fn portCounts(arena: Allocator, lib: *const device.Library, circuit: *const device.Circuit) ![]const u32 {
+    const ports = try arena.alloc(u32, circuit.batch_types.len);
+    for (ports, circuit.batch_types) |*p, t| p.* = lib.vtable(t).num_ports;
+    return ports;
 }
 
 // ---- private ----

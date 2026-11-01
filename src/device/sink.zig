@@ -2,7 +2,8 @@
 //! planes in, one inline accessor per gather or stamp out. `Sink` serves
 //! the host (adds, or staged stores) and the per-instance GPU kernels
 //! (staging stores); `RecordSink` wraps a host sink to record every write
-//! for the latency bypass. Cites dev/devices/gpu-evaluation.md for the
+//! for the latency bypass; `LocalSink` stamps one instance in its own
+//! unknowns for the operating-point variables (#236). Cites dev/devices/gpu-evaluation.md for the
 //! staging and reduce order, and 01 1.10 for store-not-add on the GPU.
 //!
 //! Contents:
@@ -10,6 +11,7 @@
 //! - `pub const rec_res`, `rec_jac`, `rec_q`, `rec_qjac`
 //! - `pub fn RecordSink(comptime Inner: type) type`
 //! - `pub fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool, comptime staged: bool) type`
+//! - `pub fn LocalSink(comptime D: type) type`
 //! - sink members: `skip_g`, `skip_c`, `on_device`, `skip_tape`, `stores`,
 //!   `x`, `xOld`, `gath`, `rhsRow`, `lim`, `setLim`, `model`, `inst`,
 //!   `scatterRes`, `scatterJac`, `scatterQ`, `tapeQ`, `scatterQJac`,
@@ -263,6 +265,56 @@ pub fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool, 
                 .xo = @constCast(xo),
                 .q_tape = if (comptime @hasDecl(D, "q")) b.q_tape.ptr else {},
             };
+        }
+    };
+}
+
+/// `Hooks.local_eval`'s sink: one instance's stamps in its own unknowns
+/// (`rhsRow` is the local row), on `inst_`, a copy of its Instance. Ground
+/// unknowns keep their rows and columns.
+pub fn LocalSink(comptime D: type) type {
+    const n_u: usize = comptime contract.nU(D);
+    return struct {
+        batch: *const DeviceBatch(D),
+        xs: []const f64,
+        inst_: *D.Instance,
+        out: abi.LocalEval,
+
+        pub const skip_g = false;
+        pub const skip_c = false;
+        pub const on_device = false;
+        pub const skip_tape = true;
+        const Ls = @This();
+
+        pub inline fn x(s: *const Ls, gi: u32) f64 {
+            return s.xs[gi];
+        }
+        pub inline fn gath(s: *const Ls, id: u32, u: usize) u32 {
+            return s.batch.gath[@as(usize, id) * n_u + u];
+        }
+        pub inline fn rhsRow(_: *const Ls, _: u32, ru: usize) u32 {
+            return @intCast(ru);
+        }
+        pub inline fn lim(s: *const Ls, id: u32, comptime u: usize) f64 {
+            return s.xs[s.gath(id, u)];
+        }
+        pub inline fn model(s: *const Ls, id: u32) *const D.Model {
+            return s.batch.model(id);
+        }
+        pub inline fn inst(s: *const Ls, _: u32) *D.Instance {
+            return s.inst_;
+        }
+        pub inline fn scatterRes(s: *const Ls, row: u32, val: f64) void {
+            s.out.f[row] += val;
+        }
+        pub inline fn scatterJac(s: *const Ls, _: u32, comptime ru: usize, comptime cu: usize, val: f64) void {
+            s.out.g[ru * n_u + cu] += val;
+        }
+        pub inline fn scatterQ(s: *const Ls, row: u32, qv: f64) void {
+            s.out.q[row] += qv;
+        }
+        pub inline fn scatterQJac(s: *const Ls, _: u32, comptime ru: usize, comptime cu: usize, val: f64) void {
+            s.out.c[ru * n_u + cu] += val;
         }
     };
 }

@@ -1,7 +1,8 @@
 //! Numeric types and kernels every layer shares: f64 vector kernels (slices
 //! in, a slice or a scalar out), complex arithmetic, the solver tolerances,
 //! the thread budget and the BBD row partition. The frequency grid lives in
-//! `freq_sweep.zig` and is re-exported here.
+//! `freq_sweep.zig` and the standard normal distribution in `normal.zig`;
+//! both are re-exported here.
 //! Cites: LAPACK dnrm2 (`norm2`'s rescaling); tests/codegen.zig probes
 //! `dot`, `sum` and `normInf` (NEGATIVE against the scalar loop).
 //!
@@ -11,6 +12,7 @@
 //! - `pub const Complex = struct`: `zero`, `mag`, `magSq`, `add`, `sub`, `mul`, `div`, `scale`
 //! - `pub const Tolerances = struct`
 //! - `pub const FreqSweep`, `pub const SweepKind` (from `freq_sweep.zig`)
+//! - `pub const normalQuantile`, `pub const normalCdf`, `pub const normalTail`, `pub const erfc` (from `normal.zig`)
 //! - `pub fn zeroSimd(buf: []f64) void`
 //! - `pub fn copySimd(dst: []f64, src: []const f64) void`
 //! - `pub fn axpy(dst: []f64, a: f64, src: []const f64) void`
@@ -24,6 +26,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const freq_sweep = @import("freq_sweep.zig");
+const normal = @import("normal.zig");
 
 /// Thread budget a solver may use; its fields are read together at dispatch.
 pub const Execution = struct {
@@ -141,6 +144,15 @@ pub const Tolerances = struct {
 pub const FreqSweep = freq_sweep.FreqSweep;
 /// SPICE's `.ac`/`.noise`/`.sp` grid spellings, plus HSPICE's POI list.
 pub const SweepKind = freq_sweep.SweepKind;
+
+/// The standard normal quantile Φ⁻¹(u); see `normal.zig`.
+pub const normalQuantile = normal.normalQuantile;
+/// Φ(x), the standard normal distribution function.
+pub const normalCdf = normal.normalCdf;
+/// Q(x) = 1 - Φ(x), relative precision kept far into the tail.
+pub const normalTail = normal.normalTail;
+/// The complementary error function, below 1 ulp.
+pub const erfc = normal.erfc;
 
 // Elementwise kernels are plain loops, exact at any width; LLVM's loop
 // vectorizer (on since Zig 0.18) emits their vector code. `dot` and `sum`

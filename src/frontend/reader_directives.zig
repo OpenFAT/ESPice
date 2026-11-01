@@ -1,13 +1,17 @@
-//! Directive cards: analyses, `.options`, `.ic`, `.save`, `.step`, `.mosra`,
-//! `.sample`, and the global `.param` fold.
-//! Cites: ngspice inp.c; HSPICE [CR] .SAVE, .SAMPLE, .MOSRA, [SA] Ch.29.
+//! Directive cards: analyses, `.options`, `.ic`, `.save`, `.probe`, `.step`,
+//! `.wcd`, `.mosra`, `.sample`, and the global `.param` fold.
+//! Cites: ngspice inp.c; HSPICE [CR] .SAVE, .PROBE, .SAMPLE, .MOSRA, [SA]
+//! Ch.29; #236-#240.
 //!
 //! Contents:
 //! - `pub fn Methods(comptime S: type) type`
 //! - `pub fn readArgs(r: *R, f: *F) Error![]const Value`
-//! - `pub fn readVpiOptions(r: *R, line: []const u8) Error!void`
+//! - `pub fn cutFail(r: *R, line: []const u8, f: *F) Error![]const u8`
+//! - `pub fn readFileOptions(r: *R, line: []const u8) Error!void`
 //! - `pub fn isStep(line: []const u8) bool`
+//! - `pub fn isWcd(line: []const u8) bool`
 //! - `pub fn readDirective(r: *R, line: []const u8) Error!void`
+//! - `pub fn readProbe(r: *R, line: []const u8) Error!void`
 //! - `pub fn readMosra(r: *R, line: []const u8, args: []const Value) Error!Mosra`
 //! - `pub fn readSample(args: []const Value) Error!core.query.NoiseSample`
 //! - `pub fn readSaveOp(r: *R, line: []const u8, f: *F) Error!void`
@@ -33,6 +37,7 @@ const InternPool = core.InternPool;
 const assert = std.debug.assert;
 const reader = @import("reader.zig");
 const card_rows = @import("card_rows.zig");
+const netlist_view = @import("netlist_view.zig");
 const card_table = @import("card_table.zig");
 const reader_frame = @import("reader_frame.zig");
 const sweep_points = @import("sweep_points.zig");
@@ -45,6 +50,7 @@ const Mosra = card_rows.Mosra;
 const cardOf = card_table.cardOf;
 const isSn = card_table.isSn;
 const nodeText = reader_frame.nodeText;
+const isOpVar = netlist_view.isOpVar;
 const Frame = reader_frame.Frame;
 const setsKey = card_table.setsKey;
 const Grid = sweep_points.Grid;
@@ -89,19 +95,44 @@ pub fn Methods(comptime S: type) type {
             return args.items;
         }
 
-        /// A `.options` card that sets `vpi=` (ESPice's, #197): each
-        /// `vpi="app.so"` names a VPI application (LRM 12.33) for `vpi_apps`,
-        /// path case kept; the card's other options read as any `.options`.
-        pub fn readVpiOptions(r: *R, line: []const u8) Error!void {
+        /// Cuts `fail='expr'` (quoted or braced) out of analysis card
+        /// `line` and points `f`, past the card, at what is left; returns
+        /// the expression's text, "" when no field is `fail=`.
+        pub fn cutFail(r: *R, line: []const u8, f: *F) Error![]const u8 {
+            var g = f.*;
+            while (g.next()) |t| {
+                if (!std.mem.eql(u8, t, "fail") or !g.takeEq()) continue;
+                const v = g.next() orelse return r.failed(line, error.ParseError);
+                if (!F.isQuote(v[0]) and !(v[0] == '{' and v[v.len - 1] == '}')) return r.failed(line, error.ParseError);
+                const start = @intFromPtr(t.ptr) - @intFromPtr(line.ptr);
+                const end = @intFromPtr(v.ptr) - @intFromPtr(line.ptr) + v.len;
+                f.* = F.init(try std.mem.concat(r.arena, u8, &.{ line[0..start], " ", line[end..] }));
+                _ = f.next(); // the card
+                return F.body(v);
+            }
+            return "";
+        }
+
+        /// A `.options` card that names a file, path case kept: each
+        /// `vpi="app.so"` (ESPice's, #197) a VPI application (LRM 12.33) for
+        /// `vpi_apps`, `soalimits="file.json"` (#238) the SOA limits for
+        /// `soa_file`, `emirfile="f"` (#237) the `--emir` file. The card's
+        /// other options read as any `.options`.
+        pub fn readFileOptions(r: *R, line: []const u8) Error!void {
             var f = F.init(line);
             _ = f.next(); // the card
             var rest: std.ArrayList(u8) = .empty;
             try rest.appendSlice(r.arena, ".options");
             while (f.next()) |t| {
-                if (std.mem.eql(u8, t, "vpi")) {
+                if (std.mem.eql(u8, t, "vpi") or std.mem.eql(u8, t, "soalimits") or std.mem.eql(u8, t, "emirfile")) {
                     const eq = f.next() orelse return r.failed(line, error.ParseError);
                     if (eq[0] != '=') return r.failed(line, error.ParseError);
-                    try r.vpi_apps.append(r.arena, r.pathOf(&f) catch |err| return r.failed(line, err));
+                    const path = r.pathOf(&f) catch |err| return r.failed(line, err);
+                    switch (t[0]) {
+                        'v' => try r.vpi_apps.append(r.arena, path),
+                        's' => r.soa_file = path,
+                        else => r.emir_file = path,
+                    }
                     continue;
                 }
                 try rest.append(r.arena, ' ');
@@ -120,6 +151,13 @@ pub fn Methods(comptime S: type) type {
             return c == .step;
         }
 
+        /// True for a `.wcd` directive line.
+        pub fn isWcd(line: []const u8) bool {
+            var f = F.init(line);
+            const c = cardOf(f.next().?[1..]) orelse return false;
+            return c == .wcd;
+        }
+
         pub fn readDirective(r: *R, line: []const u8) Error!void {
             r.card = line;
             var f = F.init(line);
@@ -128,13 +166,24 @@ pub fn Methods(comptime S: type) type {
             // takes the last one.
             if (card != null and card.? == .meas) return r.meas_lines.append(r.arena, line);
             const c = card orelse return r.unsupported(line, "unsupported card");
-            if (c == .ignored) return;
+            if (c == .wcd) {
+                if (r.wcd_line != null) return r.unsupported(line, "a second .wcd card");
+                r.wcd_line = line;
+                return;
+            }
+            if (c == .ignored) {
+                if (r.dialect != .ngspice and std.ascii.startsWithIgnoreCase(line, ".probe")) try r.readProbe(line);
+                return;
+            }
             if (c == .save and r.dialect == .hspice) return r.readSaveOp(line, &f);
             // HSPICE `.store` checkpoints the process on a wall-clock
             // schedule for an OS-level restore [CR .STORE]; the results do not
             // depend on it.
             if (c == .store) return std.log.warn("netlist: .store: checkpoints are not written; the run is not restartable", .{});
-            if (c == .options and setsKey(line, "vpi")) return r.readVpiOptions(line);
+            if (c == .options and (setsKey(line, "vpi") or setsKey(line, "soalimits") or setsKey(line, "emirfile"))) return r.readFileOptions(line);
+            // `FAIL='expr'` keeps its text: `readArgs` would fold it before
+            // the `.meas` cards it names are read.
+            const fail = if (c == .analysis and setsKey(line, "fail")) try r.cutFail(line, &f) else "";
             const args = r.readArgs(&f) catch |err| return r.failed(line, err);
             switch (c) {
                 .step => try r.steps.append(r.arena, r.readStep(args) catch |err| return r.failed(line, err)),
@@ -142,7 +191,15 @@ pub fn Methods(comptime S: type) type {
                     // HSPICE's `.temp t1 t2 ...` lists run temperatures; ngspice's
                     // three-number form is a sweep.
                     const temp_list = kind == .temp and args.len > 1 and r.dialect == .hspice;
-                    const swept = r.readSweep(kind, args) catch |err| return r.failed(line, err);
+                    var swept = r.readSweep(kind, args) catch |err| return r.failed(line, err);
+                    const scaled = swept.sweep == .monte and swept.sweep.monte.scales.len != 0;
+                    if (scaled != (fail.len != 0)) return r.unsupported(line, "SIGMA_SCALE= without FAIL=, or FAIL= without SIGMA_SCALE=");
+                    if (scaled) {
+                        if (kind != .tran and kind != .ac and kind != .dc) return r.unsupported(line, "SIGMA_SCALE on a card other than .tran, .ac or .dc");
+                        // The lane ensemble (`.dc MONTE=n`) measures no trial.
+                        if (kind == .dc and swept.args.len == 0) return r.unsupported(line, "SIGMA_SCALE on a .dc with no sweep of its own");
+                        swept.sweep.monte.fail.text = fail;
+                    }
                     if (!temp_list) try appendAnalysis(r.arena, &r.analyses, .{ .kind = kind, .args = swept.args, .sweep = swept.sweep, .line = r.written(line), .dialect = r.dialect, .sn = isSn(line) });
                     if (kind == .temp and (args.len == 1 or temp_list)) try r.config.append(r.arena, .{ .temp = true, .args = args, .line = r.written(line) });
                 },
@@ -181,10 +238,32 @@ pub fn Methods(comptime S: type) type {
                     },
                     .name => |n| if (std.ascii.eqlIgnoreCase(n, "all")) {
                         r.save_all = true;
+                    } else if (n[0] == '@') {
+                        // A device operating-point variable (`@m1[gm]`, #236);
+                        // `prepare` resolves it or refuses the deck.
+                        const label = try r.arena.dupe(u8, n);
+                        try r.opvar_saves.append(r.arena, std.ascii.lowerString(label, label));
+                        // Holds `saves` non-empty, so the probes narrow.
+                        try r.saves.append(r.arena, label);
                     },
                     else => {},
                 },
                 else => {},
+            }
+        }
+
+        /// HSPICE `.probe` [CR .PROBE], and Spectre's `save` as spectre.zig
+        /// rewrites it: `op` saves every device's operating-point variables
+        /// and an `isOpVar` name that one (#236). Every other output is
+        /// written anyway, as HSPICE does without `.option probe`.
+        pub fn readProbe(r: *R, line: []const u8) Error!void {
+            var it = std.mem.tokenizeAny(u8, line, " \t,");
+            _ = it.next(); // the card
+            while (it.next()) |t| {
+                const name = try std.ascii.allocLowerString(r.arena, t);
+                if (std.mem.eql(u8, name, "op")) {
+                    r.probe_op = true;
+                } else if (isOpVar(r.dialect, name)) try r.opvar_saves.append(r.arena, name);
             }
         }
 

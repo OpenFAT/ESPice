@@ -4,7 +4,7 @@
 //!
 //! Contents:
 //! - `pub fn Methods(comptime S: type) type`
-//! - `pub fn run(arena: Allocator, src: []const u8, dialect: Dialect, live_params: []const []const u8) (Error || error{UnknownParameter})!Netlist`
+//! - `pub fn run(arena: Allocator, src: []const u8, dialect: Dialect, live_params: []const []const u8, opts: ParseOptions) (Error || error{UnknownParameter})!Netlist`
 //! - `pub fn nodeValues(arena: Allocator, cards_args: []const []const Value, nets: NetLookup) Error![]const Ic`
 
 const std = @import("std");
@@ -37,6 +37,8 @@ const nodeText = reader_frame.nodeText;
 const resolve = reader_frame.resolve;
 const Frame = reader_frame.Frame;
 const ModelLine = reader_frame.ModelLine;
+const ParseOptions = reader_frame.ParseOptions;
+const scan_threads_max = reader_frame.scan_threads_max;
 const top_level = reader_frame.top_level;
 const seedOption = card_table.seedOption;
 const analysisOf = card_table.analysisOf;
@@ -49,8 +51,9 @@ pub fn Methods(comptime S: type) type {
         const R = reader.Reader(S);
         const NetLookup = R.NetLookup;
         const isStep = R.isStep;
+        const isWcd = R.isWcd;
 
-        pub fn run(arena: Allocator, src: []const u8, dialect: Dialect, live_params: []const []const u8) (Error || error{UnknownParameter})!Netlist {
+        pub fn run(arena: Allocator, src: []const u8, dialect: Dialect, live_params: []const []const u8, opts: ParseOptions) (Error || error{UnknownParameter})!Netlist {
             var line_hint: usize = undefined;
             const text: []const u8 = if (S.fold_case) blk: {
                 const buf = try arena.alloc(u8, src.len);
@@ -131,7 +134,8 @@ pub fn Methods(comptime S: type) type {
             // (#100). ngspice draws agauss/gauss/unif/aunif on every run, and
             // a seed makes that one reproducible sample. `.dcmatch`,
             // `.acmatch` and `.dcsens` without a `.variation` block read the
-            // mismatch off the calls (`variants.Planner.siteVariations`).
+            // mismatch off the calls (`variants.Planner.siteVariations`), as
+            // `.wcd` (#240) does.
             // ponytail: a top-level `.param` read in walk 1 stays nominal;
             // the PDK distributions sit in model cards and subcircuit params.
             var monte_card = false;
@@ -140,6 +144,7 @@ pub fn Methods(comptime S: type) type {
             for (directive_lines.items) |i| {
                 const line = r.lines.items[i];
                 seed = seed or seedOption(line);
+                mismatch = mismatch or isWcd(line);
                 const kind = analysisOf(line) orelse continue;
                 monte_card = monte_card or setsKey(line, "monte");
                 mismatch = mismatch or kind == .dcmatch or kind == .acmatch or kind == .dcsens;
@@ -184,11 +189,16 @@ pub fn Methods(comptime S: type) type {
             };
             try r.binOptions();
 
-            for (top_devices.items) |i| try r.readDevice(r.lines.items[i], r.kindOf(i), &top);
+            var scan_arenas: [scan_threads_max]std.heap.ArenaAllocator = undefined;
+            const scanned = try r.scanCards(top_devices.items, opts, &scan_arenas);
+            defer for (scan_arenas[0..scanned]) |s| s.deinit();
+            for (top_devices.items) |i| try r.readDevice(r.lines.items[i], r.kindOf(i), &top, if (scanned > 0) i else null);
             // The passes below read no one card.
             r.card = "";
             try r.shunts();
             try r.readMeasures();
+            try r.compileFails();
+            if (r.wcd_line) |line| r.wcd = try r.readWcd(line);
             var live = try r.resolveLive();
             live.conds = try r.liveConds();
             const scale = try r.arena.alloc(f64, live.slots.len);
@@ -237,13 +247,18 @@ pub fn Methods(comptime S: type) type {
                     .ic = try nodeValues(arena, r.ic_cards.items, nets),
                     .nodeset = try nodeValues(arena, r.nodeset_cards.items, nets),
                     .saves = if (r.save_all) &.{} else r.saves.items,
+                    .opvar_saves = r.opvar_saves.items,
+                    .probe_op = r.probe_op,
                     .foreign = r.foreign.items,
                     .vpi_apps = r.vpi_apps.items,
+                    .soa_file = r.soa_file,
+                    .emir_file = r.emir_file,
                     .measures = r.measures.items,
                     .steps = r.steps.items,
                     .data = r.data.items,
                     .variations = r.variations.items,
                     .optimize = r.optimize,
+                    .wcd = r.wcd,
                     .save_op = r.save_op,
                     .stims = r.stims.items,
                     .sample = r.sample,

@@ -16,7 +16,7 @@
 //! - `pub fn cardWave(result: core.Result, analysis: Kind, values: []const f64, i: usize, done: *Wave.Done) Wave`
 //! - `pub fn resolve(c: Clause, values: []const f64) error{OutOfInterval}!Clause`
 //! - `pub fn lastEvent(c: Clause) bool`
-//! - `pub fn paramValue(ops: []const core.MeasureOp, values: []const f64) f64`
+//! - `pub fn paramValue(ops: []const core.MeasureOp, values: []const f64, soa: f64) f64`
 //! - `Results.leaf`, public for `column.fold`
 
 const std = @import("std");
@@ -39,14 +39,17 @@ pub const Error = Writer.Error || error{ NoSuchVector, OutOfInterval };
 
 const nan = std.math.nan(f64);
 
-/// `paramValue`'s leaves: earlier cards' results by index.
+/// `paramValue`'s leaves: earlier cards' results by index, and the
+/// result's SOA excursions for `soa_count()`.
 const Results = struct {
     values: []const f64,
+    soa: f64,
 
     pub fn leaf(s: Results, op: core.MeasureOp, _: usize) f64 {
         return switch (op) {
             .num => |x| x,
             .measure => |k| if (k < s.values.len) s.values[k] else nan,
+            .soa_count => s.soa,
             .vector, .neg, .add, .sub, .mul, .div, .pow => nan,
         };
     }
@@ -68,6 +71,7 @@ pub fn evaluate(out: *Writer, m: core.Measure, w: Wave) Error!f64 {
             if (b.td_trig) b.td = trig;
             const targ = try defined(if (b.at == core.measure_no_at) try w.when(b) else b.at);
             try out.print("{s:<20}=  {f} targ=  {f} trig=  {f}\n", .{ m.name, sci(targ - trig, 6), sci(targ, 6), sci(trig, 6) });
+            try w.record(m.name, targ - trig, .{});
             return targ - trig;
         },
         .find, .deriv => {
@@ -76,72 +80,87 @@ pub fn evaluate(out: *Writer, m: core.Measure, w: Wave) Error!f64 {
                 if (w.len() != 1) return error.OutOfInterval;
                 const v = try defined((try w.waveform(a.vec, a.ops, a.vectype)).get(0));
                 try out.print("{s:<20}=  {f}\n", .{ m.name, sci(v, 6) });
+                try w.record(m.name, v, .{});
                 return v;
             }
             const at = if (a.at == core.measure_no_at) try defined(try w.when(b)) else a.at;
             const v = try defined(if (m.func == .find) try w.valueAt(a, at) else try w.slopeAt(a, at));
             try out.print("{s:<20}=  {f}\n", .{ m.name, sci(v, 6) });
+            try w.record(m.name, v, .{});
             return v;
         },
         .when => {
             const v = try defined(try w.when(a));
             try out.print("{s:<20}=   {f}\n", .{ m.name, sci(v, 5) });
+            try w.record(m.name, v, .{});
             return v;
         },
         .rms, .integ => {
             const r = try w.rmsInteg(a, m.func == .rms);
             try out.print("{s:<20}=   {f} from=  {f} to=  {f}\n", .{ m.name, sci(try defined(r.value), 5), sci(r.from, 5), sci(r.to, 5) });
+            try w.record(m.name, r.value, .{ .from = r.from, .to = r.to });
             return r.value;
         },
         .jitter => {
             const j = try w.jitter(a);
             try out.print("{s:<20}=  {f} pp=  {f} period=  {f} edges=  {d}\n", .{ m.name, sci(j.rms, 6), sci(j.pp, 6), sci(j.period, 6), j.edges });
+            try w.record(m.name, j.rms, .{});
             return j.rms;
         },
         .em_avg => {
             const r = try w.emAvg(a);
             try out.print("{s:<20}=  {f} from=  {f} to=  {f}\n", .{ m.name, sci(try defined(r.value), 6), sci(r.from, 6), sci(r.to, 6) });
+            try w.record(m.name, r.value, .{ .from = r.from, .to = r.to });
             return r.value;
         },
         .avg => {
             const r = try w.extremum(a, .avg);
-            try out.print("{s:<20}=  {f} from=  {f} to=  {f}\n", .{ m.name, sci(try defined(r.value), 6), sci(if (a.at == core.measure_no_at) a.from else a.at, 6), sci(r.at, 6) });
+            const from = if (a.at == core.measure_no_at) a.from else a.at;
+            try out.print("{s:<20}=  {f} from=  {f} to=  {f}\n", .{ m.name, sci(try defined(r.value), 6), sci(from, 6), sci(r.at, 6) });
+            try w.record(m.name, r.value, .{ .from = from, .to = r.at });
             return r.value;
         },
         .min, .max => {
             const r = try w.extremum(a, if (m.func == .min) .min else .max);
             try out.print("{s:<20}=  {f} at=  {f}\n", .{ m.name, sci(try defined(r.value), 6), sci(r.at, 6) });
+            try w.record(m.name, r.value, .{ .at = r.at });
             return r.value;
         },
         .min_at, .max_at => {
             const r = try w.extremum(a, if (m.func == .min_at) .min else .max);
             try out.print("{s:<20}=  {f} with=  {f}\n", .{ m.name, sci(try defined(r.at), 6), sci(r.value, 6) });
+            try w.record(m.name, r.at, .{});
             return r.at;
         },
         .pp => {
             const lo = try defined((try w.extremum(a, .min)).value);
             const hi = try defined((try w.extremum(a, .max)).value);
             try out.print("{s:<20}=  {f} from=  {f} to=  {f}\n", .{ m.name, sci(hi - lo, 6), sci(a.from, 6), sci(a.to, 6) });
+            try w.record(m.name, hi - lo, .{ .from = a.from, .to = a.to });
             return hi - lo;
         },
         .param => {
-            const v = try defined(paramValue(m.expr, w.values));
+            const v = try defined(paramValue(m.expr, w.values, w.result.soa_count));
             try out.print("{s:<20}=  {f}\n", .{ m.name, sci(v, 5) });
+            try w.record(m.name, v, .{});
             return v;
         },
         .err, .err1, .err2, .err3 => {
             const v = try defined(try w.relError(a, m.func));
             try out.print("{s:<20}=  {f}\n", .{ m.name, sci(v, 6) });
+            try w.record(m.name, v, .{});
             return v;
         },
         .thd, .snr, .sndr, .enob, .sfdr => {
             const v = try defined(fftFigure(try w.column(a.vec, 'm'), w.scale(), w.len(), a, m.func));
             try out.print("{s:<20}=  {f}\n", .{ m.name, sci(v, 6) });
+            try w.record(m.name, v, .{});
             return v;
         },
         .check_slew, .check_forbid, .check_require, .check_level, .dout => {
             const n = try checks.violations(w, out, m.name, a, b, m.func, m.check);
             try out.print("{s:<20}=  {d}\n", .{ m.name, n });
+            try w.record(m.name, @floatFromInt(n), .{});
             return @floatFromInt(n);
         },
     }
@@ -232,7 +251,7 @@ pub fn cardWave(result: core.Result, analysis: Kind, values: []const f64, i: usi
 pub fn resolve(c: Clause, values: []const f64) error{OutOfInterval}!Clause {
     var r = c;
     for (c.refs) |ref| {
-        const v = try defined(paramValue(ref.expr, values));
+        const v = try defined(paramValue(ref.expr, values, nan));
         switch (ref.field) {
             .val => r.val = v,
             .td => r.td = v,
@@ -249,10 +268,11 @@ pub fn lastEvent(c: Clause) bool {
     return c.rise == core.measure_last or c.fall == core.measure_last or c.cross == core.measure_last;
 }
 
-/// Returns a PARAM expression folded over the results in `values`; NaN
-/// when a result it reads is missing or it reads a vector.
-pub fn paramValue(ops: []const core.MeasureOp, values: []const f64) f64 {
-    return columns.fold(ops, Results{ .values = values });
+/// Returns a PARAM expression folded over the results in `values`,
+/// `soa_count()` reading `soa`; NaN when a result it reads is missing or
+/// it reads a vector.
+pub fn paramValue(ops: []const core.MeasureOp, values: []const f64, soa: f64) f64 {
+    return columns.fold(ops, Results{ .values = values, .soa = soa });
 }
 
 // ---- private ----
@@ -407,11 +427,11 @@ test "par() waveforms resolve their vectors, past the cached eight too" {
 }
 
 test "malformed PARAM postfix reads NaN" {
-    try std.testing.expect(std.math.isNan(paramValue(&.{.add}, &.{})));
-    try std.testing.expect(std.math.isNan(paramValue(&.{.neg}, &.{})));
-    try std.testing.expect(std.math.isNan(paramValue(&.{ .{ .num = 1 }, .{ .num = 2 } }, &.{})));
-    try std.testing.expect(std.math.isNan(paramValue(&.{.{ .measure = 7 }}, &.{1})));
+    try std.testing.expect(std.math.isNan(paramValue(&.{.add}, &.{}, nan)));
+    try std.testing.expect(std.math.isNan(paramValue(&.{.neg}, &.{}, nan)));
+    try std.testing.expect(std.math.isNan(paramValue(&.{ .{ .num = 1 }, .{ .num = 2 } }, &.{}, nan)));
+    try std.testing.expect(std.math.isNan(paramValue(&.{.{ .measure = 7 }}, &.{1}, nan)));
     const deep: [33]core.MeasureOp = @splat(.{ .num = 1 });
-    try std.testing.expect(std.math.isNan(paramValue(&deep, &.{})));
-    try std.testing.expectEqual(-6, paramValue(&.{ .{ .num = 2 }, .{ .measure = 0 }, .pow, .neg, .{ .num = 2 }, .sub }, &.{2}));
+    try std.testing.expect(std.math.isNan(paramValue(&deep, &.{}, nan)));
+    try std.testing.expectEqual(-6, paramValue(&.{ .{ .num = 2 }, .{ .measure = 0 }, .pow, .neg, .{ .num = 2 }, .sub }, &.{2}, nan));
 }

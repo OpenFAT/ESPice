@@ -163,7 +163,15 @@ fn waveform(t: *Translator, pos: *std.ArrayList(u8), ps: []const Param) Error!vo
 fn analysis(t: *Translator, kind: []const u8, nodes: []const []const u8, toks: []const Tok) Error!void {
     if (t.subckts.items.len > 0) return error.UnsupportedCard;
     if (toks.len > 0 and toks[toks.len - 1].is("{")) return error.UnsupportedCard; // child analyses
-    const ps = try spectre_params.params(t.arena, toks);
+    var ps = try spectre_params.params(t.arena, toks);
+    // `emirformat`/`emirfile` on any analysis turn on `--emir` (#237);
+    // the file is JSON whatever the format names.
+    if (spectre_params.find(ps, "emirformat") != null or spectre_params.find(ps, "emirfile") != null) {
+        try t.emit(".options emirfile={s}", .{if (spectre_params.find(ps, "emirfile")) |f| try spectre_params.value(t.arena, f) else "\"\""});
+        var rest: std.ArrayList(Param) = .empty;
+        for (ps) |p| if (!std.mem.eql(u8, p.key, "emirformat") and !std.mem.eql(u8, p.key, "emirfile")) try rest.append(t.arena, p);
+        ps = rest.items;
+    }
     const num = struct {
         fn of(arena: Allocator, list: []const Param, key: []const u8) Error!?[]const u8 {
             const v = spectre_params.find(list, key) orelse return null;

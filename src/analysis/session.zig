@@ -18,7 +18,7 @@
 //! `info`, `validateScope`, `contains`, `ready`, `readyCount`,
 //! `readyQueries`, `validateReady`, `templateOf`, `finished`, `released`,
 //! `outputIndex`, `release`, `failure`, `failureFrom`, `query`, `result`,
-//! `operatingPoint`, `Pool`, `init`, `deinit`, `add`, `fill`, `wait`,
+//! `operatingPoint`, `resultRead`, `idle`, `Pool`, `init`, `deinit`, `add`, `fill`, `wait`,
 //! `schemaOf`
 
 const std = @import("std");
@@ -331,12 +331,16 @@ pub const Session = struct {
             .all => true,
             .component => |component| self.rows.items(.component)[i] == component,
             .query => |id| @backingInt(id) == i or self.rows.items(.owner)[i] == id or
-                self.rows.items(.dependency)[@backingInt(id)] == @as(QueryId, @fromBackingInt(@intCast(i))),
+                self.rows.items(.dependency)[@backingInt(id)] == @as(QueryId, @fromBackingInt(@intCast(i))) or
+                self.rows.items(.reads)[@backingInt(id)] == @as(QueryId, @fromBackingInt(@intCast(i))),
         };
     }
 
     pub fn ready(self: *const Session, i: usize) bool {
         if (self.rows.items(.lanes)[i] != 0 or self.effectiveStatus(i).terminal()) return false;
+        // A result reader waits for its `.tran` to end, whatever the outcome.
+        const reads = self.rows.items(.reads)[i];
+        if (reads != none and !self.effectiveStatus(@backingInt(reads)).terminal()) return false;
         const dep = self.rows.items(.dependency)[i];
         return dep == none or self.rows.items(.status)[@backingInt(dep)] == .complete;
     }
@@ -407,7 +411,7 @@ pub const Session = struct {
     /// prerequisite OP goes too once no unreleased query reads it, and
     /// leaves the OP index, so a later query gets a new one. A query
     /// already released is left alone. `error.QueryNotReady` while it, or
-    /// a query reading its state, has not ended.
+    /// a query reading its state or result, has not ended.
     pub fn release(self: *Session, id: QueryId) error{ InvalidQuery, QueryNotReady }!void {
         const i = try self.index(id);
         if (self.rows.items(.released)[i]) return;
@@ -415,6 +419,11 @@ pub const Session = struct {
         var c = self.rows.items(.child)[i];
         while (c != none) : (c = self.rows.items(.sibling)[@backingInt(c)]) {
             if (!self.rows.items(.released)[@backingInt(c)]) return error.QueryNotReady;
+        }
+        var r = self.rows.items(.reader)[i];
+        while (r != none) : (r = self.rows.items(.next_reader)[@backingInt(r)]) {
+            const j = @backingInt(r);
+            if (!self.effectiveStatus(j).terminal() or self.rows.items(.running)[j]) return error.QueryNotReady;
         }
         if (self.rows.items(.executor)[i]) |worker| worker.destroy();
         self.rows.items(.executor)[i] = null;
@@ -480,6 +489,19 @@ pub const Session = struct {
         const worker = self.rows.items(.executor)[if (dep == none) i else @backingInt(dep)] orelse return null;
         return worker.operatingPoint();
     }
+
+    /// Whether a `.four`/`.fft` reads query `id`'s result (#231), so its
+    /// rows must stay in memory rather than stream.
+    pub fn resultRead(self: *const Session, id: QueryId) bool {
+        return self.rows.items(.reader)[@backingInt(id)] != none;
+    }
+
+    /// True when every row is terminal, so no worker reads its copy of the
+    /// deck (`Problem.release_points` then moves the variant table).
+    pub fn idle(self: *Session) bool {
+        self.advanceDone();
+        return self.done_rows == self.rows.len;
+    }
 };
 
 /// A refilling scheduler over the queries of one or more sessions: up to
@@ -530,10 +552,14 @@ pub const Pool = struct {
             if (pool.quantum == .completion) session.gather(i);
             if (session.launch(i, pool.quantum, &pool.signal)) {
                 pool.running.appendAssumeCapacity(.{ .session = session, .row = @intCast(i) });
-            } else if (session.rows.items(.executor)[i]) |leader| {
-                // The batch never started: its peers run on their own.
-                for (leader.peers) |p| session.rows.items(.running)[p.row] = false;
-                leader.peers = &.{};
+            } else {
+                // A failed `.tran`'s result readers run their own.
+                session.followOne(i);
+                if (session.rows.items(.executor)[i]) |leader| {
+                    // The batch never started: its peers run on their own.
+                    for (leader.peers) |p| session.rows.items(.running)[p.row] = false;
+                    leader.peers = &.{};
+                }
             }
         }
     }
@@ -585,6 +611,13 @@ const Row = struct {
     /// The newest dependent and the next older one sharing `dependency`.
     child: QueryId = none,
     sibling: QueryId = none,
+    /// The earlier `.tran` row whose result this `.four`/`.fft` reads in
+    /// place of its own transient (`linkReaders`, #231); `none` for none.
+    reads: QueryId = none,
+    /// The newest row that `reads` this one, and the next older reader of
+    /// the row this one reads, as `child` and `sibling` list dependents.
+    reader: QueryId = none,
+    next_reader: QueryId = none,
     /// A quantum is in flight; `settle` collects it.
     running: bool = false,
     /// A query split into its lanes (`splitLanes`): its lane rows are the

@@ -100,7 +100,7 @@ fn statement(t: *Translator, line: []const u8) Error!void {
     if (std.mem.eql(u8, w, "ends")) return spectre_blocks.ends(t);
     if (std.mem.eql(u8, w, "global")) return spectre_blocks.global(t, rest);
     if (std.mem.eql(u8, w, "ic") or std.mem.eql(u8, w, "nodeset")) return spectre_blocks.initial(t, w, rest);
-    if (std.mem.eql(u8, w, "save")) return saveChecked(rest);
+    if (std.mem.eql(u8, w, "save")) return save(t, rest);
     if (std.mem.eql(u8, w, "ahdl_include")) {
         if (rest.len != 1 or rest[0].kind != .string) return error.ParseError;
         return t.emit(".hdl {s}", .{rest[0].text});
@@ -143,12 +143,21 @@ fn spiceCard(arena: Allocator, line: []const u8) Error![]const u8 {
     return out.items;
 }
 
-/// `save X[:t] ... [key=value]` (§4.11): checked, and not acted on, since
-/// every vector is written. A `:` needs a terminal or output after it.
-fn saveChecked(toks: []const Tok) Error!void {
+/// `save X[:t] ... [key=value]` (§4.11): every node is written anyway,
+/// and a device's operating-point variable `m1:gm` becomes the HSPICE
+/// `.probe m1:gm` netlist.zig reads (#236). A `:` needs a name on each
+/// side.
+// ponytail: a one-byte or numeric `t` is a terminal (`m1:d`, `r1:1`),
+// whose current is not written; save it once terminal currents are.
+fn save(t: *Translator, toks: []const Tok) Error!void {
+    var text: std.ArrayList(u8) = .empty;
     for (toks, 0..) |tok, i| if (tok.is(":")) {
-        if (i + 1 == toks.len or toks[i + 1].kind != .word) return error.ParseError;
+        if (i == 0 or i + 1 == toks.len or toks[i - 1].kind != .word or toks[i + 1].kind != .word) return error.ParseError;
+        const out = toks[i + 1].text;
+        if (out.len == 1 or std.ascii.isDigit(out[0])) continue;
+        try text.print(t.arena, " {s}:{s}", .{ toks[i - 1].text, out });
     };
+    if (text.items.len > 0) try t.emit(".probe{s}", .{text.items});
 }
 
 test "translate keeps each device card's letter in a column parallel to the cards" {

@@ -182,6 +182,7 @@ pub fn init(
         .attempted_dt = undefined,
         .vpi_again = 0,
         .resolved = false,
+        .emir = null,
     };
     const q_hist = s.qHist();
     const qt_hist = s.qtHist();

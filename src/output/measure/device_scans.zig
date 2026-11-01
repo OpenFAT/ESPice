@@ -128,7 +128,7 @@ fn source(s: *const Stream, col: columns.Waveform) ?Source {
             if (par.ops.len > scan.Program.max) return null;
             for (par.ops, p.ops[0..par.ops.len]) |op, *o| o.* = switch (op) {
                 .num => |x| .{ .code = .num, .num = x },
-                .measure => .{ .code = .nan },
+                .measure, .soa_count => .{ .code = .nan },
                 .vector => |name| blk: {
                     // `Sample.leaf`'s column: every name resolved when the
                     // waveform was made.

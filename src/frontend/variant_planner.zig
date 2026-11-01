@@ -17,14 +17,14 @@
 //! - `pub fn grid(p: *Planner, steps: []const netlist.Step, values: []f64, depth: usize, out: *std.ArrayList(variants.Point)) !void`
 //! - `pub fn stepPoint(p: *Planner, steps: []const netlist.Step, values: []const f64) !variants.Point`
 //! - `pub fn addRow(p: *Planner, data: netlist.Data, row: []const f64) !void`
-//! - `pub fn addTrial(p: *Planner, sampler: *variant_draws.Sampler, trial: u32, index: u32) !void`
+//! - `pub fn addTrial(p: *Planner, sampler: *variant_draws.Sampler, trial: u32, index: u32, scale: f64) !void`
 //! - `pub fn addAlter(p: *Planner, text: []const u8, k: usize, own: bool) !void`
 //! - `pub fn variations(p: *Planner) !core.query.Variations`
 //! - `pub fn siteVariations(p: *Planner) !core.query.Variations`
 //! - `pub fn add(p: *Planner, pt: variants.Point) !void`
 //! - `pub fn load(p: *Planner, pt: variants.Point, label: []const u8) !Load`
 //! - `pub fn probeIdentity(p: *Planner) !Fast`
-//! - `pub fn closeRow(p: *Planner, label: []const u8, axis: f64, temp: ?f64) !void`
+//! - `pub fn closeRow(p: *Planner, label: []const u8, axis: f64, temp: ?f64, kind: core.Variants.Kind) !void`
 //! - `pub fn pointWrites(p: *Planner, pt: variants.Point) !void`
 //! - `pub fn paramRef(p: *Planner, t: core.DeviceType, index: u32, name: []const u8) !u32`
 
@@ -69,6 +69,7 @@ pub const Planner = struct {
     labels: std.ArrayList([]const u8) = .empty,
     temps: std.ArrayList(?f64) = .empty,
     axes: std.ArrayList(f64) = .empty,
+    kinds: std.ArrayList(core.Variants.Kind) = .empty,
     starts: std.ArrayList(u32) = .empty,
     write_refs: std.ArrayList(u32) = .empty,
     write_values: std.ArrayList(f64) = .empty,
@@ -96,6 +97,8 @@ pub const Planner = struct {
     /// Per parameter, its write's index in the open row, or `none`.
     row_at: []u32 = &.{},
     targets: ?Targets = null,
+    /// The site key of each group the last `siteVariations` returned.
+    site_groups: std.ArrayList(u64) = .empty,
 
     /// The parameters each `.variation` row moves, CSR by row.
     pub const Targets = struct { starts: []const u32, ords: []const u32, keys: []const u64 };
@@ -187,6 +190,7 @@ pub const Planner = struct {
             .starts = try p.sim.dupe(u32, p.starts.items),
             .refs = try p.sim.dupe(u32, p.write_refs.items),
             .values = try p.sim.dupe(f64, p.write_values.items),
+            .kinds = try p.sim.dupe(core.Variants.Kind, p.kinds.items),
         };
     }
 
@@ -213,7 +217,9 @@ pub const Planner = struct {
 
     /// One `.data` row.
     pub fn addRow(p: *Planner, data: netlist.Data, row: []const f64) !void {
-        try p.add(try p.pointOf(data.columns, data.labels, row));
+        var pt = try p.pointOf(data.columns, data.labels, row);
+        pt.kind = .data;
+        try p.add(pt);
     }
 
     /// The point setting `targets[i]` to `values[i]`, labelled
@@ -237,12 +243,13 @@ pub const Planner = struct {
         return pt;
     }
 
-    pub fn addTrial(p: *Planner, sampler: *variant_draws.Sampler, trial: u32, index: u32) !void {
+    pub fn addTrial(p: *Planner, sampler: *variant_draws.Sampler, trial: u32, index: u32, scale: f64) !void {
         try p.add(.{
             .label = try std.fmt.allocPrint(p.scratch, "monte={d}", .{trial}),
             .axis = @floatFromInt(trial),
             .live = p.nl.live.nominal,
-            .trial = .{ .sampler = sampler, .trial = trial, .index = index },
+            .trial = .{ .sampler = sampler, .trial = trial, .index = index, .scale = scale },
+            .kind = .monte,
         });
     }
 
@@ -253,6 +260,7 @@ pub const Planner = struct {
         const label = try std.fmt.allocPrint(p.sim, "alter={d}", .{k});
         const alt = try p.scratch.create(Netlist);
         alt.* = try netlist.parse(p.scratch, text, p.nl.deck.dialect);
+        alt.soa_ratings = p.nl.soa_ratings;
         if (!own and variant_circuit.sameCards(p.nl, alt)) {
             var arena = std.heap.ArenaAllocator.init(core.gpa);
             defer arena.deinit();
@@ -260,7 +268,7 @@ pub const Planner = struct {
             defer c.deinit();
             if (variant_circuit.sameTopology(p.nominal, &c)) {
                 try p.diff(try variant_params.collect(arena.allocator(), &c));
-                return p.closeRow(label, @floatFromInt(k), null);
+                return p.closeRow(label, @floatFromInt(k), null, .alter);
             }
         }
         try p.rebuilds.append(p.scratch, .{ .nl = alt, .run = .{ .prefix = label } });
@@ -284,7 +292,7 @@ pub const Planner = struct {
         const label = if (p.prefix.len == 0) try p.sim.dupe(u8, pt.label) else try std.fmt.allocPrint(p.sim, "{s}, {s}", .{ p.prefix, pt.label });
         if (try p.load(pt, label) == .circuit) return p.addRun(label, pt);
         try p.pointWrites(pt);
-        try p.closeRow(label, pt.axis, pt.temp);
+        try p.closeRow(label, pt.axis, pt.temp, pt.kind);
     }
 
     const Load = enum { row, circuit };
@@ -433,11 +441,12 @@ pub const Planner = struct {
         return .{ .refs = refs.items, .slots = slots.items, .values = values.items };
     }
 
-    pub fn closeRow(p: *Planner, label: []const u8, axis: f64, temp: ?f64) !void {
+    pub fn closeRow(p: *Planner, label: []const u8, axis: f64, temp: ?f64, kind: core.Variants.Kind) !void {
         for (p.write_refs.items[p.starts.items[p.starts.items.len - 1]..]) |r| p.row_at[r] = netlist.none;
         try p.labels.append(p.scratch, label);
         try p.axes.append(p.scratch, axis);
         try p.temps.append(p.scratch, temp);
+        try p.kinds.append(p.scratch, kind);
         try p.starts.append(p.scratch, @intCast(p.write_refs.items.len));
     }
 
@@ -468,12 +477,11 @@ pub const Planner = struct {
         for (p.nl.deck.variations, 0..) |v, i| {
             for (targets.ords[targets.starts[i]..targets.starts[i + 1]], targets.keys[targets.starts[i]..targets.starts[i + 1]]) |ord, key| {
                 const base = p.current(ord);
-                const u = trial.uniform(key);
                 const spread = try variant_mismatch.spreadOf(p, v, ord, base);
                 const x = switch (v.dist) {
-                    .gauss => base + spread * variant_draws.normalQuantile(u),
-                    .unif => base + spread * (2 * u - 1),
-                    .limit => base + (if (u < 0.5) -spread else spread),
+                    .gauss => base + spread * trial.normal(key),
+                    .unif => base + spread * (2 * trial.unit(key) - 1),
+                    .limit => base + (if (trial.uniform(key) < 0.5) -spread else spread),
                 };
                 try p.set(ord, x);
             }

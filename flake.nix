@@ -18,7 +18,7 @@
     nix-bundle.inputs.utils.follows = "flake-utils";
     # The SPICE decks (tests/netlist/), also checked out at tests/conformance:
     # a git flake leaves submodules out of its source.
-    conformance.url = "github:OmarSiwy/VAMS-Conformance-Suite";
+    conformance.url = "github:OpenFAT/VAMS-Conformance-Suite";
     conformance.inputs.nixpkgs.follows = "nixpkgs";
     conformance.inputs.flake-utils.follows = "flake-utils";
   };
@@ -121,7 +121,7 @@
             cp -r "$TMPDIR/zgc/p" "$out"
           '';
           outputHashMode = "recursive";
-          outputHash = "sha256-AXyfU9Mm5OMrR8ZLq3NAYv2uvQTmhzMXUlbJiW3TxgY=";
+          outputHash = "sha256-/j0xp7iRq8liXUn6v11dJE+oPkIZpIvfmYzFwKSwYvo=";
         };
 
         gpuPkgs = lib.optionals pkgs.stdenv.isLinux (

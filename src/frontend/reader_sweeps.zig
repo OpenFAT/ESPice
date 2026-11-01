@@ -94,9 +94,25 @@ pub fn Methods(comptime S: type) type {
                     break :blk .{ .monte = .{ .n = @intCast(list.len), .list = list } };
                 }
                 var m: Monte = .{ .n = try positiveCount(tail, 1) };
-                if (tail.len == 4 and tail[2] == .name and std.mem.eql(u8, tail[2].name, "firstrun")) {
-                    m.first = try positiveCount(tail, 3);
-                } else if (tail.len != 2) return error.ParseError;
+                var k: usize = 2;
+                while (k < tail.len) {
+                    if (tail[k] != .name) return error.ParseError;
+                    if (std.mem.eql(u8, tail[k].name, "firstrun")) {
+                        m.first = try positiveCount(tail, k + 1);
+                        k += 2;
+                    } else if (std.mem.eql(u8, tail[k].name, "sigma_scale") and m.scales.len == 0) {
+                        // `SIGMA_SCALE=2,2.5,3`: the numbers up to the next name.
+                        var scales: std.ArrayList(f64) = .empty;
+                        k += 1;
+                        while (k < tail.len and tail[k] == .num) : (k += 1) {
+                            const s = tail[k].num;
+                            if (!(s > 0 and s < std.math.inf(f64)) or std.mem.indexOfScalar(f64, scales.items, s) != null) return error.ParseError;
+                            try scales.append(r.arena, s);
+                        }
+                        if (scales.items.len == 0) return error.ParseError;
+                        m.scales = scales.items;
+                    } else return error.ParseError;
+                }
                 r.monte = true;
                 break :blk .{ .monte = m };
             } else blk: {

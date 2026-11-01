@@ -16,6 +16,7 @@
 //! - `pub fn releasePoints(self: *Problem, first: QueryId, count: usize) !void`
 //! - `pub fn pointTangents(self: *const Problem, first: QueryId, count: usize, names: []const []const u8, out: []f64) !void`
 //! - `pub fn variantOf(job: Query) ?u32`
+//! - `pub fn tempOf(job: Query) ?f64`
 //! - `pub fn block(session: *const Session, id: QueryId, k: usize) !output.Result`
 
 const std = @import("std");
@@ -120,6 +121,14 @@ pub fn appendPoints(self: *Problem, values: []const f64, count: usize, options: 
     // rows appended later keep theirs.
     const current = self.session.template;
     defer self.session.template = current;
+    // Room to mark every row this call makes, a point's own and its tangent
+    // rows, before it makes any; a failed call's rows are freed.
+    const rows_before = deck.variants.count();
+    const rows_most = rows_before + count * (1 + if (tangent) p else 0);
+    if (self.point_rows.bit_length < rows_most) try self.point_rows.resize(self.gpa, rows_most, false);
+    if (self.freed_rows.bit_length < rows_most) try self.freed_rows.resize(self.gpa, rows_most, false);
+    var appended = false;
+    errdefer if (!appended) self.freed_rows.setRangeValue(.{ .start = rows_before, .end = deck.variants.count() }, true);
     for (0..count) |i| {
         const point_values = values[i * p ..][0..p];
         try self.session.templates.ensureUnusedCapacity(self.session.allocator, 1);
@@ -162,6 +171,8 @@ pub fn appendPoints(self: *Problem, values: []const f64, count: usize, options: 
     }
     const ids = try scratch.alloc(QueryId, jobs.len);
     _ = try self.session.appendAt(jobs, templates, ids);
+    appended = true;
+    self.point_rows.setRangeValue(.{ .start = rows_before, .end = deck.variants.count() }, true);
     // Each id was just appended, so every lookup below finds it.
     for (refused, 0..) |r, i| if (r) |err| for (ids[i * j ..][0..j]) |id| self.session.refuse(id, err) catch unreachable;
     // A point owns its OP: nothing appended later reads either.
@@ -286,6 +297,12 @@ pub fn releasePoints(self: *Problem, first: QueryId, count: usize) !void {
         _ = self.tangent_steps.remove(outputs[k]);
     }
     assert(k == ends[0]);
+    for (outputs[ends[0]..ends[count]]) |id| {
+        const job = try self.session.query(id);
+        if (variantOf(job)) |v| freeRow(self, v);
+        if (job == .tran) for (job.tran.tangents) |v| freeRow(self, v);
+    }
+    dropFreedRows(self);
 }
 
 /// The slopes d(card)/d(live parameter) of the `.tran` cards `names` at
@@ -337,6 +354,13 @@ pub fn pointTangents(self: *const Problem, first: QueryId, count: usize, names: 
 pub fn variantOf(job: Query) ?u32 {
     return switch (job) {
         inline else => |o| o.tol.variant,
+    };
+}
+
+/// The HSPICE `.temp` list entry `job` runs at; null at the deck's.
+pub fn tempOf(job: Query) ?f64 {
+    return switch (job) {
+        inline else => |o| o.tol.temp_c,
     };
 }
 
@@ -450,4 +474,22 @@ fn measureSource(session: *const Session, ids: []const QueryId, kind: requests.K
     if (kind != .op) return null;
     for (ids) |id| if ((try session.info(id)).dependency) |dep| return dep;
     return null;
+}
+
+/// Marks variant row `v` freed when `appendPoints` made it.
+fn freeRow(self: *Problem, v: u32) void {
+    if (v < self.point_rows.bit_length and self.point_rows.isSet(v)) self.freed_rows.set(v);
+}
+
+/// Drops the variant table's prefix of freed rows when no query runs (a
+/// running one reads its own copy of the table) and the prefix is at least
+/// as long as the rows kept, so each row moves O(1) times. A table that
+/// cannot move keeps its rows.
+fn dropFreedRows(self: *Problem) void {
+    const tuning = self.prepared.tuning orelse return;
+    const rows = &self.prepared.deck.variants;
+    var below = rows.base;
+    while (below < self.freed_rows.bit_length and self.freed_rows.isSet(below)) below += 1;
+    if (below == rows.base or below - rows.base < rows.count() - below or !self.session.idle()) return;
+    rows.* = tuning.drop(self.gpa, below) catch return;
 }

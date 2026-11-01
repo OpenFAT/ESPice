@@ -1,8 +1,9 @@
 //! Finished results in, the text a deck's cards ask for out: each
 //! optimization's summary, each result's `.meas` block in request order,
-//! the Monte Carlo statistics, and the `--tangents` slopes. `run_all`
-//! streams the blocks as their turn comes (`printReady`); `print_measures`
-//! writes what is left.
+//! the Monte Carlo statistics or SIGMA_SCALE reports, the `.wcd` report,
+//! and the `--tangents` slopes; and the same `.meas` results as JSON
+//! (`--measures`). `run_all` streams the blocks as their turn comes
+//! (`printReady`); `print_measures` writes what is left.
 //! Cites: none for the `.meas` blocks (output/measure.zig owns their
 //! format); the optimization listings follow HSPICE's [SA Ch.19].
 //!
@@ -10,6 +11,7 @@
 //! - `pub const Cursor = struct { headed: bool, session: usize, next: usize }`
 //! - `pub const LiveMeasures = struct`
 //! - `pub fn printMeasures(self: *Problem, out: *std.Io.Writer, err: *std.Io.Writer) !void`
+//! - `pub fn writeMeasuresJson(self: *Problem, out: *std.Io.Writer, deck: []const u8) !void`
 //! - `pub fn printTangents(self: *const Problem, out: *std.Io.Writer) !void`
 //! - `pub fn printReady(self: *Problem) void`
 
@@ -23,6 +25,8 @@ const output = @import("output");
 const config = @import("config.zig");
 const points = @import("points.zig");
 const Problem = @import("Problem.zig");
+const soa = @import("soa.zig");
+const wcd = @import("wcd.zig");
 const QueryId = core.query.QueryId;
 const Session = analysis.session.Session;
 
@@ -44,27 +48,42 @@ const Running = enum { wait_running, skip_running };
 
 /// Writes each optimization's summary, then the deck's `.meas` results for
 /// every completed result a card can read, in request order, then the
-/// Monte Carlo statistics (`Problem.print_measures` documents the
-/// contract).
+/// Monte Carlo statistics and the `.wcd` report (`Problem.print_measures`
+/// documents the contract).
 pub fn printMeasures(self: *Problem, out: *std.Io.Writer, err: *std.Io.Writer) !void {
-    const measures = self.prepared.deck.measures;
     if (self.live_measures) |*live| {
         if (live.failure) |e| return e;
         try printFrom(self, &live.cursor, out, err, .skip_running);
     } else {
+        // Each call prints every block again, so the JSON starts over.
+        if (self.measure_json) |*j| j.clearRetainingCapacity();
         var cursor: Cursor = .{};
         try printFrom(self, &cursor, out, err, .skip_running);
     }
-    if (measures.len == 0) return;
-    // Statistics over the Monte Carlo trials of each analysis kind.
-    var trials: std.ArrayList(output.Result) = .empty;
-    defer trials.deinit(self.gpa);
-    inline for (.{ .tran, .ac, .dc }) |kind| {
-        trials.clearRetainingCapacity();
-        try monteTrials(self.gpa, &self.session, kind, &trials);
-        for (self.runs) |*run| try monteTrials(self.gpa, &run.session, kind, &trials);
-        if (trials.items.len != 0) try output.printMeasureStatistics(out, measures, kind, trials.items);
-    }
+    try writeStatistics(self, out, false);
+}
+
+/// Writes every `.meas` result printed so far as one `espice-measures/1`
+/// JSON document (`Problem.write_measures_json` documents the contract).
+pub fn writeMeasuresJson(self: *Problem, out: *std.Io.Writer, deck: []const u8) !void {
+    const results = if (self.measure_json) |*j| j.written() else return error.MeasuresJsonOff;
+    try out.writeAll("{\n  \"format\": \"espice-measures/1\",\n  \"deck\": ");
+    try std.json.Stringify.encodeJsonString(deck, .{}, out);
+    // Each object is led by `,\n`; the first one's comma goes.
+    try out.print(",\n  \"results\": [{s}\n  ],\n  \"statistics\": [", .{if (results.len == 0) "" else results[1..]});
+    var stats: std.Io.Writer.Allocating = .init(self.gpa);
+    defer stats.deinit();
+    try writeStatistics(self, &stats.writer, true);
+    const s = stats.written();
+    try out.print("{s}\n  ],\n  \"soa\": [", .{if (s.len == 0) "" else s[1..]});
+    var excursions: std.Io.Writer.Allocating = .init(self.gpa);
+    defer excursions.deinit();
+    var tally: soa.Tally = .{ .gpa = self.gpa, .json = &excursions.writer };
+    defer tally.instances.deinit(self.gpa);
+    try tally.session(&self.session);
+    for (self.runs) |*run| try tally.session(&run.session);
+    const e = excursions.written();
+    try out.print("{s}\n  ]\n}}\n", .{if (e.len == 0) "" else e[1..]});
 }
 
 /// With `Options.point.tangent_step`, writes d(card)/d(live parameter) of
@@ -111,8 +130,9 @@ pub fn printReady(self: *Problem) void {
 
 /// The optimization summaries, then each session's `.meas` blocks in
 /// request order from `cursor` on; at a result still running it stops
-/// (`.wait_running`) or prints nothing for it (`.skip_running`).
-fn printFrom(self: *const Problem, cursor: *Cursor, out: *std.Io.Writer, err: *std.Io.Writer, running: Running) !void {
+/// (`.wait_running`) or prints nothing for it (`.skip_running`). Each
+/// result also goes to `Problem.measure_json` when it is on.
+fn printFrom(self: *Problem, cursor: *Cursor, out: *std.Io.Writer, err: *std.Io.Writer, running: Running) !void {
     const measures = self.prepared.deck.measures;
     if (!cursor.headed) {
         for (self.optimization, 0..) |*lm, k| try printOptimization(out, lm, &self.prepared.tuner.?, k, measures);
@@ -128,7 +148,7 @@ fn printFrom(self: *const Problem, cursor: *Cursor, out: *std.Io.Writer, err: *s
         while (cursor.next < session.outputs.items.len) : (cursor.next += 1) {
             const id = session.outputs.items[cursor.next];
             if (running == .wait_running and !(try session.info(id)).status.terminal()) return;
-            try printQueryMeasures(session, id, out, err, measures);
+            try printQueryMeasures(self.gpa, session, id, out, err, if (self.measure_json) |*j| &j.writer else null, measures);
         }
     }
     assert(cursor.session == self.runs.len + 1);
@@ -137,19 +157,64 @@ fn printFrom(self: *const Problem, cursor: *Cursor, out: *std.Io.Writer, err: *s
 /// `.meas` results over query `id`'s result when it completed, of a kind a
 /// card can read; a transient's own run, not its tangent blocks. A sweep
 /// point's block names its row and label, and prints NaN for each card
-/// without a value, a failed point's for all.
-fn printQueryMeasures(session: *const Session, id: QueryId, out: *std.Io.Writer, err: *std.Io.Writer, measures: []const core.Measure) !void {
+/// without a value, a failed point's for all. With `json`, each result is
+/// also a JSON object there (#235).
+fn printQueryMeasures(gpa: Allocator, session: *const Session, id: QueryId, out: *std.Io.Writer, err: *std.Io.Writer, json: ?*std.Io.Writer, measures: []const core.Measure) !void {
     const info = try session.info(id);
     switch (info.kind) {
         .op, .tran, .ac, .dc, .fft, .tran_noise, .dcmatch, .acmatch, .lstb, .phasenoise, .pnoise, .sp => {},
         else => return,
     }
     if (session.released(id)) return;
-    const row = points.variantOf(try session.query(id));
-    const point: ?output.MeasurePoint = if (row) |v| .{ .row = v, .label = session.deck.variants.labels[v] } else null;
+    const job = try session.query(id);
+    const row = points.variantOf(job);
+    const point: ?output.MeasurePoint = if (row) |v| .{ .row = v, .label = session.deck.variants.labelAt(v) } else null;
+    // The fields every JSON result of the block shares (#235).
+    var head: std.Io.Writer.Allocating = .init(gpa);
+    defer head.deinit();
+    if (json != null) {
+        try head.writer.print("\"analysis\": \"{t}\", \"variant\": ", .{info.kind});
+        try output.writeVariantJson(&head.writer, session.deck.variants, row, points.tempOf(job));
+    }
+    const sink: ?output.MeasureJson = if (json) |j| .{ .out = j, .head = head.written() } else null;
     if (info.status == .complete) {
-        try output.printMeasures(out, err, measures, info.kind, try points.block(session, id, 0), point);
-    } else if (point) |p| if (info.status.terminal()) try output.printFailedMeasures(out, measures, info.kind, p);
+        var res = try points.block(session, id, 0);
+        // `soa_count()` (#238): this result's excursions, when none was skipped.
+        if (session.deck.soa.limits.len != 0 and soa.checked(info.kind)) {
+            var tally: soa.Tally = .{ .gpa = gpa };
+            defer tally.instances.deinit(gpa);
+            try tally.result(session, job, info.kind, res);
+            if (tally.skipped == 0) res.soa_count = @floatFromInt(tally.excursions);
+        }
+        try output.printMeasures(out, err, measures, info.kind, res, point, sink);
+    } else if (point) |p| if (info.status.terminal()) try output.printFailedMeasures(out, measures, info.kind, p, sink);
+}
+
+/// The `.meas` statistics over the Monte Carlo trials of each tran, AC and
+/// DC card, as text or as JSON objects; for a SIGMA_SCALE card's analysis,
+/// its scaled-sigma report instead (#239); then the `.wcd` report (#240).
+/// As text, a refused fit fails with its error once everything is written.
+fn writeStatistics(self: *const Problem, out: *std.Io.Writer, json: bool) !void {
+    const measures = self.prepared.deck.measures;
+    if (measures.len == 0) return;
+    var trials: std.ArrayList(output.Result) = .empty;
+    defer trials.deinit(self.gpa);
+    var refused: ?core.sss.Error = null;
+    inline for (.{ .tran, .ac, .dc }) |kind| {
+        trials.clearRetainingCapacity();
+        try monteTrials(self.gpa, &self.session, kind, &trials);
+        for (self.runs) |*run| try monteTrials(self.gpa, &run.session, kind, &trials);
+        const scaled = for (self.prepared.sss) |s| {
+            if (s.kind == kind) break s;
+        } else null;
+        if (scaled) |s| {
+            if (try writeSss(self.gpa, out, json, measures, s, trials.items)) |e| refused = refused orelse e;
+        } else if (trials.items.len != 0) {
+            if (json) try output.writeMeasureStatistics(out, measures, kind, trials.items) else try output.printMeasureStatistics(out, measures, kind, trials.items);
+        }
+    }
+    if (self.prepared.wcd) |*w| try wcd.writeWorstCase(self.gpa, out, json, w, self.worst_case, measures);
+    if (refused) |e| if (!json) return e;
 }
 
 /// Appends `session`'s completed Monte Carlo trial results of `kind`.
@@ -161,6 +226,42 @@ fn monteTrials(gpa: Allocator, session: *const Session, kind: core.query.Kind, t
         const res = try session.result(id);
         if (std.mem.indexOf(u8, res.plotname, "(monte=") != null) try trials.append(gpa, res);
     }
+}
+
+/// Counts the failures of SIGMA_SCALE card `s` over its completed `trials`
+/// (#239), fits them and writes the report; returns the fit's refusal. A
+/// trial fails when FAIL holds or reads a card without a value. Counted by
+/// subtraction, so a trial with no completed result (no convergence,
+/// cancelled) fails too.
+// ponytail: every trial's result stays until the end, as plain MONTE's do;
+// reduce each to its `.meas` row on delivery if large runs need it.
+fn writeSss(gpa: Allocator, out: *std.Io.Writer, json: bool, measures: []const core.Measure, s: frontend.Sss, trials: []const output.Result) !?core.sss.Error {
+    const m = s.monte;
+    const passed = try gpa.alloc(bool, m.n * m.scales.len);
+    defer gpa.free(passed);
+    @memset(passed, false);
+    const values = try gpa.alloc(f64, measures.len);
+    defer gpa.free(values);
+    for (trials) |res| {
+        const at = std.mem.indexOf(u8, res.plotname, "(monte=").? + "(monte=".len;
+        const tail = res.plotname[at..];
+        const trial = std.fmt.parseInt(u64, tail[0 .. std.mem.indexOfNone(u8, tail, "0123456789") orelse tail.len], 10) catch continue;
+        if (s.scaleOf(trial) == null) continue;
+        output.measureValues(measures, s.kind, res, values);
+        passed[@intCast(trial - m.first)] = !try s.fails(gpa, values);
+    }
+    const failures = try gpa.alloc(u64, m.scales.len);
+    defer gpa.free(failures);
+    const each = try gpa.alloc(u64, m.scales.len);
+    defer gpa.free(each);
+    @memset(each, m.n);
+    for (failures, 0..) |*k, j| k.* = m.n - std.mem.count(bool, passed[j * m.n ..][0..m.n], &.{true});
+    const estimate = core.sss.fit(m.scales, each, failures);
+    const report: output.Sss = .{ .fail = m.fail.text, .scales = m.scales, .trials = m.n, .failures = failures, .estimate = estimate };
+    if (json) try output.writeSss(out, s.kind, report) else try output.printSss(out, report);
+    // An error value returned as is would be this function's own error.
+    _ = estimate catch |e| return @as(?core.sss.Error, e);
+    return null;
 }
 
 /// The optimizer's summary, after HSPICE's: one line per accepted

@@ -50,7 +50,7 @@ const kvNumber = netlist_view.kvNumber;
 
 /// `ignored`: a card that only shapes printed output, which ESPice writes
 /// in full anyway.
-pub const Card = union(enum) { end, ends, subckt, param, func, model, include, osdi_include, pre_osdi, verilog, control, endc, options, ic, nodeset, global, connect, save, store, sample, meas, ignored, mosra, appendmodel, step, data, enddata, variation, end_variation, analysis: Kind, cond: CondCard };
+pub const Card = union(enum) { end, ends, subckt, param, func, model, include, osdi_include, pre_osdi, verilog, control, endc, options, ic, nodeset, global, connect, save, store, sample, meas, ignored, mosra, appendmodel, step, data, enddata, variation, end_variation, wcd, analysis: Kind, cond: CondCard };
 
 pub const CondCard = enum { @"if", elseif, @"else", endif };
 
@@ -117,9 +117,9 @@ pub const cards = std.StaticStringMap(Card).initComptime(.{
     .{ "unprotect", .ignored },      .{ "prot", .ignored },              .{ "unprot", .ignored },
 });
 
-/// Sweep and variation cards (frontend/variants.zig).
+/// Sweep and variation cards (frontend/variants.zig), and `.wcd` (#240).
 pub const variant_cards = std.StaticStringMap(Card).initComptime(.{
-    .{ "step", .step }, .{ "data", .data }, .{ "enddata", .enddata }, .{ "variation", .variation }, .{ "end_variation", .end_variation },
+    .{ "step", .step }, .{ "data", .data }, .{ "enddata", .enddata }, .{ "variation", .variation }, .{ "end_variation", .end_variation }, .{ "wcd", .wcd },
 });
 
 /// A behavioural E/F/G/H form, named by the word in the first control-node

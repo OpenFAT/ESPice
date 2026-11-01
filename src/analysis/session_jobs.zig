@@ -11,6 +11,7 @@
 //! - `lane_window`
 //! - `sameLaneJob`
 //! - `batchable`
+//! - `sameTransient`
 //! - `stripTol`
 //! - `sameDeep`
 //! - `OpKey`
@@ -98,10 +99,39 @@ pub fn sameLaneJob(a: requests.Query, b: requests.Query) bool {
 /// became (`splitLanes`).
 pub fn batchable(job: requests.Query) bool {
     return switch (job) {
-        .op, .dc, .tran, .pss => true,
+        .pss => true,
+        // `--emir` reads each query's own host batches (#237).
+        inline .op, .dc => |o| !o.emir,
+        .tran => |o| !o.point.emir,
         inline .mc, .temp => |o| o.lane != null,
         else => execution.freqLaneKind(job),
     };
+}
+
+/// Whether `reader`'s own transient (a `.four`'s `tran_opts`, an `.fft`'s
+/// `tran`) is `tran`'s, `point` aside, and the two jobs' tolerances agree
+/// (#231). `Sim` reads no `tol.variant`, `tol.temp_c` or `tol.warm_op`;
+/// the job tolerances, which the executor reads, compare instead.
+pub fn sameTransient(reader: requests.Query, tran: requests.Tran) bool {
+    var own = switch (reader) {
+        .four => |o| o.tran_opts orelse return false,
+        .fft => |o| o.tran,
+        else => return false,
+    };
+    var other = tran;
+    for ([_]*requests.Tran{ &own, &other }) |o| {
+        o.tol.variant = null;
+        o.tol.temp_c = null;
+        o.tol.warm_op = false;
+        o.point = .{};
+    }
+    var reader_tol = switch (reader) {
+        inline else => |o| o.tol,
+    };
+    var tran_tol = tran.tol;
+    reader_tol.variant = null;
+    tran_tol.variant = null;
+    return sameDeep(own, other) and sameDeep(reader_tol, tran_tol);
 }
 
 /// `o` without what only the circuit each lane builds reads: the variant

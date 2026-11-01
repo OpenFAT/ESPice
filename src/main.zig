@@ -1,6 +1,7 @@
 //! The `espice` command line: argv in, one `Problem` per netlist file run
-//! in order, its `.meas` text on stdout and a one-line summary per result on
-//! stderr. Exit 0, 1 if any file failed to read, prepare or run, 2 on a
+//! in order, its `.meas` text on stdout (or its JSON, `--measures=-`), the
+//! `--measures` and `--emir` JSON files, and a one-line summary per result
+//! on stderr. Exit 0, 1 if any file failed to read, prepare or run, 2 on a
 //! usage error. The flags, the exit codes and every printed line are the
 //! CLI's contract.
 //! Cites: none.
@@ -40,6 +41,9 @@ const help =
     \\  -b, --batch                 Run all queries (default)
     \\  -r, --rawfile=FILE          Result destination
     \\      --format=FMT            binary|ascii|csv|touchstone|psf|fsdb|sst2|citi|print
+    \\      --measures=FILE         Also write every .meas result, labelled, as JSON (- for stdout)
+    \\      --emir=FILE             Write each device terminal's average, RMS and peak current (JSON)
+    \\      --emir-window=T1:T2     Limit the statistics to [T1, T2] of the transient (default: whole run)
     \\      --backend=BE            cpu|auto|cuda|hip (default auto with GPU kernels, else cpu)
     \\      --gpu                   Require an available GPU
     \\      --jobs=N|auto           Maximum parallel queries (default auto: one per CPU)
@@ -93,6 +97,10 @@ const Cli = struct {
     plan: Plan = .run,
     timing_in_depth: bool = false,
     point: problem.requests.PointOptions = .{},
+    /// `--measures=FILE`; `-` is stdout, where the JSON replaces the text.
+    measures_path: ?[]const u8 = null,
+    /// `--emir=FILE`, which also sets `point.emir`.
+    emir_path: ?[]const u8 = null,
 
     fn deinit(cli: *Cli, gpa: std.mem.Allocator) void {
         cli.paths.deinit(gpa);
@@ -138,9 +146,23 @@ pub fn main(init: std.process.Init) !u8 {
         .usage => return usageFail(),
     }
     std.debug.assert(cli.paths.items.len != 0);
+    // One file holds one deck's results; `--measures=-` writes one document per deck.
+    if (cli.measures_path != null and !jsonStdout(&cli) and cli.paths.items.len > 1) {
+        std.debug.print("Error: --measures=FILE takes one netlist\n", .{});
+        return usageFail();
+    }
+    if (cli.emir_path != null and cli.paths.items.len > 1) {
+        std.debug.print("Error: --emir=FILE takes one netlist\n", .{});
+        return usageFail();
+    }
+    // `--emir` reads the host device batches (#237).
+    if (cli.emir_path != null and cli.explicit_gpu) {
+        std.debug.print("Error: --emir runs on the CPU backend\n", .{});
+        return usageFail();
+    }
     // With kernels in the build the default is `auto`, which prices each
     // query and stays on the CPU, silently, unless the GPU pays.
-    const backend: problem.Request = cli.backend orelse if (problem.gpu_available) .auto else .cpu;
+    const backend: problem.Request = if (cli.emir_path != null) .cpu else cli.backend orelse if (problem.gpu_available) .auto else .cpu;
     if (cli.max_parallel == 0) cli.max_parallel = autoJobs();
     if (cli.tangents.items.len == 0) cli.point.tangent_step = 0 else if (cli.point.tangent_step == 0) cli.point.tangent_step = 1e-6;
     // One per process: VerA's VPI is process-global.
@@ -204,6 +226,13 @@ fn parse(gpa: std.mem.Allocator, args: anytype, cli: *Cli) std.mem.Allocator.Err
             cli.point.abort_measure = value orelse return .usage;
         } else if (optionValue(arg, "-r", "--rawfile", args)) |value| {
             cli.selection.path = value orelse return .usage;
+        } else if (optionValue(arg, "", "--measures", args)) |value| {
+            cli.measures_path = value orelse return .usage;
+        } else if (optionValue(arg, "", "--emir", args)) |value| {
+            cli.emir_path = value orelse return .usage;
+            cli.point.emir = true;
+        } else if (optionValue(arg, "", "--emir-window", args)) |value| {
+            cli.point.emir_window = parseWindow(value orelse return .usage) orelse return .usage;
         } else if (optionValue(arg, "", "--format", args)) |value| {
             cli.selection.format = problem.parseFormat(value orelse return .usage) orelse return .usage;
         } else if (optionValue(arg, "", "--backend", args)) |value| {
@@ -249,6 +278,10 @@ fn runDeck(init: std.process.Init, cli: *const Cli, backend: problem.Request, vp
         return false;
     };
     defer init.gpa.free(text);
+    // `--measures=-`: the JSON takes the text blocks' place on stdout.
+    var discard_buf: [256]u8 = undefined;
+    var discard: std.Io.Writer.Discarding = .init(&discard_buf);
+    const meas_out = if (jsonStdout(cli)) &discard.writer else &stdout.interface;
     const dialect = cli.dialect orelse detected: {
         const d = problem.detectDialect(text);
         if (d != .ngspice) std.debug.print("{s}: reading as {t} (--tokenizer to override)\n", .{ path, d });
@@ -276,7 +309,8 @@ fn runDeck(init: std.process.Init, cli: *const Cli, backend: problem.Request, vp
         // --plan solves nothing, not even the warm OP.
         .auto_point = !cli.full_waveforms and cli.plan != .print_only,
         .live_params = cli.tangents.items,
-        .measures = .{ .out = &stdout.interface, .err = &stderr.interface },
+        .measures = .{ .out = meas_out, .err = &stderr.interface },
+        .measures_json = cli.measures_path != null,
         .vpi_apps = cli.vpi_apps.items,
         .vpi = vpi,
         .hdl_toolchain = .{ .include_dirs = cli.include_dirs.items },
@@ -293,14 +327,99 @@ fn runDeck(init: std.process.Init, cli: *const Cli, backend: problem.Request, vp
     p.run_all() catch |err| {
         std.debug.print("Error: {s}: {s}\n", .{ path, @errorName(err) });
         if (p.output_error()) |delivery| std.debug.print("Output error: {s}\n", .{@errorName(delivery)});
+        // The blocks printed as their points ended, a failed point's as
+        // NaN: the JSON still records them, and the EMIR the variants that
+        // completed.
+        _ = writeSideFiles(init, cli, p, path, &stdout.interface);
         return false;
     };
-    try p.print_measures(&stdout.interface, &stderr.interface);
-    try p.print_tangents(&stdout.interface);
+    var ok = true;
+    // A refused SIGMA_SCALE fit (#239) fails the deck; its table and the
+    // JSON are still written.
+    p.print_measures(meas_out, &stderr.interface) catch |err| switch (err) {
+        error.TooFewScales, error.Singular => {
+            std.debug.print("Error: {s}: SIGMA_SCALE: {s}\n", .{ path, @errorName(err) });
+            ok = false;
+        },
+        else => return err,
+    };
+    // Tangents are no `.meas` result: on stderr when stdout is JSON.
+    try p.print_tangents(if (jsonStdout(cli)) &stderr.interface else &stdout.interface);
+    try p.print_soa(&stderr.interface);
+    if (!writeSideFiles(init, cli, p, path, &stdout.interface)) ok = false;
     try stdout.interface.flush();
     try stderr.interface.flush();
     try printSummary(init.gpa, p);
-    return true;
+    return ok;
+}
+
+/// `--measures=-`: the JSON goes to stdout in place of the `.meas` text.
+fn jsonStdout(cli: *const Cli) bool {
+    const file = cli.measures_path orelse return false;
+    return std.mem.eql(u8, file, "-");
+}
+
+/// Writes the `--measures` JSON and the `--emir` documents (or the deck's
+/// own `emirfile`) of `p`; false when one failed, after printing why.
+fn writeSideFiles(init: std.process.Init, cli: *const Cli, p: *problem.Problem, path: []const u8, stdout: *std.Io.Writer) bool {
+    var ok = true;
+    if (cli.measures_path) |file| writeMeasures(init.io, p, file, path, stdout) catch |e| {
+        std.debug.print("Error: {s}: --measures={s}: {s}\n", .{ path, file, @errorName(e) });
+        ok = false;
+    };
+    if (cli.emir_path orelse p.emir_file()) |file| writeEmir(init.io, init.gpa, p, file, path) catch |e| {
+        std.debug.print("Error: {s}: --emir={s}: {s}\n", .{ path, file, @errorName(e) });
+        ok = false;
+    };
+    return ok;
+}
+
+/// `--measures=FILE`: `p`'s `.meas` results as JSON, on `stdout` for `-`,
+/// else replacing `file` atomically, as `-r` does.
+fn writeMeasures(io: std.Io, p: *problem.Problem, file: []const u8, deck: []const u8, stdout: *std.Io.Writer) !void {
+    if (std.mem.eql(u8, file, "-")) {
+        try p.write_measures_json(stdout, deck);
+        return stdout.flush();
+    }
+    var atomic = try std.Io.Dir.cwd().createFileAtomic(io, file, .{ .replace = true });
+    defer atomic.deinit(io);
+    var buf: [4096]u8 = undefined;
+    var fw = atomic.file.writer(io, &buf);
+    try p.write_measures_json(&fw.interface, deck);
+    try fw.interface.flush();
+    try atomic.replace(io);
+}
+
+/// `--emir=FILE`: each variant's document (`Problem.write_emir_json`), the
+/// first to `file` and the k-th to `file.k`, each replaced atomically, as
+/// `-r` writes a format that does not append. `error.NoCurrents` when the
+/// run has none.
+fn writeEmir(io: std.Io, gpa: std.mem.Allocator, p: *problem.Problem, file: []const u8, deck: []const u8) !void {
+    var k: usize = 0;
+    while (true) : (k += 1) {
+        var doc: std.Io.Writer.Allocating = .init(gpa);
+        defer doc.deinit();
+        if (!try p.write_emir_json(&doc.writer, deck, k)) break;
+        const name = if (k == 0) file else try std.fmt.allocPrint(gpa, "{s}.{d}", .{ file, k + 1 });
+        defer if (k != 0) gpa.free(name);
+        var atomic = try std.Io.Dir.cwd().createFileAtomic(io, name, .{ .replace = true });
+        defer atomic.deinit(io);
+        var buf: [4096]u8 = undefined;
+        var fw = atomic.file.writer(io, &buf);
+        try fw.interface.writeAll(doc.written());
+        try fw.interface.flush();
+        try atomic.replace(io);
+    }
+    if (k == 0) return error.NoCurrents;
+}
+
+/// `--emir-window=T1:T2`, seconds with 0 <= T1 < T2; null when malformed.
+fn parseWindow(text: []const u8) ?[2]f64 {
+    const colon = std.mem.indexOfScalar(u8, text, ':') orelse return null;
+    const from = std.fmt.parseFloat(f64, text[0..colon]) catch return null;
+    const to = std.fmt.parseFloat(f64, text[colon + 1 ..]) catch return null;
+    if (!(from >= 0 and to > from) or std.math.isInf(to)) return null;
+    return .{ from, to };
 }
 
 /// The deck's stderr summary: its title and device count, then each
@@ -384,6 +503,13 @@ test "optionValue: separate, joined, missing and empty values" {
     try t.expect(optionValue("--rawfilex", "-r", "--rawfile", &args) == null);
     try t.expect(optionValue("out.raw", "-r", "--rawfile", &args) == null);
     try t.expect(optionValue("", "", "--format", &args) == null);
+}
+
+test "parseWindow: T1:T2 with 0 <= T1 < T2, nothing else" {
+    try std.testing.expectEqual([2]f64{ 1e-6, 3e-6 }, parseWindow("1e-6:3e-6").?);
+    try std.testing.expectEqual([2]f64{ 0, 2 }, parseWindow("0:2").?);
+    for ([_][]const u8{ "", "1e-6", "3:1", "1:1", "-1:2", "0:inf", "a:2", "1:", ":2", "nan:1" }) |bad|
+        try std.testing.expect(parseWindow(bad) == null);
 }
 
 test "envThreads: positive integers only, 1 otherwise" {

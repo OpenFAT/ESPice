@@ -8,12 +8,14 @@
 //!
 //! Contents:
 //! - `pub fn heldTape(self: *const FreqSolver) ?freq_batch.LaneChunk`
+//! - `pub fn complexHeldTape(self: *const FreqSolver) ?freq_batch.ComplexChunk`
 //! - `pub fn beginHeldTape(self: *FreqSolver, omegas: []const f64, tape: usize) !?freq_batch.LaneChunk`
 //! - `pub fn finishHeldTape(self: *FreqSolver, failed: []const u8) void`
 //! - `pub fn replayCurrentHeld(self: *FreqSolver, omegas: []const f64) Allocator.Error!usize`
 //! - `pub fn completeHeldPolicy(self: *FreqSolver, count: usize, on_host: bool) void`
 //! - `pub fn ensureHeldOnHost(self: *FreqSolver, omegas: []const f64) !void`
 //! - `pub fn packHeld(self: *const FreqSolver, count: usize, lower: []f64, upper: []f64, diag: []f64) void`
+//! - `pub fn packComplexHeld(self: *const FreqSolver, count: usize, lower: []f64, upper: []f64, diag: []f64) void`
 //! - `pub fn factorEach(self: *FreqSolver, omegas: []const f64) !void`
 //! - `pub fn factorEachSparse(self: *FreqSolver, sp: *FreqSolver.Sparse, omegas: []const f64) !void`
 //! - `pub fn replayTape(self: *FreqSolver, sp: *FreqSolver.Sparse, omegas: []const f64, tape: usize) !usize`
@@ -51,6 +53,51 @@ pub fn heldTape(self: *const FreqSolver) ?freq_batch.LaneChunk {
     };
     if (sp.held.len == 0) return null;
     return freq_batch.laneChunk(sp, sp.held[0].base);
+}
+
+/// `packHeld` for complex held factors, in `kernels/frequency.zig`'s
+/// complex layout: each buffer's real plane, then its imaginary one;
+/// `diag` holds the pivot reciprocals. Complex factors hold no
+/// identity harmonic. The caller sized the slices from
+/// `complexHeldTape` and `count`.
+pub fn packComplexHeld(self: *const FreqSolver, count: usize, lower: []f64, upper: []f64, diag: []f64) void {
+    const W = FreqSolver.W;
+    const V = ComplexLaneLu(W).V;
+    const sp = &self.strategy.sp;
+    const lu = complexHeldTape(self).?.lu;
+    assert(count > 0 and sp.cx_held.len == (count + W - 1) / W);
+    assert(self.held_id.items.len == 0);
+    assert(lower.len == 2 * lu.lx.items.len * count);
+    assert(upper.len == 2 * lu.ux.items.len * count);
+    assert(diag.len == self.nn * count);
+    const put = struct {
+        fn f(re: []const V, im: []const V, out: []f64, m: usize, k: usize, lane: usize) void {
+            for (re, im, 0..) |vr, vi, p| {
+                const r: [W]f64 = vr;
+                const i: [W]f64 = vi;
+                out[p * m + k] = r[lane];
+                out[(re.len + p) * m + k] = i[lane];
+            }
+        }
+    }.f;
+    for (0..count) |k| {
+        const group = sp.cx_held[k / W];
+        put(group.lr, group.li, lower, count, k, k % W);
+        put(group.ur, group.ui, upper, count, k, k % W);
+        put(group.dr, group.di, diag, count, k, k % W);
+    }
+}
+
+/// `heldTape` for complex held factors (`complex_held`): the n x n
+/// proxy tape every group replayed. Null for dense blocks and for
+/// stacked held factors.
+pub fn complexHeldTape(self: *const FreqSolver) ?freq_batch.ComplexChunk {
+    const sp = switch (self.strategy) {
+        .sp => |*s| s,
+        .dense => return null,
+    };
+    if (sp.cx_held.len == 0) return null;
+    return .{ .lu = sp.cx_held[0].base, .src_col_ptr = sp.src_col_ptr, .g = sp.g_vals, .c = sp.c_vals, .growth = sp.slv.params.refactor_growth_limit, .fresh = false };
 }
 
 /// Host pivot-selection boundary for a resident factorEach provider.

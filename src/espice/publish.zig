@@ -49,7 +49,8 @@ pub fn openStream(self: *Problem) !void {
     if (!sidesAllowed(self) or self.next_output != 0 or self.streaming != null) return;
     if (self.session.outputs.items.len == 0) return;
     const id = self.session.outputs.items[0];
-    if ((try self.session.info(id)).status != .pending) return;
+    // A `.four`/`.fft` reads a `.tran`'s rows after it ends (#231).
+    if ((try self.session.info(id)).status != .pending or self.session.resultRead(id)) return;
     const job = try self.session.query(id);
     for (deck.measures) |m| if (m.analysis == job) return;
     const schema = try analysis.schemaOf(self.gpa, &self.prepared.circuit, deck, job);
@@ -75,11 +76,12 @@ pub fn openStream(self: *Problem) !void {
 
 /// What `openStream` asks of the whole run before any plot streams: a final
 /// plan, nothing that reads results after the run, and a probe label per
-/// column.
+/// column, with no device operating-point variable computed from the
+/// finished rows.
 pub fn sidesAllowed(self: *const Problem) bool {
     const deck = &self.prepared.deck;
     return self.session.config.final_plan and self.save_path == null and deck.stims.len == 0 and
-        self.prepared.tuner == null and deck.probe_labels.len == deck.probes.len;
+        self.prepared.tuner == null and deck.soa.limits.len == 0 and deck.probe_labels.len == deck.probes.len and deck.opvars.len == 0;
 }
 
 /// `Session.stream_opener`: a transient or AC plot that no `.meas` card and
@@ -94,7 +96,7 @@ pub fn openSide(ctx: *anyopaque, id: QueryId, job: Query) ?*std.Io.Writer {
         .ac => {},
         else => return null, // else: only a transient or AC sweep streams its rows
     }
-    if (self.streaming == id or self.tangent_steps.contains(id)) return null;
+    if (self.streaming == id or self.tangent_steps.contains(id) or self.session.resultRead(id)) return null;
     for (self.prepared.deck.measures) |m| if (m.analysis == job) return null;
     self.sides.ensureUnusedCapacity(self.gpa, 1) catch return null;
     const side = (self.delivery.beginSide(self.io) catch return null) orelse return null;
@@ -142,13 +144,14 @@ pub fn finishWhenDone(self: *Problem) void {
 
 /// Under a final plan, frees each main-session query whose plot is written
 /// and whose `.meas` block is printed, so a `-r` sweep holds the points
-/// still running rather than the whole run. Nothing with `.save` or
-/// `.stim`, which read the results after the run. Keeps the Monte Carlo
+/// still running rather than the whole run. Nothing with `.save`, `.stim`,
+/// `.option soa` (`print_soa`) or `--emir` (`write_emir_json`), which read
+/// the results after the run. Keeps the Monte Carlo
 /// trials (`print_measures` reads them at the end), the tangent runs, and a
 /// requested OP that later queries still read. Running out of memory only
 /// keeps the rest for later.
 pub fn releaseDelivered(self: *Problem) void {
-    if (!self.session.config.final_plan or self.save_path != null or self.prepared.deck.stims.len != 0) return;
+    if (!self.session.config.final_plan or self.save_path != null or self.prepared.deck.stims.len != 0 or self.prepared.deck.soa.limits.len != 0 or self.emir) return;
     const outputs = self.session.outputs.items;
     const cursor = if (self.live_measures) |live| live.cursor else report.Cursor{};
     const printed = if (self.prepared.deck.measures.len == 0 or cursor.session > 0) outputs.len else cursor.next;

@@ -1,7 +1,7 @@
 //! Monte Carlo draws. In: a deck's `.option seed`/`sampling` and a trial.
 //! Out: counter-based draws per distribution site (Latin hypercube
 //! optional), and the live values of a point or trial set on the netlist.
-//! Cites: HSPICE [SA] Ch.25 (Monte Carlo); Acklam's normal quantile.
+//! Cites: HSPICE [SA] Ch.25 (Monte Carlo), #239 (SIGMA_SCALE).
 //!
 //! Contents:
 //! - `pub const Sampler`
@@ -11,10 +11,15 @@
 //! - `pub fn sample(self: OneSigma, site: u64, f: expr.Fn, args: []const f64) f64`
 //! - `pub const Trial`
 //! - `pub fn uniform(t: Trial, site: u64) f64`
+//! - `pub fn normal(t: Trial, site: u64) f64`
+//! - `pub fn unit(t: Trial, site: u64) f64`
+//! - `pub const Sss`
+//! - `pub fn scaleOf(s: Sss, trial: u64) ?usize`
+//! - `pub fn fails(s: Sss, gpa: std.mem.Allocator, values: []const f64) !bool`
 //! - `pub fn sample(self: TrialDraw, site: u64, f: expr.Fn, args: []const f64) f64`
 //! - `pub fn setPoint(scratch: std.mem.Allocator, stack: *std.ArrayList(expr.Val), nl: *Netlist, pt: variants.Point) !void`
 //! - `pub fn drawOnce(scratch: std.mem.Allocator, nl: *Netlist) !void`
-//! - `pub fn normalQuantile(u: f64) f64`
+//! - `pub fn sssCards(arena: std.mem.Allocator, deck: netlist.Deck) ![]const Sss`
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -117,9 +122,61 @@ pub const Trial = struct {
     trial: u32,
     /// Position within the sweep; picks the Latin hypercube stratum.
     index: u32,
+    /// `SIGMA_SCALE` (#239): every draw's sigma times this.
+    scale: f64 = 1,
+    /// `.wcd` (#240): each site's standard normal coordinate, fixed; a site
+    /// it lacks sits at 0, its nominal. The sampler then answers only a
+    /// `limit`, which `WorstCase` refuses wherever it moves a parameter.
+    z: ?*const std.AutoHashMapUnmanaged(u64, f64) = null,
 
     pub fn uniform(t: Trial, site: u64) f64 {
         return t.sampler.uniform(site, t.trial, t.index);
+    }
+
+    /// The standard normal coordinate of `site` times the sigma scale; at
+    /// scale 1 the bits of `normalQuantile(uniform)`. Under `z`, its entry.
+    pub fn normal(t: Trial, site: u64) f64 {
+        if (t.z) |z| return z.get(site) orelse 0;
+        return t.scale * core.numerics.normalQuantile(t.uniform(site));
+    }
+
+    /// The uniform of `site` through the scaled normal, Φ(s·Φ⁻¹(u)): the
+    /// scale acts in the standard-normal space, so a uniform's mass moves
+    /// to its edges. At scale 1 it is `uniform`, bit for bit. Under `z`,
+    /// Φ of its entry (Rosenblatt's map).
+    pub fn unit(t: Trial, site: u64) f64 {
+        return if (t.scale == 1 and t.z == null) t.uniform(site) else core.numerics.normalCdf(t.normal(site));
+    }
+};
+
+/// A `SWEEP MONTE=n SIGMA_SCALE=... FAIL=...` card (#239): trial
+/// `first + j*n + k` of its run drew at `scales[j]`.
+pub const Sss = struct {
+    /// The analysis whose `.meas` cards FAIL reads.
+    kind: core.query.Kind,
+    /// Its `n`, `first`, `scales` and compiled `fail`.
+    monte: netlist.Monte,
+
+    /// The scale row of HSPICE trial `trial`; null for a trial the card
+    /// did not plan.
+    pub fn scaleOf(s: Sss, trial: u64) ?usize {
+        if (trial < s.monte.first) return null;
+        const j = (trial - s.monte.first) / s.monte.n;
+        if (j >= s.monte.scales.len) return null;
+        const row: usize = @intCast(j);
+        return row;
+    }
+
+    /// Whether the trial whose `.meas` values are `values` (parallel to
+    /// the deck's cards) fails: a card FAIL reads has no value, or FAIL
+    /// is NaN or nonzero. Fails only with `OutOfMemory`, in `gpa`.
+    pub fn fails(s: Sss, gpa: std.mem.Allocator, values: []const f64) !bool {
+        const f = s.monte.fail;
+        for (f.ops) |op| if (op.code == .live and !std.math.isFinite(values[op.a])) return true;
+        var stack: std.ArrayList(expr.Val) = .empty;
+        defer stack.deinit(gpa);
+        // NaN != 0 too.
+        return (try expr.eval(gpa, &stack, f.ops, f.consts, values, null)) != 0;
     }
 };
 
@@ -149,11 +206,12 @@ const TrialDraw = struct {
         };
         var best: f64 = 0;
         for (0..mult) |m| {
-            const u = self.trial.uniform(netlist.siteKey(site, m));
+            const key = netlist.siteKey(site, m);
+            // A `limit` is two points either side: no sigma scale moves it.
             const d = switch (f) {
-                .agauss, .gauss => scale * normalQuantile(u),
-                .limit => if (u < 0.5) -scale else scale,
-                else => scale * (2 * u - 1),
+                .agauss, .gauss => scale * self.trial.normal(key),
+                .limit => if (self.trial.uniform(key) < 0.5) -scale else scale,
+                else => scale * (2 * self.trial.unit(key) - 1),
             };
             if (m == 0 or @abs(d) > @abs(best)) best = d;
         }
@@ -178,34 +236,19 @@ pub fn drawOnce(scratch: std.mem.Allocator, nl: *Netlist) !void {
     _ = try nl.setLive(scratch, &stack, nl.live.nominal, TrialDraw{ .trial = .{ .sampler = &sampler, .trial = 1, .index = 0 } });
 }
 
-/// The standard normal quantile Φ⁻¹(u), u in (0, 1): Acklam's rational
-/// approximation, relative error below 1.2e-9. At 0 or 1 it returns NaN,
-/// so callers draw from the open interval.
-pub fn normalQuantile(u: f64) f64 {
-    const a = [_]f64{ -3.969683028665376e+01, 2.209460984245205e+02, -2.759285104469687e+02, 1.383577518672690e+02, -3.066479806614716e+01, 2.506628277459239e+00 };
-    const b = [_]f64{ -5.447609879822406e+01, 1.615858368580409e+02, -1.556989798598866e+02, 6.680131188771972e+01, -1.328068155288572e+01 };
-    const c = [_]f64{ -7.784894002430293e-03, -3.223964580411365e-01, -2.400758277161838e+00, -2.549732539343734e+00, 4.374664141464968e+00, 2.938163982698783e+00 };
-    const d = [_]f64{ 7.784695709041462e-03, 3.224671290700398e-01, 2.445134137142996e+00, 3.754408661907416e+00 };
-    const low = 0.02425;
-    if (u < low or u > 1 - low) {
-        const q = @sqrt(-2 * @log(if (u < low) u else 1 - u));
-        const x = (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) /
-            ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1);
-        return if (u < low) x else -x;
-    }
-    const q = u - 0.5;
-    const r = q * q;
-    return (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q /
-        (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1);
+/// The deck's SIGMA_SCALE cards, their slices copied into `arena`.
+pub fn sssCards(arena: std.mem.Allocator, deck: netlist.Deck) ![]const Sss {
+    var out: std.ArrayList(Sss) = .empty;
+    for (deck.analyses) |a| if (a.sweep == .monte and a.sweep.monte.scales.len != 0) {
+        var m = a.sweep.monte;
+        m.scales = try arena.dupe(f64, m.scales);
+        m.fail = .{ .text = try arena.dupe(u8, m.fail.text), .ops = try arena.dupe(expr.Op, m.fail.ops), .consts = try arena.dupe(f64, m.fail.consts) };
+        try out.append(arena, .{ .kind = a.kind, .monte = m });
+    };
+    return out.items;
 }
 
 // ---- private ----
-
-test "normal quantile: symmetric, and the 97.5% point is 1.96" {
-    try std.testing.expectApproxEqAbs(@as(f64, 0), normalQuantile(0.5), 1e-12);
-    try std.testing.expectApproxEqAbs(@as(f64, 1.959963984540054), normalQuantile(0.975), 1e-8);
-    try std.testing.expectApproxEqAbs(-normalQuantile(0.01), normalQuantile(0.99), 1e-12);
-}
 
 test "Sampler.init reads seed and sampling method, and a wild seed saturates" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -247,12 +290,26 @@ test "TrialDraw keeps the largest deviation of a multiplier's draws" {
     try std.testing.expectEqual(@as(f64, 3), draw.sample(9, .agauss, &.{3}));
 }
 
-test "normal quantile is monotone across the tail seam" {
-    var prev = normalQuantile(1e-12);
-    for ([_]f64{ 1e-6, 0.02, 0.02425, 0.0243, 0.3, 0.5, 0.7, 0.97575, 0.98, 1 - 1e-12 }) |u| {
-        const x = normalQuantile(u);
-        try std.testing.expect(x > prev);
-        prev = x;
+test "TrialDraw at sigma scale 1 is the unscaled draw's bits; at s, s times its normal coordinate (#239)" {
+    // Oracle: the draw written out from the sampler's uniform, as it was
+    // before the scale existed, and Φ(s·Φ⁻¹(u)) for a uniform.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var sampler = try Sampler.init(arena.allocator(), &.{}, 1);
+    const q = core.numerics.normalQuantile;
+    const u = sampler.uniform(netlist.siteKey(5, 0), 1, 0);
+    for ([_]f64{ 1, 3 }) |s| {
+        const draw: TrialDraw = .{ .trial = .{ .sampler = &sampler, .trial = 1, .index = 0, .scale = s } };
+        const gauss = draw.sample(5, .agauss, &.{ 0, 0.5, 2 });
+        const unif = draw.sample(5, .aunif, &.{ 0, 0.5 });
+        if (s == 1) {
+            try std.testing.expectEqual(@as(u64, @bitCast(0.25 * q(u))), @as(u64, @bitCast(gauss)));
+            try std.testing.expectEqual(@as(u64, @bitCast(0.5 * (2 * u - 1))), @as(u64, @bitCast(unif)));
+        } else {
+            try std.testing.expectApproxEqRel(s * 0.25 * q(u), gauss, 1e-14);
+            try std.testing.expectApproxEqRel(0.5 * (2 * core.numerics.normalCdf(s * q(u)) - 1), unif, 1e-14);
+        }
+        // A two-point `limit` does not move with the scale.
+        try std.testing.expectEqual(@as(f64, if (u < 0.5) 1.5 else 2.5), draw.sample(5, .limit, &.{ 2, 0.5 }));
     }
-    try std.testing.expect(std.math.isNan(normalQuantile(0)));
 }

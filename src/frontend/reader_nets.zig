@@ -47,6 +47,7 @@ const cards = card_table.cards;
 const cardOf = card_table.cardOf;
 const Scope = reader_frame.Scope;
 const Frame = reader_frame.Frame;
+const Replay = reader_frame.Replay;
 
 /// The stage's `Reader` methods over dialect syntax `S`; `Reader(S)`
 /// aliases each one as its own decl.
@@ -183,6 +184,10 @@ pub fn Methods(comptime S: type) type {
                 .models_mark = @intCast(r.instance_models.items.len),
             };
             defer r.instance_models.shrinkRetainingCapacity(child.models_mark);
+            if (r.replays.len == 0) {
+                r.replays = try r.arena.alloc(?*const Replay, r.lines.items.len);
+                @memset(r.replays, null);
+            }
             // Models first, as ngspice reads every `.model` before any
             // device: the ones under a branch this instance keeps.
             const locals = r.local_models.items[sub.models_lo..sub.models_hi];
@@ -209,7 +214,7 @@ pub fn Methods(comptime S: type) type {
             var nested: u32 = 0;
             for (r.lines.items[sub.first..sub.end], sub.first..) |line, i| {
                 if (line[0] != '.') {
-                    if (nested == 0 and branches.active()) try r.readDevice(line, r.kindOf(i), &child);
+                    if (nested == 0 and branches.active()) try r.readDevice(line, r.kindOf(i), &child, i);
                     continue;
                 }
                 if (!sub.has_cond and !sub.has_nested) continue;

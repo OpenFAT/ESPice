@@ -29,8 +29,11 @@
 //! - `pub const StepTarget` (card_rows.zig)
 //! - `pub const Step` (card_rows.zig)
 //! - `pub const Monte` (card_rows.zig)
+//! - `pub const Fail` (card_rows.zig)
 //! - `pub const Sweep` (card_rows.zig)
 //! - `pub const Optimize` (card_rows.zig)
+//! - `pub const Wcd` (card_rows.zig)
+//! - `pub const WcdSpec` (card_rows.zig)
 //! - `pub const Data` (card_rows.zig)
 //! - `pub const Variation` (card_rows.zig)
 //! - `pub const Live` (card_rows.zig)
@@ -40,6 +43,7 @@
 //! - `pub const ForeignKind` (card_rows.zig)
 //! - `pub const Foreign` (card_rows.zig)
 //! - `pub const DataFile` (card_rows.zig)
+//! - `pub const SoaRating` (card_rows.zig)
 //! - `pub const Deck` (card_rows.zig)
 //! - `pub const Mosra` (card_rows.zig)
 //! - `pub const AppendModel` (card_rows.zig)
@@ -48,9 +52,12 @@
 //! - `pub const isGround` (netlist_view.zig)
 //! - `pub const isGroundName` (netlist_view.zig)
 //! - `pub const nameIndex` (netlist_view.zig)
+//! - `pub const isOpVar` (netlist_view.zig)
+//! - `pub const ParseOptions` (reader_frame.zig)
 //! - `pub const lines, spectre_rewrite, source, expr`
 //! - `pub fn parse(arena: Allocator, src: []const u8, dialect: Dialect) Error!Netlist`
-//! - `pub fn parseLive(arena: Allocator, src: []const u8, dialect: Dialect, live: []const []const u8) (Error || error{UnknownParameter})!Netlist`
+//! - `pub fn parseWith(arena: Allocator, src: []const u8, dialect: Dialect, opts: ParseOptions) Error!Netlist`
+//! - `pub fn parseLive(arena: Allocator, src: []const u8, dialect: Dialect, live: []const []const u8, opts: ParseOptions) (Error || error{UnknownParameter})!Netlist`
 //! - `pub fn parseAnalyses(arena: Allocator, text: []const u8, lookup: anytype) (Error || error{UnsupportedDirectiveMutation})![]Analysis`
 
 const std = @import("std");
@@ -89,6 +96,7 @@ const reader_measures = @import("reader_measures.zig");
 const reader_nets = @import("reader_nets.zig");
 const reader_devices = @import("reader_devices.zig");
 const reader_behavioural = @import("reader_behavioural.zig");
+const reader_replay = @import("reader_replay.zig");
 const appendAnalysis = reader_frame.appendAnalysis;
 const cardOf = card_table.cardOf;
 const isSn = card_table.isSn;
@@ -130,10 +138,16 @@ pub const StepTarget = card_rows.StepTarget;
 pub const Step = card_rows.Step;
 /// HSPICE `MONTE=n [FIRSTRUN=k]`: trials `first..first + n - 1`; or (card_rows.zig).
 pub const Monte = card_rows.Monte;
+/// A SIGMA_SCALE run's `FAIL=` test over its analysis's `.meas` cards (card_rows.zig).
+pub const Fail = card_rows.Fail;
 /// An HSPICE sweep on one analysis card: the card runs once per point.
 pub const Sweep = card_rows.Sweep;
 /// HSPICE optimization [SA Ch.27]: `<card> SWEEP OPTIMIZE=name (card_rows.zig).
 pub const Optimize = card_rows.Optimize;
+/// ESPice `.wcd` (#240): worst-case distance specs over `.meas` cards (card_rows.zig).
+pub const Wcd = card_rows.Wcd;
+/// One `.wcd` spec: a `.meas` card and its bound (card_rows.zig).
+pub const WcdSpec = card_rows.WcdSpec;
 /// An inline `.data` table: one target per column, `values` row-major.
 pub const Data = card_rows.Data;
 /// One Monte Carlo variation of a model or element parameter: HSPICE (card_rows.zig).
@@ -152,6 +166,8 @@ pub const ForeignKind = card_rows.ForeignKind;
 pub const Foreign = card_rows.Foreign;
 /// A `ForeignKind.data` file's contents, read by `prepare`.
 pub const DataFile = card_rows.DataFile;
+/// One limit of the `.options soalimits=` file (#238) (card_rows.zig).
+pub const SoaRating = card_rows.SoaRating;
 /// Deck data: everything that is not circuit topology.
 pub const Deck = card_rows.Deck;
 /// HSPICE `.mosra` options as read [SA Ch.29]; SimMode 0 or 2.
@@ -168,24 +184,33 @@ pub const isGround = netlist_view.isGround;
 pub const isGroundName = netlist_view.isGroundName;
 /// Index of the first card name in `names` equal to `target`, byte for (netlist_view.zig).
 pub const nameIndex = netlist_view.nameIndex;
+/// Whether an output name is a device operating-point variable (#236) (netlist_view.zig).
+pub const isOpVar = netlist_view.isOpVar;
+/// How a parse reads its device cards (#230) (reader_frame.zig).
+pub const ParseOptions = reader_frame.ParseOptions;
 
 /// Parses `src` in `dialect` into `arena`. The result borrows `src` (paths
 /// and the title keep their original case) and the arena, which should be
 /// an arena: nothing is freed piecewise. Fails per `Error`; partial
 /// results stay in the arena.
 pub fn parse(arena: Allocator, src: []const u8, dialect: Dialect) Error!Netlist {
-    return parseLive(arena, src, dialect, &.{}) catch |err| switch (err) {
+    return parseWith(arena, src, dialect, .{});
+}
+
+/// `parse`, reading device cards per `opts`.
+pub fn parseWith(arena: Allocator, src: []const u8, dialect: Dialect, opts: ParseOptions) Error!Netlist {
+    return parseLive(arena, src, dialect, &.{}, opts) catch |err| switch (err) {
         error.UnknownParameter => unreachable,
         else => |e| return e,
     };
 }
 
-/// `parse`, with the global `.param` names in `live` kept live as a
+/// `parseWith`, with the global `.param` names in `live` kept live as a
 /// swept name is (`Netlist.tunable`), so a later `setLive` can move them.
 /// `UnknownParameter` for a name no global `.param` defines.
-pub fn parseLive(arena: Allocator, src: []const u8, dialect: Dialect, live: []const []const u8) (Error || error{UnknownParameter})!Netlist {
+pub fn parseLive(arena: Allocator, src: []const u8, dialect: Dialect, live: []const []const u8, opts: ParseOptions) (Error || error{UnknownParameter})!Netlist {
     return switch (dialect) {
-        inline else => |d| Reader(lines.Syntax(d)).run(arena, src, d, live),
+        inline else => |d| Reader(lines.Syntax(d)).run(arena, src, d, live, opts),
     };
 }
 
@@ -253,6 +278,7 @@ test {
     _ = reader_nets;
     _ = reader_devices;
     _ = reader_behavioural;
+    _ = reader_replay;
     _ = measure;
     _ = pattern;
     _ = spectre_rewrite;

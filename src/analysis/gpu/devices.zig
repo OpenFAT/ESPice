@@ -13,7 +13,7 @@
 //! - `pub threadlocal var tape_builds: bool`
 //! - `pub const devices_max: usize`
 //! - `pub const Tape = struct { idx, tab }`
-//! - `pub const Device = struct { ordinal, cap }`
+//! - `pub const Device = struct { ordinal, cap, budget }`
 //! - `pub const Placement = struct` with `pub fn release(self: Placement) void`
 //! - `pub const TapeShare = struct` with `pub fn take`, `pub fn publish`, `pub fn fail`, `pub fn deinit`
 //! - `pub fn table() []const Device`
@@ -21,6 +21,7 @@
 //! - `pub fn record(ord: c_int, rows: usize, ns: u64) void`
 //! - `pub fn weighted(buf: []Device) []const Device`
 //! - `pub fn place() Placement`
+//! - `pub fn waveLanes(devs: []const Device, lane_bytes: usize) usize`
 //! - `pub fn split(devs: []const Device, rows: usize, ends: []usize, who: []c_int) usize`
 
 const std = @import("std");
@@ -55,9 +56,10 @@ pub const devices_max: usize = 16;
 /// A lane pivot tape: the index tables and their offsets.
 pub const Tape = struct { idx: []u32, tab: lk.LaneTab };
 
-/// One usable device: its ordinal and its share of the GPU work, in host
-/// cores (`lanes.share`'s unit).
-pub const Device = struct { ordinal: c_int, cap: f64 };
+/// One usable device: its ordinal, its share of the GPU work, in host
+/// cores (`lanes.share`'s unit), and the device bytes a lane wave may take
+/// on it (`waveLanes`); maxInt where the driver reports no free memory.
+pub const Device = struct { ordinal: c_int, cap: f64, budget: usize = std.math.maxInt(usize) };
 
 /// A query's device (`place`): its handles open on it until `release`.
 pub const Placement = struct {
@@ -235,6 +237,21 @@ pub fn place() Placement {
     return .{ .slot = best, .prev = prev };
 }
 
+/// The most lanes of `lane_bytes` device bytes one wave may hold: the whole
+/// wave fits every device's `budget`, since one slice may take all of it
+/// (one device, or `split` folding the others into it). maxInt without a
+/// device or a budget, and at least 1.
+/// ponytail: the whole wave per device, so k devices are capped k times too
+/// low; cap by each device's `split` share if multi-GPU waves bind.
+pub fn waveLanes(devs: []const Device, lane_bytes: usize) usize {
+    var lanes: usize = std.math.maxInt(usize);
+    // An unknown budget (maxInt) caps nothing.
+    for (devs) |d| if (d.budget != std.math.maxInt(usize)) {
+        lanes = @min(lanes, d.budget / @max(lane_bytes, 1));
+    };
+    return @max(lanes, 1);
+}
+
 /// Cuts `rows` lanes into contiguous row-order slices by capacity, one per
 /// device that gets at least `slice_rows_min` rows (the first device takes
 /// what the others leave). Writes each slice's end row and device into
@@ -299,7 +316,13 @@ fn readDevices(out: []Device) usize {
         var same: f64 = 0;
         for (infos[0..n]) |o| same += @floatFromInt(@intFromBool(std.mem.eql(u8, &o.uuid, &info.uuid)));
         assert(same >= 1); // A card shares its uuid with itself.
-        d.* = .{ .ordinal = info.ordinal, .cap = cardCap(info) / same };
+        // The card's free memory at the read, less 512 MiB for each context
+        // on it: its dense-peel pool (256 MiB) and its kernel images.
+        // ponytail: read once; GPU work running beside a wave (other jobs'
+        // waves, single-circuit queries) is not subtracted.
+        const reserve = @as(u64, @intFromFloat(same)) << 29;
+        const budget: usize = if (info.mem_free == 0) std.math.maxInt(usize) else @intCast(@min(info.mem_free -| reserve, std.math.maxInt(usize)));
+        d.* = .{ .ordinal = info.ordinal, .cap = cardCap(info) / same, .budget = budget };
     }
     return n;
 }
@@ -314,6 +337,21 @@ fn cardCap(info: DeviceInfo) f64 {
     const ratio: f64 = @floatFromInt(@max(info.fp64_ratio, 1));
     const sms: f64 = @floatFromInt(@max(info.sms, 1));
     return e1_cores * e1_fp64_ratio / ratio * (sms / e1_sms);
+}
+
+test "waveLanes fits the whole wave on the tightest device's budget" {
+    const mib: usize = 1 << 20;
+    const two = [_]Device{ .{ .ordinal = 0, .cap = 1, .budget = 1024 * mib }, .{ .ordinal = 1, .cap = 1, .budget = 512 * mib } };
+    try std.testing.expectEqual(@as(usize, 512), waveLanes(&two, mib));
+    // A partial lane does not fit: 512 MiB holds 341 lanes of 1.5 MiB.
+    try std.testing.expectEqual(@as(usize, 341), waveLanes(&two, 3 * mib / 2));
+    // A lane past the budget still runs, one per wave.
+    try std.testing.expectEqual(@as(usize, 1), waveLanes(&two, 1024 * mib));
+    // No device, or no reported free memory: no cap, so the host wave stands.
+    const max: usize = std.math.maxInt(usize);
+    try std.testing.expectEqual(max, waveLanes(&.{}, mib));
+    const unknown = [_]Device{.{ .ordinal = 0, .cap = 1 }};
+    try std.testing.expectEqual(max, waveLanes(&unknown, mib));
 }
 
 test "split cuts rows by capacity in device order and folds short slices" {

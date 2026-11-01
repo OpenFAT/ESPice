@@ -1,12 +1,18 @@
 //! What an expanded card is read under. In: the subcircuit definitions and
 //! `.param` scopes. Out: `Frame` (path, port map, scopes), `Subckt` and
-//! model-line rows, and the analysis-net resolution.
-//! Cites: ngspice subckt.c (modtranslate: local models), inp.c; #64.
+//! model-line rows, a card's frame-free `Replay`, and the analysis-net
+//! resolution.
+//! Cites: ngspice subckt.c (modtranslate: local models), inp.c; #64, #229,
+//! #230.
 //!
 //! Contents:
 //! - `pub const Entry`
 //! - `pub const Scope`
 //! - `pub const Frame`
+//! - `pub const ParseOptions`
+//! - `pub const Replay`
+//! - `pub const ReplayField`
+//! - `pub const scan_threads_max`
 //! - `pub const PortIndex`
 //! - `pub const port_scan_max`
 //! - `pub const subckt_depth_max`
@@ -67,6 +73,45 @@ pub const Frame = struct {
     /// Where this instance's rows start in `Reader.instance_models`.
     models_mark: u32 = 0,
 };
+
+/// How a parse reads its device cards. Every choice gives the same netlist,
+/// byte for byte.
+pub const ParseOptions = struct {
+    /// Threads that scan the top-level device cards' fields before the
+    /// cards are read in line order (#230); null takes the CPU count, at
+    /// most 16. 0 scans nothing: every card is read whole.
+    threads: ?u32 = null,
+    /// Fewest top-level device cards the scan runs for; a smaller deck
+    /// reads every card whole.
+    scan_min: u32 = 16 * 1024,
+};
+
+/// A subcircuit body card as `readDevice` first read it, for the instances
+/// after (#229), or a top-level card as `scan` read it (#230): what the
+/// line's text alone decides, which is the same under every frame. A name,
+/// an expression and a model are frame-dependent and are re-read from their
+/// position in card order, so every scope lookup runs as it would have.
+pub const Replay = struct {
+    nodes: []const []const u8,
+    /// The model or subcircuit word, null on a fixed-pin card without one.
+    model: ?[]const u8,
+    fields: []const ReplayField,
+};
+
+/// A value field past the nodes and model, in card order.
+pub const ReplayField = struct {
+    /// A `key=value` field's key, or a positional value's first token.
+    word: []const u8,
+    keyed: bool,
+    /// A keyed literal's value (`literalValue`), or a scanned positional
+    /// literal's (`valueAt`'s `parseNum`); null re-reads from `pos`.
+    num: ?f64,
+    /// Just past the `=`, or past `word` for a positional.
+    pos: usize,
+};
+
+/// Most threads `scanCards` runs, each with its own arena.
+pub const scan_threads_max = 16;
 
 /// A subcircuit's port names to their first position.
 pub const PortIndex = std.StringHashMapUnmanaged(u32);

@@ -2,12 +2,14 @@
 //! HSPICE `.model OPT` optimizations (Levenberg-Marquardt fits or
 //! bisections), each point batch run as one session of the optimized card's
 //! queries, and the MOSRA stress run with its degradation table. Both run
-//! once, before any query of the Problem advances.
+//! once, before any query of the Problem advances, and then the `.wcd`
+//! searches (wcd.zig), which evaluate their points as the optimizer does.
 //! Cites: dev/analysis/optimize.md, dev/analysis/mosra.md, [SA Ch.19].
 //!
 //! Contents:
 //! - `pub fn runPending(self: *Problem) !void`
 //! - `pub fn tangentable(self: *const Problem, job: Query) bool`
+//! - `pub fn evaluateRows(self: *Problem, rows: core.Variants, template: []const Query, direct: bool, guess: []const f64, values: []f64, first: ?*std.ArrayList(f64)) !void`
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -16,17 +18,20 @@ const core = @import("core");
 const frontend = @import("frontend");
 const output = @import("output");
 const Problem = @import("Problem.zig");
+const wcd = @import("wcd.zig");
 const requests = core.query;
 const Query = requests.Query;
 const QueryId = requests.QueryId;
 const Session = analysis.session.Session;
 
-/// Runs the deck's optimizations and then its MOSRA stress run, each the
-/// first time only; a deck with neither returns at once. Fails with the
-/// first failing point batch's or stress run's error.
+/// Runs the deck's optimizations, then its MOSRA stress run, then its
+/// `.wcd` searches (#240), each the first time only; a deck with none
+/// returns at once. Fails with the first failing point batch's or stress
+/// run's error.
 pub fn runPending(self: *Problem) !void {
     try optimize(self);
     try age(self);
+    try wcd.worstCase(self);
     if (self.prepared.tuner) |t| assert(self.optimization.len + self.bisection.len == t.bases.len);
     if (self.prepared.deck.mosra != null) assert(self.aged);
 }
@@ -45,6 +50,79 @@ pub fn tangentable(self: *const Problem, job: Query) bool {
             @backingInt(o.method) <= @backingInt(requests.Method.gear_2) and
             !c.needs_tran_op and c.vpi == null and self.session.config.backend == .cpu,
         else => false,
+    };
+}
+
+/// Every `.meas` card's value at each row of `rows` into `values`,
+/// `measures.len` per row: each card over the `template` queries of its
+/// analysis run at that row, NaN where a query failed or a card found no
+/// value. Every operating point starts from `guess` (cold when empty);
+/// `first`, when given, takes the one row 0's first query solved, empty
+/// when it has none. With `direct` (a batched round of `tangentable`
+/// queries) only row 0 runs, and the other rows' results are its runs'
+/// first-order predictions of them (`Dc.tangents`, `Tran.tangents`,
+/// dev/analysis/optimize.md "Direct sensitivities").
+pub fn evaluateRows(self: *Problem, rows: core.Variants, template: []const Query, direct: bool, guess: []const f64, values: []f64, first: ?*std.ArrayList(f64)) !void {
+    var arena_state = std.heap.ArenaAllocator.init(self.gpa);
+    defer arena_state.deinit();
+    const scratch = arena_state.allocator();
+    const count = rows.count();
+    var deck = self.prepared.deck;
+    const cards = deck.measures.len;
+    assert(count >= 1);
+    assert(values.len == count * cards);
+    deck.variants = rows;
+    deck.op_guess = guess;
+    const runs = if (direct) 1 else count;
+    const tangents = try scratch.alloc(u32, if (direct) count - 1 else 0);
+    for (tangents, 1..) |*row, p| row.* = @intCast(p);
+    const jobs = try scratch.alloc(Query, runs * template.len);
+    for (0..runs) |p| for (template, jobs[p * template.len ..][0..template.len]) |job, *copy| {
+        copy.* = job;
+        switch (copy.*) {
+            inline else => |*o| o.tol.variant = @intCast(p),
+        }
+        if (direct) switch (copy.*) {
+            .dc => |*o| o.tangents = tangents,
+            .tran => |*o| o.tangents = tangents,
+            else => unreachable, // else: `tangentable` admits these two
+        };
+    };
+    var session = Session.init(self.query_memory.allocator(), self.io, &self.prepared.circuit, &deck, self.session.config);
+    defer session.deinit();
+    const ids = try scratch.alloc(QueryId, jobs.len);
+    _ = try session.append(jobs, ids);
+    try session.runAll(.{ .max_parallel = self.limits.max_parallel, .quantum = .completion });
+    if (first) |f| {
+        f.clearRetainingCapacity();
+        if (try session.operatingPoint(ids[0])) |x| try f.appendSlice(self.gpa, x);
+    }
+    const card_values = try scratch.alloc(f64, cards);
+    @memset(values, std.math.nan(f64));
+    for (0..count) |p| for (ids[(if (direct) 0 else p) * template.len ..][0..template.len]) |id| {
+        const info = try session.info(id);
+        if (info.status != .complete) continue;
+        var res = try session.result(id);
+        if (direct) {
+            // Block p of the sweep: its own points, or row p's prediction.
+            // A transient keeps its tangent rows apart (`Result.tangents`,
+            // as `points.block` reads them); a `.dc` sweep holds them inline.
+            if (res.tangents.len != 0) {
+                if (p != 0) {
+                    const n = res.npoints * res.varnames.len;
+                    res.data = res.tangents[(p - 1) * n ..][0..n];
+                    res.measured = &.{};
+                }
+                res.tangents = &.{};
+            } else {
+                res.npoints /= count;
+                res.data = res.data[p * res.npoints * res.varnames.len ..][0 .. res.npoints * res.varnames.len];
+            }
+        }
+        output.measureValues(deck.measures, info.kind, res, card_values);
+        for (deck.measures, card_values, values[p * cards ..][0..cards]) |measure, x, *v| {
+            if (measure.analysis == info.kind) v.* = x;
+        }
     };
 }
 
@@ -112,6 +190,7 @@ fn age(self: *Problem) !void {
     @memset(labels, "");
     deck.probes = probes;
     deck.probe_labels = labels;
+    deck.opvars = &.{};
     var session = Session.init(self.query_memory.allocator(), self.io, &self.prepared.circuit, &deck, self.session.config);
     defer session.deinit();
     var id: [1]QueryId = undefined;
@@ -166,14 +245,9 @@ fn search(self: *Problem, t: *frontend.Tuner, template: []const Query, base: usi
 
 /// Residuals of each point of `points` (the optimized parameters' values, n
 /// per point, on top of `t.bases[base]`) into `out`, m per point: the
-/// RESULTS cards' goal errors over the `template` queries run at that
-/// point, NaN where a query failed or a card found no value. Every
-/// operating point starts from `guess` (cold when empty); `first` takes the
-/// one row 0's first query solved, empty when it has none. With `direct` (a
-/// batched round of `tangentable` queries) only row 0 runs, and the other
-/// points' results are its runs' first-order predictions of them
-/// (`Dc.tangents`, `Tran.tangents`, dev/analysis/optimize.md "Direct
-/// sensitivities").
+/// RESULTS cards' goal errors over the `template` queries run at that point
+/// (`evaluateRows`, which says what `direct`, `guess` and `first` do), NaN
+/// where a query failed or a card found no value.
 fn evaluatePoints(self: *Problem, t: *frontend.Tuner, template: []const Query, base: usize, points: []const f64, direct: bool, guess: []const f64, out: []f64, first: *std.ArrayList(f64)) !void {
     var arena_state = std.heap.ArenaAllocator.init(self.gpa);
     defer arena_state.deinit();
@@ -182,59 +256,12 @@ fn evaluatePoints(self: *Problem, t: *frontend.Tuner, template: []const Query, b
     const m = t.results.len;
     if (direct) assert(count == t.spec.live.len + 1);
     assert(out.len == count * m);
-    var deck = self.prepared.deck;
-    deck.variants = try t.rows(scratch, &self.prepared.circuit, points, base);
-    deck.op_guess = guess;
-    const runs = if (direct) 1 else count;
-    const tangents = try scratch.alloc(u32, if (direct) count - 1 else 0);
-    for (tangents, 1..) |*row, p| row.* = @intCast(p);
-    const jobs = try scratch.alloc(Query, runs * template.len);
-    for (0..runs) |p| for (template, jobs[p * template.len ..][0..template.len]) |job, *copy| {
-        copy.* = job;
-        switch (copy.*) {
-            inline else => |*o| o.tol.variant = @intCast(p),
-        }
-        if (direct) switch (copy.*) {
-            .dc => |*o| o.tangents = tangents,
-            .tran => |*o| o.tangents = tangents,
-            else => unreachable, // else: `tangentable` admits these two
-        };
-    };
-    var session = Session.init(self.query_memory.allocator(), self.io, &self.prepared.circuit, &deck, self.session.config);
-    defer session.deinit();
-    const ids = try scratch.alloc(QueryId, jobs.len);
-    _ = try session.append(jobs, ids);
-    try session.runAll(.{ .max_parallel = self.limits.max_parallel, .quantum = .completion });
-    first.clearRetainingCapacity();
-    if (try session.operatingPoint(ids[0])) |x| try first.appendSlice(self.gpa, x);
-    const values = try scratch.alloc(f64, deck.measures.len);
-    @memset(out, std.math.nan(f64));
-    for (0..count) |p| for (ids[(if (direct) 0 else p) * template.len ..][0..template.len]) |id| {
-        const info = try session.info(id);
-        if (info.status != .complete) continue;
-        var res = try session.result(id);
-        if (direct) {
-            // Block p of the sweep: its own points, or row p's prediction.
-            // A transient keeps its tangent rows apart (`Result.tangents`,
-            // as `points.block` reads them); a `.dc` sweep holds them inline.
-            if (res.tangents.len != 0) {
-                if (p != 0) {
-                    const n = res.npoints * res.varnames.len;
-                    res.data = res.tangents[(p - 1) * n ..][0..n];
-                    res.measured = &.{};
-                }
-                res.tangents = &.{};
-            } else {
-                res.npoints /= count;
-                res.data = res.data[p * res.npoints * res.varnames.len ..][0 .. res.npoints * res.varnames.len];
-            }
-        }
-        output.measureValues(deck.measures, info.kind, res, values);
-        for (t.results, out[p * m ..][0..m]) |card, *r| {
-            const measure = deck.measures[card];
-            // Never null: Tuner.init refuses a RESULTS card without GOAL=
-            // (`goalError(0) != null`), and only the goal decides null.
-            if (measure.analysis == info.kind) r.* = measure.goalError(values[card]).?;
-        }
+    const measures = self.prepared.deck.measures;
+    const values = try scratch.alloc(f64, count * measures.len);
+    try evaluateRows(self, try t.rows(scratch, &self.prepared.circuit, points, base), template, direct, guess, values, first);
+    for (0..count) |p| for (t.results, out[p * m ..][0..m]) |card, *r| {
+        // Never null: Tuner.init refuses a RESULTS card without GOAL=
+        // (`goalError(0) != null`), and only the goal decides null.
+        r.* = measures[card].goalError(values[p * measures.len + card]).?;
     };
 }

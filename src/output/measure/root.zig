@@ -8,7 +8,9 @@
 //!
 //! Contents:
 //! - `pub const passes`, `pub const Stream`, `pub const Point`
-//! - `pub const print`, `pub const printFailed`, `pub const printStatistics`
+//! - `pub const print`, `pub const printFailed`, `pub const printStatistics`, `pub const writeStatistics`
+//! - `pub const Sss`, `pub const printSss`, `pub const writeSss`
+//! - `pub const Json`, `pub const writeNumber`, `pub const writeVariant`, `pub const positiveArea`
 //! - `pub const evaluateAll`, `pub const evaluateOutcomes`, `pub const sample`, `pub const markColumns`
 
 const std = @import("std");
@@ -20,11 +22,22 @@ pub const Stream = @import("Stream.zig");
 pub const markColumns = @import("rule.zig").markColumns;
 const listing = @import("listing.zig");
 const card = @import("card.zig");
+const results_json = @import("json.zig");
+const Wave = @import("Wave.zig");
 
 pub const Point = listing.Point;
 pub const print = listing.print;
 pub const printFailed = listing.printFailed;
 pub const printStatistics = listing.printStatistics;
+pub const writeStatistics = listing.writeStatistics;
+pub const Sss = listing.Sss;
+pub const printSss = listing.printSss;
+pub const writeSss = listing.writeSss;
+pub const Json = results_json.Json;
+pub const writeNumber = results_json.writeNumber;
+pub const writeVariant = results_json.writeVariant;
+/// Area under max(v, 0) over one linear segment; `--emir` (analysis/tran/emir.zig) reads it.
+pub const positiveArea = Wave.positiveArea;
 pub const evaluateAll = card.evaluateAll;
 pub const evaluateOutcomes = card.evaluateOutcomes;
 pub const sample = card.sample;
@@ -38,10 +51,11 @@ comptime {
 test {
     _ = @import("sci.zig");
     _ = @import("column.zig");
-    _ = @import("Wave.zig");
+    _ = Wave;
     _ = @import("checks.zig");
     _ = card;
     _ = listing;
+    _ = results_json;
     _ = @import("rule.zig");
     _ = @import("Scan.zig");
     _ = Stream;

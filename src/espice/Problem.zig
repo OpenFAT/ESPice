@@ -37,6 +37,10 @@
 //! - `pub fn print(self: *const Problem, writer: *std.Io.Writer, options: PrintOptions) !void`
 //! - `pub const print_measures = report.printMeasures`
 //! - `pub const print_tangents = report.printTangents`
+//! - `pub const print_soa = soa.printSoa`
+//! - `pub const write_measures_json = report.writeMeasuresJson`
+//! - `pub fn emir_file(self: *const Problem) ?[]const u8`
+//! - `pub const write_emir_json = emir_json.writeEmirJson`
 //! - `pub fn run_results(self: *const Problem, gpa: Allocator) ![]Result`
 //! - `pub fn result(self: *const Problem, id: QueryId) !Result`
 //! - `pub fn summary(self: *const Problem, id: QueryId) !Summary`
@@ -56,10 +60,13 @@ const output = @import("output");
 const config = @import("config.zig");
 const CountingAllocator = @import("CountingAllocator.zig");
 const deck_files = @import("deck_files.zig");
+const emir_json = @import("emir_json.zig");
 const optimizer = @import("optimizer.zig");
 const points = @import("points.zig");
 const publish = @import("publish.zig");
 const report = @import("report.zig");
+const soa = @import("soa.zig");
+const wcd = @import("wcd.zig");
 const Options = config.Options;
 const requests = core.query;
 const Query = requests.Query;
@@ -89,9 +96,9 @@ pub const Reason = points.Reason;
 /// its new bin, and the circuit is rebuilt only when parameter writes
 /// cannot express the point (dev/analysis/variants.md §5).
 ///
-/// The first call also runs the deck's pending `.model OPT` optimization
-/// and MOSRA stress run, so it can take as long as they do and fail with
-/// their errors.
+/// The first call also runs the deck's pending `.model OPT` optimization,
+/// MOSRA stress run and `.wcd` searches, so it can take as long as they do
+/// and fail with their errors.
 ///
 /// All-or-nothing. Fails with `error.UnknownParameter` for a name not in
 /// `Options.live_params` (nor a `.step` name), `error.InvalidArgument` when
@@ -110,8 +117,8 @@ pub const set_params = points.setParams;
 /// refuses is still appended, its queries failed with `TopologyChanged` (a
 /// topology change or a flipped top-level `.if`), `ModelBinNotFound`,
 /// `NonFiniteParameter` or, for any other error building its circuit,
-/// `PointRefused`. The first call also runs the deck's `.model OPT` and
-/// MOSRA runs.
+/// `PointRefused`. The first call also runs the deck's `.model OPT`, MOSRA
+/// and `.wcd` runs.
 ///
 /// All-or-nothing. `error.NoLiveParameters` without `Options.live_params`,
 /// `error.SweptTemplate` for a deck whose analyses already sweep (`.step`,
@@ -150,11 +157,14 @@ pub const point_measures = points.pointMeasures;
 /// so a long-lived Problem appended to batch after batch stays the same
 /// size. Each query keeps its id and status; `result`, `point_measures` and
 /// `point_tangents` then fail with `error.ResultUnavailable`, and nothing
-/// publishes it. A point already released is left alone. Errors as
-/// `point_measures`.
-// ponytail: each query's row (a few hundred bytes) and the point's variant
-// row (its label and parameter writes) stay until `deinit`; drop a released
-// prefix of both if sessions reach billions of points.
+/// publishes it. A point already released is left alone. The variant rows of
+/// `append_points` points go too, at a call made while no query runs; a
+/// query appended with one of them (`tol.variant`) must not outlive its
+/// point, and is refused once it is gone. Errors as `point_measures`.
+// ponytail: each query's row (a few hundred bytes) stays until `deinit`;
+// drop a released prefix of them if sessions reach billions of points.
+// Rows drop as a prefix: a `set_params` row is never freed, so no row after
+// it is dropped.
 pub const release_points = points.releasePoints;
 
 /// The slopes d(card)/d(live parameter) of the `.tran` cards `names` at
@@ -172,10 +182,12 @@ pub const point_tangents = points.pointTangents;
 /// results for every completed result a card can read (tran, transient
 /// noise, AC, DC, FFT, S-parameter, mismatch, loop stability, phase and
 /// periodic noise), in request order, as ngspice prints them, then the
-/// Monte Carlo statistics of each tran, AC and DC card. Cards that cannot
-/// be measured are reported on `err`. With `Options.measures`, it writes
-/// only what `run_all` has not printed there, and returns the first error
-/// printing there.
+/// Monte Carlo statistics of each tran, AC and DC card, or its SIGMA_SCALE
+/// report (#239), then the `.wcd` worst-case distances (#240). Cards that
+/// cannot be measured are reported on `err`; a refused SIGMA_SCALE fit
+/// fails with `error.TooFewScales` or `error.Singular` once everything is
+/// printed. With `Options.measures`, it writes only what `run_all` has not
+/// printed there, and returns the first error printing there.
 pub const print_measures = report.printMeasures;
 
 /// With `Options.point.tangent_step`, writes d(card)/d(live parameter) of
@@ -183,6 +195,41 @@ pub const print_measures = report.printMeasures;
 /// `d(card)/d(param) = value` line each; NaN where a card has no value.
 /// Nothing without tangents.
 pub const print_tangents = report.printTangents;
+
+/// With `.option soa=1` (ngspice `warn=1`), holds every accepted point of
+/// each completed operating point, DC sweep and transient, the variant
+/// runs' too, to the deck's model-card limits (`core.Soa`): one `soa:` line
+/// per instance, limit and excursion, at most `maxwarns` of them, then the
+/// count of every one; nothing when none happened. An excursion runs from
+/// the first point past the limit to the first one back at or under it, so
+/// a point at the limit passes. A limit whose terminal a result lacks (left
+/// out by `.save`) is counted as skipped.
+pub const print_soa = soa.printSoa;
+
+/// Writes every `.meas` result `print_measures` (or `run_all`, with
+/// `Options.measures`) has printed as one JSON document,
+/// `espice-measures/1` (#235): `deck`, the `results` in the printed order,
+/// each with its analysis, its `variant` (`output.writeVariantJson`) and
+/// the `from`/`to`/`at` its line prints, a failed one with a null `value`
+/// and an `error`; then the Monte Carlo `statistics`; then under `.option
+/// soa` every excursion `print_soa` counts (#238), as `instance`,
+/// `quantity`, `key`, `limit`, `peak`, its window `from` and `to` (null at
+/// an operating point, `to` null past the last point), and its result's
+/// `analysis` and `variant`. `error.MeasuresJsonOff` without
+/// `Options.measures_json`.
+pub const write_measures_json = report.writeMeasuresJson;
+
+/// Writes `--emir`'s document `k` (#237), `espice-emir/1`, and returns
+/// true; false, writing nothing, past the last one. One document per
+/// variant (a variant row and temperature of the main session or of a
+/// variant run, in output order): its first completed transient's terminal
+/// currents (`Result.emir`), or without a transient its first `.op` or
+/// `.dc`'s, under its `variant` label (`output.writeVariantJson`). An
+/// instance is named by its card and its `.model` card, a terminal by its
+/// device's port and a net by its node; an independent source lists both
+/// terminals, under `sources`. `em_avg` is what `.meas EM_AVG` makes of the
+/// same halves with `.option em_recovery`; at a static point it is |i|.
+pub const write_emir_json = emir_json.writeEmirJson;
 
 /// What `init` allocated the Problem from; every per-call buffer comes
 /// from it too. It need not be thread-safe: workers use `query_memory`.
@@ -243,6 +290,9 @@ optimization: []core.lm.Lm = &.{},
 bisection: []core.bisect.Bisect = &.{},
 /// The MOSRA stress run has published its degradation table.
 aged: bool = false,
+/// The finished `.wcd` searches (#240), once `wcd.worstCase` has run: one
+/// per `WorstCase.bases` entry and spec, base-major.
+worst_case: []wcd.Run = &.{},
 /// Whether a query of this Problem brought the GPU driver up, which every
 /// session's queries read through `ExecutionConfig.gpu_driver`.
 gpu_driver: analysis.GpuDriver = .{},
@@ -255,12 +305,26 @@ ws_pool: analysis.WsPool,
 /// Each transient appended with `PointOptions.tangent_step`: the step of
 /// each live parameter its tangent rows took (`point_tangents`).
 tangent_steps: std.AutoHashMapUnmanaged(QueryId, []const f64) = .empty,
+/// Bit v of `point_rows`: `append_points` made variant row v for a point
+/// (its own row or a tangent row), so nothing else reads it. Of
+/// `freed_rows`: nothing reads row v again (its point was released, or its
+/// call failed). `release_points` drops the table's freed prefix.
+point_rows: std.DynamicBitSetUnmanaged = .{},
+freed_rows: std.DynamicBitSetUnmanaged = .{},
 /// `Options.measures` and how far `run_all` has printed to it.
 live_measures: ?report.LiveMeasures = null,
+/// `Options.measures_json`: each result printed so far as a JSON object,
+/// each led by `,\n`.
+measure_json: ?std.Io.Writer.Allocating = null,
 /// The outputs `run_all` has checked for failures, and the first it found,
 /// which every later call returns too.
 checked_outputs: usize = 0,
 first_failure: ?anyerror = null,
+/// `Options.point.emir` (or the deck's `emirfile`): `write_emir_json` reads
+/// every transient after the run, so none is released.
+emir: bool = false,
+/// `emir_file`'s answer, in `arena`.
+emir_path: ?[]const u8 = null,
 
 const Problem = @This();
 
@@ -328,7 +392,7 @@ pub fn init(gpa: Allocator, io: std.Io, options: Options) !*Problem {
     errdefer self.library.deinit();
     self.library.toolchain = try config.toolchainFromEnv(arena, options.hdl_toolchain);
     self.library.vpi = options.vpi;
-    const ast = try frontend.prepare(io, scratch, options.source, options.dialect, options.live_params);
+    const ast = try frontend.prepare(io, scratch, options.source, options.dialect, options.live_params, config.parseFromEnv());
     try frontend.loadModels(io, &self.library, scratch, ast, self.origin, options.vpi_apps);
     timingLap(io, &lap, "frontend (source, parsing, HDL)");
     self.prepared = try frontend.build(&self.library, arena, scratch, ast);
@@ -348,13 +412,15 @@ pub fn init(gpa: Allocator, io: std.Io, options: Options) !*Problem {
 
     // The config every session shares.
     if (options.auto_threads and !builtin.single_threaded) self.thread_pool = .init(std.Thread.getCpuCount() catch 1);
-    const execution = config.execution(options, &self.prepared, .{
+    const execution = try config.execution(options, &self.prepared, .{
         .gpu_driver = &self.gpu_driver,
         .threads = &self.threads,
         .ws_pool = &self.ws_pool,
         .thread_pool = if (options.auto_threads and !builtin.single_threaded) &self.thread_pool else null,
     });
     if (options.measures) |to| self.live_measures = .{ .to = to };
+    // Allocates on its first write only, so no errdefer.
+    if (options.measures_json) self.measure_json = .init(gpa);
     self.session = Session.init(workers, io, &self.prepared.circuit, &self.prepared.deck, execution);
     errdefer self.session.deinit();
     // An optimization's sessions run before this one; nothing after it
@@ -366,6 +432,11 @@ pub fn init(gpa: Allocator, io: std.Io, options: Options) !*Problem {
     // The deck's own queries.
     try points.checkPoint(self, options.point);
     const point = config.pointOptions(options, &self.prepared, self.save_path);
+    // A Spectre analysis's `emirformat`/`emirfile` names the `--emir` file.
+    if (self.prepared.deck.emir_file) |f| {
+        self.emir_path = if (f.len != 0) f else try std.mem.concat(arena, u8, &.{ std.fs.path.stem(self.origin), ".emir.json" });
+    }
+    self.emir = point.emir;
     const jobs = try config.deckJobs(scratch, &self.prepared.deck, point);
     if (point.warm_start) try points.solveWarmOp(self, jobs);
     // `tangent_step` on the deck's own transients: tangent rows at the
@@ -389,7 +460,7 @@ pub fn init(gpa: Allocator, io: std.Io, options: Options) !*Problem {
         _ = try run.session.append(try config.withPoint(scratch, prep.deck.queries, point), try scratch.alloc(QueryId, prep.deck.queries.len));
     }
     timingLap(io, &lap, "query graph and output setup");
-    keep_parse = self.prepared.tuner != null or self.prepared.tuning != null;
+    keep_parse = self.prepared.tuner != null or self.prepared.tuning != null or self.prepared.wcd != null;
     assert(self.runs.len == self.prepared.runs.len);
     return self;
 }
@@ -402,6 +473,8 @@ pub fn deinit(self: *Problem) void {
     const gpa = self.gpa;
     for (self.runs) |*run| run.session.deinit();
     self.released.deinit(gpa);
+    self.point_rows.deinit(gpa);
+    self.freed_rows.deinit(gpa);
     self.session.deinit();
     self.gpu_driver.deinit();
     self.sides.deinit(gpa);
@@ -410,6 +483,7 @@ pub fn deinit(self: *Problem) void {
     self.delivery.deinit();
     self.prepared.deinit();
     self.library.deinit();
+    if (self.measure_json) |*j| j.deinit();
     if (self.parse_arena) |*parse| parse.deinit();
     self.arena.deinit();
     gpa.destroy(self);
@@ -508,6 +582,13 @@ pub fn checkOutput(self: *const Problem, prep: *const frontend.Prepared, queries
     }
 }
 
+/// The file the deck asks `--emir` to write (a Spectre analysis's
+/// `emirfile`, `<deck stem>.emir.json` for `emirformat` alone), relative to
+/// the working directory; null when it asks none (#237).
+pub fn emir_file(self: *const Problem) ?[]const u8 {
+    return self.emir_path;
+}
+
 /// Most points the executor runs together as one lane batch on this
 /// Problem's backend (`analysis.batchWidth`). Advisory.
 pub fn lane_width(self: *const Problem) u32 {
@@ -522,7 +603,8 @@ pub fn lane_width(self: *const Problem) u32 {
 /// an error, and an output failure in its `delivery_error`.
 /// `error.InvalidQuery` for an ID outside `0..query_count()`. The first of
 /// `advance`, `advance_ready`, `run_all` and `set_params` also runs the
-/// deck's `.model OPT` optimization and MOSRA stress run.
+/// deck's `.model OPT` optimization, MOSRA stress run and `.wcd` searches
+/// (#240).
 pub fn advance(self: *Problem, id: QueryId) !Advance {
     try optimizer.runPending(self);
     var event = try self.session.advance(id);

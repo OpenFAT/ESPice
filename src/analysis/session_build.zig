@@ -47,6 +47,7 @@ const no_variant = jobs_mod.no_variant;
 const lane_window = jobs_mod.lane_window;
 const sameLaneJob = jobs_mod.sameLaneJob;
 const batchable = jobs_mod.batchable;
+const sameTransient = jobs_mod.sameTransient;
 const splitLanes = jobs_mod.splitLanes;
 const prerequisite = jobs_mod.prerequisite;
 const withoutVariant = jobs_mod.withoutVariant;
@@ -61,7 +62,11 @@ pub const JobRef = struct { job: u32, variant: u32, op: u32 };
 
 /// Adds `jobs`, writing their ids to `ids`, and returns `jobs.len`. Each
 /// non-OP job shares an existing matching OP prerequisite or gets a new
-/// one. All-or-nothing: every job is validated and deep-copied before any
+/// one. A `.four` or `.fft` whose transient a plain `.tran` before it in
+/// the same call runs reads that result instead (`reusable`, #231), so
+/// it is not ready until that `.tran` ends: `advance` runs the `.tran`
+/// first, `advanceReady` on the reader alone is `error.QueryNotReady`.
+/// All-or-nothing: every job is validated and deep-copied before any
 /// row or id is published. Fails with `error.BufferTooSmall` when `ids`
 /// is shorter than `jobs`, a validation error for the first bad job, or
 /// `error.TooManyQueries` past u32 rows.
@@ -133,6 +138,7 @@ pub fn appendAt(self: *Session, jobs: []const requests.Query, templates: ?[]cons
         }
     }
     self.root_readers += roots;
+    linkReaders(self, old_len);
     return jobs.len;
 }
 
@@ -268,4 +274,76 @@ pub fn addTemplate(self: *Session, circuit: *const Circuit) !void {
     assert(circuit.nnz == self.topology.nnz);
     try self.templates.append(self.allocator, circuit);
     self.template = @intCast(self.templates.items.len);
+}
+
+// ---- private ----
+
+/// Points each `.four`/`.fft` row from `from` on at a `.tran` row of
+/// the same call that runs its transient (`resultSource`), so it reads
+/// that result instead of integrating again (#231). The `.tran` comes
+/// first, so `deinit` (newest first) joins a reader before the rows it
+/// reads die, and the reader joins its component.
+fn linkReaders(self: *Session, from: usize) void {
+    for (from..self.rows.len) |f| {
+        const kind = self.kindAt(f);
+        if (kind != .four and kind != .fft) continue;
+        const src = resultSource(self, from, f) orelse continue;
+        const rows = self.rows.slice();
+        rows.items(.reads)[f] = @fromBackingInt(@intCast(src));
+        rows.items(.next_reader)[f] = rows.items(.reader)[src];
+        rows.items(.reader)[src] = @fromBackingInt(@intCast(f));
+        rows.items(.component)[f] = rows.items(.component)[src];
+    }
+}
+
+/// The row in `from..f` whose result reader row `f` may read
+/// (`reusable`), or null.
+/// ponytail: a `uic` reader (no OP row) scans the call's rows; walk a
+/// per-template list if a huge `uic` sweep ever shows it.
+fn resultSource(self: *const Session, from: usize, f: usize) ?usize {
+    const dep = self.rows.items(.dependency)[f];
+    if (dep == none) {
+        for (from..f) |t| if (reusable(self, f, t)) return t;
+        return null;
+    }
+    // The same OP row: only its dependents can match.
+    var c = self.rows.items(.child)[@backingInt(dep)];
+    while (c != none) : (c = self.rows.items(.sibling)[@backingInt(c)]) {
+        const t = @backingInt(c);
+        if (t >= from and t < f and reusable(self, f, t)) return t;
+    }
+    return null;
+}
+
+/// Whether `.four`/`.fft` row `f` may read `.tran` row `t`'s result,
+/// bitwise what its own transient would record (#231): on the CPU
+/// (under `auto` a `.tran` may take the GPU while the reader's run
+/// stays on the host), the same circuit, variant and OP row (both none
+/// for `uic`), the same `Sim` options (`sameTransient`), a `.tran`
+/// that records every probe column with no stream, measures or
+/// tangents, the reader's nodes among those probes, and no device that
+/// prints display tasks or calls VPI at each step, whose output for
+/// the reader's own run would be lost.
+fn reusable(self: *const Session, f: usize, t: usize) bool {
+    const rows = self.rows.slice();
+    if (self.kindAt(t) != .tran or self.config.backend != .cpu or self.config.gpu_lanes) return false;
+    if (rows.items(.template)[f] != rows.items(.template)[t] or rows.items(.variant)[f] != rows.items(.variant)[t] or
+        rows.items(.dependency)[f] != rows.items(.dependency)[t]) return false;
+    const reader = self.jobs.items[rows.items(.job)[f]];
+    const tran = self.jobs.items[rows.items(.job)[t]].tran;
+    const p = tran.point;
+    if (p.measures_only or p.early_stop or p.abort_after != null or p.tangent_step != 0) return false;
+    if (!sameTransient(reader, tran)) return false;
+    const pos: u32, const neg: u32 = switch (reader) {
+        .four => |o| .{ o.output_node, o.output_neg },
+        .fft => |o| .{ o.out_pos, o.out_neg },
+        else => return false,
+    };
+    const probes = self.deck.probes;
+    if (std.mem.indexOfScalar(u32, probes, pos) == null) return false;
+    if (neg != 0 and std.mem.indexOfScalar(u32, probes, neg) == null) return false;
+    const ckt = self.templateOf(t);
+    if (ckt.vpi != null) return false;
+    for (ckt.batches) |b| if (b.hooks.say != null) return false;
+    return true;
 }

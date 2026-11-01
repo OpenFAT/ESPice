@@ -10,12 +10,13 @@
 //! - `pub const MeasureWriters = struct { out: *std.Io.Writer, err: *std.Io.Writer }`
 //! - `pub const HdlToolchain = frontend.Library.Toolchain`
 //! - `pub const Shared = struct`
-//! - `pub fn execution(options: Options, prepared: *const frontend.Prepared, shared: Shared) analysis.ExecutionConfig`
+//! - `pub fn execution(options: Options, prepared: *const frontend.Prepared, shared: Shared) error{EmirNeedsCpu}!analysis.ExecutionConfig`
 //! - `pub fn pointOptions(options: Options, prepared: *const frontend.Prepared, save_path: ?[]const u8) requests.PointOptions`
 //! - `pub fn deckJobs(scratch: Allocator, deck: *const core.Deck, point: requests.PointOptions) Allocator.Error![]requests.Query`
 //! - `pub fn withPoint(scratch: Allocator, queries: []const requests.Query, point: requests.PointOptions) Allocator.Error![]requests.Query`
 //! - `pub fn toolchainFromEnv(arena: Allocator, given: HdlToolchain) Allocator.Error!HdlToolchain`
 //! - `pub fn dupeAll(arena: Allocator, items: []const []const u8) Allocator.Error![]const []const u8`
+//! - `pub fn parseFromEnv() frontend.ParseOptions`
 //! - `pub fn likelyGpu(options: Options) bool`
 //! - `pub fn raiseJitCache() void`
 
@@ -73,8 +74,8 @@ pub const Options = struct {
     vpi: ?*const frontend.Library.Vpi = null,
     /// What every `.tran` of the deck does, as `append_points` asks of a
     /// point (the CLI's `--measures-only`, `--early-stop`, `--abort-after`).
-    /// `measures_only` is dropped for a deck with `.save` or `.stim`, which
-    /// read every column.
+    /// `measures_only` is dropped for a deck with `.save`, `.stim` or
+    /// `.option soa`, which read every column.
     point: requests.PointOptions = .{},
     /// The CLI's default: also turn on `point`'s `measures_only`,
     /// `early_stop` and `warm_start` when nothing but the `.meas` cards
@@ -86,6 +87,9 @@ pub const Options = struct {
     /// come first. The same bytes in the same order as `print_measures`
     /// alone, at any `max_parallel`. Both writers must outlive the Problem.
     measures: ?MeasureWriters = null,
+    /// Also keep every `.meas` result printed, as JSON, for
+    /// `write_measures_json` (the CLI's `--measures=FILE`, #235).
+    measures_json: bool = false,
 };
 
 /// `Options.measures`: the `.meas` values and the cards' error lines.
@@ -114,8 +118,15 @@ const likely_gpu_bytes = 1 << 20;
 /// backend with the environment's knobs, the shared state, and the GPU lane
 /// policy. Under a bare `auto` the lane policy asks the driver for the FP64
 /// rate, a driver start (~250 ms), so only a deck that can batch pays it.
-pub fn execution(options: Options, prepared: *const frontend.Prepared, shared: Shared) analysis.ExecutionConfig {
+/// A deck asking for `--emir` runs on the CPU; `error.EmirNeedsCpu` when the
+/// caller asked for a GPU explicitly.
+pub fn execution(options: Options, prepared: *const frontend.Prepared, shared: Shared) error{EmirNeedsCpu}!analysis.ExecutionConfig {
     var config = options.backend;
+    // `--emir` reads the host device batches, as the CLI's does (#237).
+    if (prepared.deck.emir_file != null) {
+        if (config.gpu_explicit) return error.EmirNeedsCpu;
+        config.backend = .cpu;
+    }
     config.timing_in_depth = options.timing_in_depth;
     config.knobs = knobsFromEnv();
     // A test whose oracle is the plain scalar run turns the bypass off.
@@ -143,8 +154,11 @@ pub fn execution(options: Options, prepared: *const frontend.Prepared, shared: S
 /// Returns `options.point` with the CLI's defaults applied: under
 /// `auto_point`, measures-only, early stop and warm start when nothing but
 /// the `.meas` cards reads the transient waveforms, and a warm start for
-/// any sweep. A deck with `.save` or `.stim` (`save_path`, `deck.stims`)
-/// reads every column, so it never runs measures-only.
+/// any sweep. A deck with `.save`, `.stim` or `.option soa` (`save_path`,
+/// `deck.stims`, `deck.soa`) reads every column, so it never runs
+/// measures-only. A Spectre analysis's `emirformat`/`emirfile` is `--emir`,
+/// and `--emir` reads every accepted point to t_stop, so it never stops
+/// early (#237).
 pub fn pointOptions(options: Options, prepared: *const frontend.Prepared, save_path: ?[]const u8) requests.PointOptions {
     const deck = &prepared.deck;
     var point = options.point;
@@ -157,7 +171,9 @@ pub fn pointOptions(options: Options, prepared: *const frontend.Prepared, save_p
     // point within Newton's tolerances, in a few iterations instead of
     // the cold ladder (145 → 2 per point on a 20-stage CMOS chain).
     if (options.auto_point and isSweep(deck)) point.warm_start = true;
-    if (save_path != null or deck.stims.len != 0) point.measures_only = false;
+    if (save_path != null or deck.stims.len != 0 or deck.soa.limits.len != 0) point.measures_only = false;
+    if (deck.emir_file != null) point.emir = true;
+    if (point.emir) point.early_stop = false;
     if (point.measures_only) assert(save_path == null);
     if (options.point.warm_start) assert(point.warm_start);
     return point;
@@ -177,11 +193,19 @@ pub fn deckJobs(scratch: Allocator, deck: *const core.Deck, point: requests.Poin
 
 /// Returns a copy of `queries` whose transients carry `point`, and whose
 /// every query starts from the warm operating point when `point` asks.
-/// Caller owns the slice, allocated from `scratch`.
+/// Without a transient, `point.emir` falls to the `.op` and `.dc` queries
+/// (#237). Caller owns the slice, allocated from `scratch`.
 pub fn withPoint(scratch: Allocator, queries: []const requests.Query, point: requests.PointOptions) Allocator.Error![]requests.Query {
     const copy = try scratch.dupe(requests.Query, queries);
+    const static_emir = point.emir and (for (queries) |q| {
+        if (q == .tran) break false;
+    } else true);
     for (copy) |*q| {
         if (q.* == .tran) q.tran.point = point;
+        switch (q.*) {
+            inline .op, .dc => |*o| o.emir = static_emir,
+            else => {},
+        }
         if (point.warm_start) switch (q.*) {
             inline else => |*o| o.tol.warm_op = true,
         };
@@ -222,6 +246,14 @@ pub fn dupeAll(arena: Allocator, items: []const []const u8) Allocator.Error![]co
     const out = try arena.alloc([]const u8, items.len);
     for (out, items) |*o, s| o.* = try arena.dupe(u8, s);
     return out;
+}
+
+/// `ESPICE_PARSE_THREADS=N`: N threads scan the device cards of every deck,
+/// however small, and 0 reads every card whole (#230); for A/B runs, which
+/// must give the same bytes. Unset or unparsable keeps the default.
+pub fn parseFromEnv() frontend.ParseOptions {
+    const v = env("ESPICE_PARSE_THREADS") orelse return .{};
+    return .{ .threads = std.fmt.parseInt(u32, v, 10) catch return .{}, .scan_min = 0 };
 }
 
 /// Whether a run will probably take the GPU, judged before parsing: an
@@ -273,13 +305,14 @@ fn mayBatch(prepared: *const frontend.Prepared, options: Options) bool {
 }
 
 /// Whether anything besides the `.meas` cards reads the deck's transient
-/// waveforms: an output file, `.save`, `.stim`, an optimization, tangents,
-/// or a device's display tasks, which print at every accepted step.
+/// waveforms: an output file, `.save`, `.stim`, `.option soa`, an
+/// optimization, tangents, or a device's display tasks, which print at every
+/// accepted step.
 /// `.print`, `.probe` and `.plot` are ignored cards, and `.four`, `.fft`
 /// and MOSRA run transients of their own.
 fn waveformsConsumed(options: Options, prepared: *const frontend.Prepared, save_path: ?[]const u8) bool {
     const deck = &prepared.deck;
-    if (options.output.path != null or save_path != null or deck.stims.len != 0) return true;
+    if (options.output.path != null or save_path != null or deck.stims.len != 0 or deck.soa.limits.len != 0) return true;
     if (prepared.tuner != null or options.point.tangent_step > 0) return true;
     for (prepared.circuit.batches) |b| if (b.hooks.say != null) return true;
     for (prepared.runs) |run| for (run.circuit.batches) |b| if (b.hooks.say != null) return true;

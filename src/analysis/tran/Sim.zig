@@ -44,6 +44,7 @@ const integrator = @import("integrator.zig");
 const sim_init = @import("sim_init.zig");
 const Tangents = @import("Tangents.zig");
 const tran_types = @import("types.zig");
+const Emir = @import("emir.zig").Emir;
 
 const HostOps = host_ops.HostOps;
 const Method = tran_types.Method;
@@ -130,6 +131,8 @@ attempted_dt: f64,
 vpi_again: u32,
 /// Every `.meas` card resolved and the run stopped early.
 resolved: bool,
+/// `point.emir`'s terminal currents, read at every accepted point.
+emir: ?*Emir,
 
 /// Newton hook: companion RHS from the q plane, matrix G + ag0*C.
 pub const TranHook = integrator.Hook(null);
@@ -544,6 +547,9 @@ pub fn end(s: *Sim, a: *const Attempt, nr: converger.Result, ops: anytype) !Verd
     // txl2_3_line, hfet_inverter, mesa_oscillator and mos6_inverter.
     // `evalQ` computes the same q bits as `eval`, charges only.
     ops.rebase(s, a);
+    // `--emir` (#237): the terminal currents at the committed point,
+    // under this step's companion coefficients.
+    if (s.emir) |e| e.point(ckt, s.cur, t_new, .{ .method = eff_method, .c = cf, .ag = a.ag, .gear_hi = gear_hi });
 
     // ngspice neither steps onto TSTART nor prints it: dctran.c dumps
     // the accepted points at t >= CKTinitTime and nothing else (#167).

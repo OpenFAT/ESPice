@@ -96,7 +96,8 @@ pub fn variations(p: *variant_planner.Planner) !core.query.Variations {
 /// mismatch (`agauss` in its model cards). A site that moves no
 /// parameter (sky130's `mc_mm_switch=0`) is no group, and no group at
 /// all is an empty table, never the unit-variance fallback. The live
-/// values are nominal again on return.
+/// values are nominal again on return, and `site_groups` holds each
+/// group's site key.
 pub fn siteVariations(p: *variant_planner.Planner) !core.query.Variations {
     const live = p.nl.live;
     std.debug.assert(live.site_keys.len == live.site_ops.len);
@@ -107,6 +108,7 @@ pub fn siteVariations(p: *variant_planner.Planner) !core.query.Variations {
     var params: std.ArrayList(u32) = .empty;
     var steps: std.ArrayList(f64) = .empty;
     try starts.append(p.sim, 0);
+    p.site_groups.clearRetainingCapacity();
     if (p.fast == .untested) p.fast = try p.probeIdentity();
     // The steps are taken from every draw at its nominal, which under
     // `.option seed` is not the circuit's own state.
@@ -158,9 +160,11 @@ pub fn siteVariations(p: *variant_planner.Planner) !core.query.Variations {
         const card = names.get(r.type, r.index) orelse "?";
         try labels.append(p.sim, try std.fmt.allocPrint(p.sim, "{s}@{s}", .{ card, r.param_name }));
         try starts.append(p.sim, @intCast(params.items.len));
+        try p.site_groups.append(p.scratch, key);
     };
     _ = try p.nl.setLive(p.scratch, &p.stack, live.nominal, null);
     std.debug.assert(starts.items.len == labels.items.len + 1);
+    std.debug.assert(p.site_groups.items.len == labels.items.len);
     return .{ .labels = labels.items, .starts = starts.items, .params = params.items, .sigmas = steps.items };
 }
 

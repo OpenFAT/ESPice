@@ -1,12 +1,14 @@
 //! The small-signal hooks of one device batch: an operating point (and a
-//! frequency grid) in, the noise generators with their PSDs and the
-//! frequency-dependent matrix terms out. Cites LRM §4.6.4 (noise sources,
+//! frequency grid) in, the noise generators with their PSDs, the
+//! frequency-dependent matrix terms and one instance's own evaluation (what
+//! a device operating-point variable reads, #236) out. Cites LRM §4.6.4 (noise sources,
 //! §4.6.4.6 correlation), §4.5.7/§4.5.11/§4.5.12 (absdelay, laplace, zi),
 //! ngspice's nevalsrc.c:106 for `@abs`, and #119 for the PSD family.
 //!
 //! Contents:
 //! - `pub fn SmallSignal(comptime D: type) type`, with `noise_names`,
-//!   `collectNoise`, `collectNoiseLocal`, `collectAcDyn`, `acDyn`
+//!   `collectNoise`, `collectNoiseLocal`, `collectAcDyn`, `acDyn`,
+//!   `localEval`
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -17,6 +19,8 @@ const layout = @import("layout.zig");
 const stamp = @import("stamp.zig");
 const traits = @import("traits.zig");
 const DeviceBatch = @import("batch.zig").DeviceBatch;
+const LocalSink = @import("sink.zig").LocalSink;
+const Real = @import("dual.zig").Real;
 const GROUND = abi.GROUND;
 const NoiseSource = abi.NoiseSource;
 const SlotMap = layout.SlotMap;
@@ -147,6 +151,32 @@ pub fn SmallSignal(comptime D: type) type {
                 }
             }
             return self.count * K;
+        }
+
+        /// `Hooks.local_eval`: instance `id` alone at x on the wide basis,
+        /// unlimited, into `out`, on a copy of its Instance.
+        pub fn localEval(ctx: *anyopaque, x: []const f64, id: u32, out: abi.LocalEval) void {
+            const self = Batch.of(ctx);
+            assert(id < self.count);
+            assert(out.x.len == n_u and out.f.len == n_u and out.q.len == n_u and out.root.len == n_u);
+            assert(out.g.len == n_u * n_u and out.c.len == n_u * n_u);
+            for ([_][]f64{ out.f, out.q, out.g, out.c }) |p| @memset(p, 0);
+            var inst = self.instances[id];
+            var sink: LocalSink(D) = .{ .batch = self, .xs = x, .inst_ = &inst, .out = out };
+            stamp.evalRange(D, false, stamp.host_pad, &sink, id, id + 1, self.sim, false);
+            out.x[0..n_u].* = self.localX(x, id);
+            if (comptime @hasDecl(D, "opVars")) {
+                assert(out.vars.len == D.op_vars.len);
+                // `noisePsd`'s family, so a `ddx` in a variable reads its partial.
+                out.vars[0..D.op_vars.len].* = D.opVars(stamp.NoiseFamily(D), self.localX(x, id), self.model(id), &self.instances[id], self.sim);
+            }
+            for (out.root, 0..) |*r, u| r.* = @intCast(u);
+            if (comptime @hasDecl(D, "collapse")) {
+                const col = D.collapse(Real, self.model(id), &self.instances[id]);
+                inline for (D.num_ports..n_u) |u| if (col[u]) |target| {
+                    out.root[u] = @intCast(target);
+                };
+            }
         }
     };
 }

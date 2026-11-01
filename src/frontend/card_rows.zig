@@ -28,8 +28,12 @@
 //! - `pub const StepTarget`
 //! - `pub const Step`
 //! - `pub const Monte`
+//! - `pub const Fail`
 //! - `pub const Sweep`
 //! - `pub const Optimize`
+//! - `pub const Wcd`
+//! - `pub const WcdSpec`
+//! - `pub fn margin(s: WcdSpec, value: f64) f64`
 //! - `pub const Data`
 //! - `pub const Variation`
 //! - `pub const sigma_names`
@@ -44,6 +48,7 @@
 //! - `pub const ForeignKind`
 //! - `pub const Foreign`
 //! - `pub const DataFile`
+//! - `pub const SoaRating`
 //! - `pub const Deck`
 //! - `pub const Mosra`
 //! - `pub const AppendModel`
@@ -169,8 +174,20 @@ pub const StepTarget = union(enum) {
 pub const Step = struct { target: StepTarget, values: []const f64 };
 
 /// HSPICE `MONTE=n [FIRSTRUN=k]`: trials `first..first + n - 1`; or
-/// `MONTE=list(a b:c ...)` [CR .DC]: exactly the trials in `list`.
-pub const Monte = struct { n: u32, first: u32 = 1, list: []const u32 = &.{} };
+/// `MONTE=list(a b:c ...)` [CR .DC]: exactly the trials in `list`. ESPice's
+/// `SIGMA_SCALE=s1,... FAIL='expr'` (#239) runs n trials at each scale.
+pub const Monte = struct {
+    n: u32,
+    first: u32 = 1,
+    list: []const u32 = &.{},
+    /// Each scale's draws have every sigma times it; empty for plain MONTE.
+    scales: []const f64 = &.{},
+    fail: Fail = .{},
+};
+
+/// A SIGMA_SCALE run's `FAIL=` test over its analysis's `.meas` cards:
+/// `ops` in postfix, each `.live` operand a card's index in `Deck.measures`.
+pub const Fail = struct { text: []const u8 = "", ops: []const expr.Op = &.{}, consts: []const f64 = &.{} };
 
 /// An HSPICE sweep on one analysis card: the card runs once per point.
 /// On a `.dc` card with no sweep of its own (`.dc DATA=d`, `.dc MONTE=n`)
@@ -204,6 +221,36 @@ pub const Optimize = struct {
     /// ESPice's fifth argument (#95): the grid each value stays on; 0 when
     /// not given.
     grid: []const f64,
+};
+
+/// ESPice `.wcd m1 'op L1' m2 'op L2' ... [MAXITER=n] [TOL=x] [TOP=n]`
+/// (#240): each `.meas` card with its bound is a spec, whose worst-case
+/// distance FORM finds over the statistical parameters (`core.form`).
+pub const Wcd = struct {
+    specs: []const WcdSpec,
+    maxiter: u32 = 20,
+    tol: f64 = 0.01,
+    /// The coordinates the report names per spec.
+    top: u32 = 5,
+    /// The card as written, for diagnostics.
+    line: []const u8 = "",
+};
+
+/// One `.wcd` spec: card `measure` (its index in `Deck.measures`) passes
+/// while its value is at least (`above`) or at most `limit`; `>` and `<`
+/// mean the same for a continuous measure.
+pub const WcdSpec = struct {
+    measure: u32,
+    above: bool,
+    limit: f64,
+    /// The bound as written, `>= 60`.
+    bound: []const u8,
+
+    /// The signed margin of `value`: at least 0 where the spec passes,
+    /// NaN when `value` is.
+    pub fn margin(s: WcdSpec, value: f64) f64 {
+        return if (s.above) value - s.limit else s.limit - value;
+    }
 };
 
 /// An inline `.data` table: one target per column, `values` row-major.
@@ -347,6 +394,10 @@ pub const Foreign = struct { kind: ForeignKind, path: []const u8 };
 /// A `ForeignKind.data` file's contents, read by `prepare`.
 pub const DataFile = struct { path: []const u8, bytes: []const u8 };
 
+/// One limit of the `.options soalimits=` file (#238): SOA key `key`
+/// (`vds_max`) at `limit` for every model named `model` or starting with it.
+pub const SoaRating = struct { model: []const u8, key: []const u8, limit: f64 };
+
 /// Deck data: everything that is not circuit topology.
 pub const Deck = struct {
     /// The first line as written, original case.
@@ -360,10 +411,22 @@ pub const Deck = struct {
     /// `.save` outputs as lowercased `v(net)`/`i(name)` labels. Empty: save
     /// everything, as with no `.save` card or a `.save all`.
     saves: []const []const u8,
+    /// `.save` device operating-point variables (`@m1[gm]`, #236), and
+    /// HSPICE's `.probe lx7(m1)` and Spectre's `save m1:gm` ones (`isOpVar`),
+    /// lowercased, `.save all` or not.
+    opvar_saves: []const []const u8 = &.{},
+    /// HSPICE `.probe op`: every device's operating-point variables.
+    probe_op: bool = false,
     foreign: []const Foreign,
     /// `.options vpi="app.so"` paths as written (relative to the deck): VPI
     /// applications to load (LRM 12.33, #197).
     vpi_apps: []const []const u8 = &.{},
+    /// `.options soalimits="file.json"` as written (relative to the deck),
+    /// the last one given; empty without one (#238).
+    soa_file: []const u8 = "",
+    /// `.options emirfile="file"` as written, `""` for the default name:
+    /// `--emir` to that file (#237).
+    emir_file: ?[]const u8 = null,
     /// `.meas` cards; their strings borrow the parse arena.
     measures: []const core.Measure,
     /// `.step` cards in deck order; the last varies fastest.
@@ -372,6 +435,8 @@ pub const Deck = struct {
     variations: []const Variation = &.{},
     /// The optimization of the deck's one `SWEEP OPTIMIZE=` card.
     optimize: ?Optimize = null,
+    /// The deck's one `.wcd` card (#240).
+    wcd: ?Wcd = null,
     /// Each `.alter` run's full source, cumulative, expanded; set by
     /// `prepare`.
     alters: []const []const u8 = &.{},

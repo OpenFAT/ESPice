@@ -19,6 +19,7 @@ const Sim = @import("Sim.zig");
 const Tangents = @import("Tangents.zig");
 const tran = @import("tran.zig");
 const tran_types = @import("types.zig");
+const Emir = @import("emir.zig").Emir;
 
 const Stream = measure.Stream;
 const Options = tran_types.Options;
@@ -39,6 +40,8 @@ wf: Waveform,
 tangents: ?Tangents,
 /// `take` handed `wf`'s rows to the result.
 published: bool = false,
+/// `opts.point.emir`'s terminal currents, which `sim` points at.
+emir: ?Emir = null,
 sim: Sim,
 
 const Run = @This();
@@ -124,12 +127,22 @@ pub fn init(r: *Run, ctx: *const root.RunCtx, opts: Options) !void {
         .sim = undefined,
     };
     try r.sim.init(ctx.circuit, x, probes, &r.wf, opts, scratch, if (r.tangents) |*tg| tg else null, if (r.stream) |*sm| sm else null);
+    // `--emir` (#237), on the deck's own transients: from the state
+    // `Sim.init` seeded its histories at. Under uic that state is the
+    // raw `.ic` vector, so its t = 0 row is left out.
+    if (opts.point.emir and !opts.snapshot and !opts.sources_at_zero and ctx.emir_ports.len == ctx.circuit.batches.len) {
+        errdefer r.sim.deinit();
+        r.emir = try Emir.init(scratch, ctx.circuit, ctx.emir_ports, opts.method, opts.point.emir_window, opts.t_start);
+        r.sim.emir = &r.emir.?;
+        r.emir.?.start(ctx.circuit, r.sim.cur, opts.t_start <= 0 and !opts.uic);
+    }
 }
 
 /// Frees what `init` made, `wf` unless `take` published it.
 pub fn deinit(r: *Run) void {
     const scratch = r.ctx.scratch_allocator;
     r.sim.deinit();
+    if (r.emir) |*e| e.deinit();
     if (r.tangents) |*tg| tg.deinit(scratch);
     if (!r.published) r.wf.deinit();
     if (r.stream) |*sm| sm.deinit();
@@ -158,6 +171,7 @@ pub fn take(r: *Run, sim_ok: bool) !root.Result {
             .data = data,
         };
     }
+    const emir: @import("core").Emir = if (r.emir) |*e| try e.publish(a, ctx.circuit) else .{};
     const tg = if (r.tangents) |*tg| tg else {
         const res: root.Result = .{
             .plotname = plotname,
@@ -166,6 +180,7 @@ pub fn take(r: *Run, sim_ok: bool) !root.Result {
             .npoints = r.wf.len,
             .data = r.wf.data(),
             .measured = if (r.streamed) try r.stream.?.measured(a) else &.{},
+            .emir = emir,
         };
         r.published = r.kept;
         return res;
@@ -182,5 +197,6 @@ pub fn take(r: *Run, sim_ok: bool) !root.Result {
         .npoints = r.wf.len,
         .data = r.wf.data(),
         .tangents = blocks,
+        .emir = emir,
     };
 }

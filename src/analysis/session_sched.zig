@@ -87,6 +87,13 @@ pub fn makeExecutor(self: *Session, i: usize) !void {
     if (self.stream) |s| if (@backingInt(s.id) == i) {
         self.rows.items(.executor)[i].?.stream = s.writer;
     };
+    // A result reader reads its `.tran`'s rows when that run kept them,
+    // else runs its own transient as it would alone (#231).
+    const reads = self.rows.items(.reads)[i];
+    if (reads != none) if (self.rows.items(.executor)[@backingInt(reads)]) |src| {
+        if (self.effectiveStatus(@backingInt(reads)) == .complete and src.stream == null)
+            self.rows.items(.executor)[i].?.source = src;
+    };
     self.rows.items(.executor)[i].?.row = @intCast(i);
     if (self.config.timing_in_depth)
         self.rows.items(.executor)[i].?.controller.options.timing_query = @fromBackingInt(@intCast(i));
@@ -491,6 +498,13 @@ pub fn followOne(self: *Session, i: usize) void {
             }
         },
         else => {},
+    }
+    // The readers of its result, once it ended at all (#231).
+    if (!self.rows.items(.status)[i].terminal()) return;
+    var r = self.rows.items(.reader)[i];
+    while (r != none) : (r = self.rows.items(.next_reader)[@backingInt(r)]) {
+        const j = @backingInt(r);
+        if (self.ready(j) and !self.rows.items(.running)[j]) self.urgent.appendAssumeCapacity(j);
     }
 }
 

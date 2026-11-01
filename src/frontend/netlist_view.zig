@@ -20,6 +20,7 @@
 //! - `pub fn value(self: @This(), i: usize, f: expr.Fn, args: []const f64) f64`
 //! - `pub fn siteKey(owner: u64, salt: u64) u64`
 //! - `pub fn nameKey(owner: u64, name: []const u8) u64`
+//! - `pub fn isOpVar(dialect: Dialect, name: []const u8) bool`
 //! - `pub fn isGround(dialect: Dialect, name: []const u8) bool`
 //! - `pub fn isGroundName(name: []const u8) bool`
 //! - `pub fn nameIndex(names: []const []const u8, target: []const u8) ?usize`
@@ -53,6 +54,7 @@ const Hypergraph = card_rows.Hypergraph;
 const Model = card_rows.Model;
 const Live = card_rows.Live;
 const DataFile = card_rows.DataFile;
+const SoaRating = card_rows.SoaRating;
 const Deck = card_rows.Deck;
 const kvIndex = card_table.kvIndex;
 
@@ -84,6 +86,8 @@ pub const Netlist = struct {
     tunable: []const u32 = &.{},
     /// The `ForeignKind.data` files, as `prepare` read them.
     files: []const DataFile = &.{},
+    /// The `.options soalimits=` file's limits, as `prepare` read them.
+    soa_ratings: []const SoaRating = &.{},
 
     /// A card as the builder reads it.
     pub const View = struct {
@@ -271,6 +275,19 @@ pub fn siteKey(owner: u64, salt: u64) u64 {
 
 pub fn nameKey(owner: u64, name: []const u8) u64 {
     return siteKey(owner, std.hash.Wyhash.hash(0, name));
+}
+
+/// Whether output name `name`, lowercased, is a device operating-point
+/// variable as `dialect` spells one (#236): ngspice's `@m1[gm]` in any,
+/// HSPICE's `lx7(m1)` and `lv9(m1)` element templates, Spectre's `m1:gm`.
+/// `prepare` resolves it or refuses the deck.
+pub fn isOpVar(dialect: Dialect, name: []const u8) bool {
+    if (name.len != 0 and name[0] == '@') return true;
+    return switch (dialect) {
+        .ngspice => false,
+        .hspice => name.len > 3 and name[0] == 'l' and (name[1] == 'x' or name[1] == 'v') and std.ascii.isDigit(name[2]) and name[name.len - 1] == ')',
+        .spectre => std.mem.indexOfScalar(u8, name, ':') != null and std.mem.indexOfScalar(u8, name, '(') == null,
+    };
 }
 
 /// True for a name that is ground in `dialect`: only `0` in Spectre, where

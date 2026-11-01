@@ -119,7 +119,7 @@ const Sample = struct {
                 c.offset = k * @as(usize, if (c.complex) 2 else 1);
                 break :blk c.get(s.i);
             },
-            .measure => nan,
+            .measure, .soa_count => nan,
             .neg, .add, .sub, .mul, .div, .pow => unreachable,
         };
     }
@@ -136,8 +136,8 @@ pub fn columnIndex(names: []const []const u8, name: []const u8) ?usize {
     return null;
 }
 
-/// Folds measure postfix; `leaves.leaf(op, v)` values each `num`, `measure`
-/// and `vector` op, `v` counting the vector ops before it. Returns NaN on a
+/// Folds measure postfix; `leaves.leaf(op, v)` values each `num`, `measure`,
+/// `soa_count` and `vector` op, `v` counting the vector ops before it. Returns NaN on a
 /// stack overflow or underflow, or a malformed tail.
 // comptime interface: the leaves vary (a PARAM card's earlier results, a
 // `par()` sample's columns); two cases, and a runtime pointer per op would
@@ -147,7 +147,7 @@ pub fn fold(ops: []const core.MeasureOp, leaves: anytype) f64 {
     var n: usize = 0;
     var vectors: usize = 0;
     for (ops) |op| switch (op) {
-        .num, .measure, .vector => {
+        .num, .measure, .vector, .soa_count => {
             if (n == stack.len) return nan;
             stack[n] = leaves.leaf(op, vectors);
             vectors += @intFromBool(op == .vector);
@@ -168,7 +168,7 @@ pub fn fold(ops: []const core.MeasureOp, leaves: anytype) f64 {
                 .mul => x.* * b,
                 .div => x.* / b,
                 .pow => std.math.pow(f64, x.*, b),
-                .num, .measure, .vector, .neg => unreachable,
+                .num, .measure, .vector, .soa_count, .neg => unreachable,
             };
         },
     };

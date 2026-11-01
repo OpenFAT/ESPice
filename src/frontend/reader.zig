@@ -46,9 +46,12 @@
 //! - `pub const localReads`
 //! - `pub const sameValues`
 //! - `pub const readArgs`
-//! - `pub const readVpiOptions`
+//! - `pub const cutFail`
+//! - `pub const readFileOptions`
 //! - `pub const isStep`
+//! - `pub const isWcd`
 //! - `pub const readDirective`
+//! - `pub const readProbe`
 //! - `pub const readMosra`
 //! - `pub const readSample`
 //! - `pub const readSaveOp`
@@ -77,9 +80,11 @@
 //! - `pub const readValue`
 //! - `pub const valueAt`
 //! - `pub const kvValue`
+//! - `pub const literalValue`
 //! - `pub const junkNumber`
 //! - `pub const numberByte`
 //! - `pub const refuseOperatorField`
+//! - `pub const operatorLed`
 //! - `pub const nameValue`
 //! - `pub const readMeasures`
 //! - `pub const skipBad`
@@ -89,6 +94,8 @@
 //! - `pub const measureExpr`
 //! - `pub const measureOption`
 //! - `pub const measureValue`
+//! - `pub const compileFails`
+//! - `pub const readWcd`
 //! - `pub const exprValue`
 //! - `pub const fold`
 //! - `pub const find`
@@ -108,6 +115,12 @@
 //! - `pub const behaviouralResistor`
 //! - `pub const kindOf`
 //! - `pub const readDevice`
+//! - `pub const replay`
+//! - `pub const cardNodes`
+//! - `pub const readFields`
+//! - `pub const scan`
+//! - `pub const scanCards`
+//! - `pub const scanRun`
 //! - `pub const behaviouralCard`
 //! - `pub const wrapped`
 //! - `pub const exprRest`
@@ -161,6 +174,7 @@ const reader_measures = @import("reader_measures.zig");
 const reader_nets = @import("reader_nets.zig");
 const reader_devices = @import("reader_devices.zig");
 const reader_behavioural = @import("reader_behavioural.zig");
+const reader_replay = @import("reader_replay.zig");
 const Dialect = card_rows.Dialect;
 const VertexId = card_rows.VertexId;
 const none = card_rows.none;
@@ -171,6 +185,7 @@ const Kv = card_rows.Kv;
 const Hypergraph = card_rows.Hypergraph;
 const Step = card_rows.Step;
 const Optimize = card_rows.Optimize;
+const Wcd = card_rows.Wcd;
 const Data = card_rows.Data;
 const Variation = card_rows.Variation;
 const Live = card_rows.Live;
@@ -186,6 +201,7 @@ const Scope = reader_frame.Scope;
 const Subckt = reader_frame.Subckt;
 const ModelRow = reader_frame.ModelRow;
 const LocalModel = reader_frame.LocalModel;
+const Replay = reader_frame.Replay;
 
 /// The netlist reader over dialect syntax `S` (lines.zig): every walk's
 /// state, and its methods, which live in the reader_*.zig stage files.
@@ -247,6 +263,8 @@ pub fn Reader(comptime S: type) type {
         ic_cards: std.ArrayList([]const Value) = .empty,
         nodeset_cards: std.ArrayList([]const Value) = .empty,
         meas_lines: std.ArrayList([]const u8) = .empty,
+        /// The `.wcd` card, read once the `.meas` cards it names are.
+        wcd_line: ?[]const u8 = null,
         /// `.global` names: one net at every subcircuit level.
         global_nets: std.StringHashMapUnmanaged(void) = .empty,
         /// Per `lines` row, the device letter `spectre.translate` gave a
@@ -258,6 +276,8 @@ pub fn Reader(comptime S: type) type {
         /// The formals of the user functions `subst` is inside, innermost last.
         bindings: std.ArrayList(Binding) = .empty,
         saves: std.ArrayList([]const u8) = .empty,
+        opvar_saves: std.ArrayList([]const u8) = .empty,
+        probe_op: bool = false,
         save_all: bool = false,
         save_op: ?core.SaveOp = null,
         stims: std.ArrayList(core.Stim) = .empty,
@@ -266,6 +286,8 @@ pub fn Reader(comptime S: type) type {
         appendmodels: std.ArrayList(AppendModel) = .empty,
         foreign: std.ArrayList(Foreign) = .empty,
         vpi_apps: std.ArrayList([]const u8) = .empty,
+        soa_file: []const u8 = "",
+        emir_file: ?[]const u8 = null,
         measures: std.ArrayList(core.Measure) = .empty,
         instances: u32 = 1,
         /// `.data` and `.variation` blocks: first and one-past-last line.
@@ -294,6 +316,7 @@ pub fn Reader(comptime S: type) type {
         /// `Deck.draw_seed`.
         draw_seed: bool = false,
         optimize: ?Optimize = null,
+        wcd: ?Wcd = null,
         site_ops: std.ArrayList(u32) = .empty,
         site_keys: std.ArrayList(u64) = .empty,
         /// Key of the text whose distribution calls are being emitted, and
@@ -305,6 +328,10 @@ pub fn Reader(comptime S: type) type {
         pins: std.ArrayList(VertexId) = .empty,
         positional: std.ArrayList(Value) = .empty,
         card_kv: std.ArrayList(Kv) = .empty,
+        /// Per `lines` row, the body card's `Replay` once one instance read
+        /// it, or the top-level card's `scanCards` read; sized by
+        /// `scanCards` or on the first `expand`.
+        replays: []?*const Replay = &.{},
         scratch: expr.Scratch = .{},
         /// Parameter and function texts compiled once each (`compiledText`).
         compiled_texts: std.StringHashMapUnmanaged(*const expr.Scratch) = .empty,
@@ -394,9 +421,12 @@ pub fn Reader(comptime S: type) type {
         pub const localReads = reader_models.Methods(S).localReads;
         pub const sameValues = reader_models.Methods(S).sameValues;
         pub const readArgs = reader_directives.Methods(S).readArgs;
-        pub const readVpiOptions = reader_directives.Methods(S).readVpiOptions;
+        pub const cutFail = reader_directives.Methods(S).cutFail;
+        pub const readFileOptions = reader_directives.Methods(S).readFileOptions;
         pub const isStep = reader_directives.Methods(S).isStep;
+        pub const isWcd = reader_directives.Methods(S).isWcd;
         pub const readDirective = reader_directives.Methods(S).readDirective;
+        pub const readProbe = reader_directives.Methods(S).readProbe;
         pub const readMosra = reader_directives.Methods(S).readMosra;
         pub const readSample = reader_directives.Methods(S).readSample;
         pub const readSaveOp = reader_directives.Methods(S).readSaveOp;
@@ -425,9 +455,11 @@ pub fn Reader(comptime S: type) type {
         pub const readValue = reader_values.Methods(S).readValue;
         pub const valueAt = reader_values.Methods(S).valueAt;
         pub const kvValue = reader_values.Methods(S).kvValue;
+        pub const literalValue = reader_values.Methods(S).literalValue;
         pub const junkNumber = reader_values.Methods(S).junkNumber;
         pub const numberByte = reader_values.Methods(S).numberByte;
         pub const refuseOperatorField = reader_values.Methods(S).refuseOperatorField;
+        pub const operatorLed = reader_values.Methods(S).operatorLed;
         pub const nameValue = reader_values.Methods(S).nameValue;
         pub const readMeasures = reader_measures.Methods(S).readMeasures;
         pub const skipBad = reader_measures.Methods(S).skipBad;
@@ -437,6 +469,8 @@ pub fn Reader(comptime S: type) type {
         pub const measureExpr = reader_measures.Methods(S).measureExpr;
         pub const measureOption = reader_measures.Methods(S).measureOption;
         pub const measureValue = reader_measures.Methods(S).measureValue;
+        pub const compileFails = reader_measures.Methods(S).compileFails;
+        pub const readWcd = reader_measures.Methods(S).readWcd;
         pub const exprValue = reader_values.Methods(S).exprValue;
         pub const fold = reader_values.Methods(S).fold;
         pub const find = reader_values.Methods(S).find;
@@ -456,6 +490,12 @@ pub fn Reader(comptime S: type) type {
         pub const behaviouralResistor = reader_devices.Methods(S).behaviouralResistor;
         pub const kindOf = reader_devices.Methods(S).kindOf;
         pub const readDevice = reader_devices.Methods(S).readDevice;
+        pub const replay = reader_replay.Methods(S).replay;
+        pub const cardNodes = reader_replay.Methods(S).cardNodes;
+        pub const readFields = reader_replay.Methods(S).readFields;
+        pub const scan = reader_replay.Methods(S).scan;
+        pub const scanCards = reader_replay.Methods(S).scanCards;
+        pub const scanRun = reader_replay.Methods(S).scanRun;
         pub const behaviouralCard = reader_behavioural.Methods(S).behaviouralCard;
         pub const wrapped = reader_behavioural.Methods(S).wrapped;
         pub const exprRest = reader_behavioural.Methods(S).exprRest;

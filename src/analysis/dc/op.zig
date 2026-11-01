@@ -11,7 +11,7 @@
 //! - `pub const Options = core.query.Op`
 //! - `pub const LaneOutcome = ErrorOf(solve)!converger.Result`
 //! - `pub const gminFactor = op_ladder.gminFactor`
-//! - `pub fn run(ctx: *const RunCtx, _: Options) !Result`
+//! - `pub fn run(ctx: *const RunCtx, opts: Options) !Result`
 //! - `pub fn solve(ckt: *Circuit, x: []f64, options: Options, nodeset: []const Ic, ic: []const Ic) !converger.Result`
 //! - `pub fn beginSolve(ckt: *Circuit, x: []f64, options: Options) !void`
 //! - `pub fn coldStart(ckt: *Circuit, x: []f64) void`
@@ -25,6 +25,7 @@ const converger = @import("solver").converger;
 const Ic = @import("core").Ic;
 const root = @import("../types.zig");
 const op_ladder = @import("op_ladder.zig");
+const emir = @import("../tran/emir.zig");
 
 /// Query options, defined in core/query.zig.
 pub const Options = @import("core").query.Op;
@@ -35,8 +36,9 @@ pub const LaneOutcome = root.ErrorOf(solve)!converger.Result;
 /// The gmin stepping rung's next factor (`op_ladder.gminFactor`).
 pub const gminFactor = op_ladder.gminFactor;
 
-/// Contract entry: the executor's solved `ctx.x_op`, one point per probe.
-pub fn run(ctx: *const root.RunCtx, _: Options) !root.Result {
+/// Contract entry: the executor's solved `ctx.x_op`, one point per probe,
+/// and with `opts.emir` its terminal currents.
+pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     const x = ctx.x_op;
     // LRM 12.31.3: the one solution is the first and the last. It has no
     // earlier time to back up to, so acbConvergenceTest is not asked.
@@ -54,6 +56,7 @@ pub fn run(ctx: *const root.RunCtx, _: Options) !root.Result {
         .is_complex = false,
         .npoints = 1,
         .data = data,
+        .emir = if (opts.emir) try emir.atPoint(ctx, x) else .{},
     };
 }
 

@@ -441,7 +441,7 @@ fn expectStreamed(cards: []const core.Measure, early: bool) !usize {
     card.evaluateAll(cards, .tran, full, want);
     var want_text: Writer.Allocating = .init(gpa);
     defer want_text.deinit();
-    try @import("listing.zig").print(&want_text.writer, &want_text.writer, cards, .tran, full, null);
+    try @import("listing.zig").print(&want_text.writer, &want_text.writer, cards, .tran, full, null, null);
     var keep: [3]bool = undefined;
     rule.markColumns(cards, names, &keep, true);
     var recorded: std.ArrayList([]const u8) = .empty;
@@ -465,7 +465,7 @@ fn expectStreamed(cards: []const core.Measure, early: bool) !usize {
     card.evaluateAll(cards, .tran, streamed, got);
     var got_text: Writer.Allocating = .init(gpa);
     defer got_text.deinit();
-    try @import("listing.zig").print(&got_text.writer, &got_text.writer, cards, .tran, streamed, null);
+    try @import("listing.zig").print(&got_text.writer, &got_text.writer, cards, .tran, streamed, null, null);
     errdefer std.debug.print("early {}: {d} rows, columns {any}\n{s}\n", .{ early, n, keep, got_text.written() });
     try std.testing.expectEqualSlices(u64, @ptrCast(want), @ptrCast(got));
     try std.testing.expectEqualStrings(want_text.written(), got_text.written());

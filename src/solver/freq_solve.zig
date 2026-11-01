@@ -39,12 +39,14 @@
 //!   - `pub const beginLaneChunk = freq_batch.beginLaneChunk`
 //!   - `pub const finishLaneChunk = freq_batch.finishLaneChunk`
 //!   - `pub const heldTape = freq_held.heldTape`
+//!   - `pub const complexHeldTape = freq_held.complexHeldTape`
 //!   - `pub const beginHeldTape = freq_held.beginHeldTape`
 //!   - `pub const finishHeldTape = freq_held.finishHeldTape`
 //!   - `pub const replayCurrentHeld = freq_held.replayCurrentHeld`
 //!   - `pub const completeHeldPolicy = freq_held.completeHeldPolicy`
 //!   - `pub const ensureHeldOnHost = freq_held.ensureHeldOnHost`
 //!   - `pub const packHeld = freq_held.packHeld`
+//!   - `pub const packComplexHeld = freq_held.packComplexHeld`
 //!   - `pub fn setPlanes(self: *Self, g: []const f64, c: []const f64) void`
 //!   - `pub const factorEach = freq_held.factorEach`
 //!   - `pub const solveEach = freq_held.solveEach`
@@ -116,13 +118,13 @@ pub const FreqSolver = struct {
     held_count: usize = 0,
     /// `solveBatch` runs its sparse lanes in complex arithmetic on an n x n
     /// tape (`Complex`); false keeps the stacked-real LaneLu, whose lanes
-    /// are bitwise the scalar path's. The device sweep replays the same
-    /// complex tapes (`beginComplexChunk`); the live round driver clears it
-    /// so its host fallback stays bitwise its stacked replay.
+    /// are bitwise the scalar path's. The device sweep and live rounds
+    /// replay the same complex tapes (`beginComplexChunk`).
     complex_lanes: bool = true,
     /// `factorEach` holds complex factors on one n x n tape (`Complex`)
     /// when every ω replays it, else its stacked-real policy. Off by
-    /// default: a device provider reads stacked held tapes (`heldTape`).
+    /// default. A device provider uploads either held tape (`heldTape`,
+    /// `complexHeldTape`); only stacked ones factor on the device.
     complex_held: bool = false,
 
     /// Frequencies per LaneLu pass; `solveBatch` groups its ω from the
@@ -433,6 +435,9 @@ pub const FreqSolver = struct {
     /// See `freq_held.heldTape`.
     pub const heldTape = freq_held.heldTape;
 
+    /// See `freq_held.complexHeldTape`.
+    pub const complexHeldTape = freq_held.complexHeldTape;
+
     /// See `freq_held.beginHeldTape`.
     pub const beginHeldTape = freq_held.beginHeldTape;
 
@@ -450,6 +455,9 @@ pub const FreqSolver = struct {
 
     /// See `freq_held.packHeld`.
     pub const packHeld = freq_held.packHeld;
+
+    /// See `freq_held.packComplexHeld`.
+    pub const packComplexHeld = freq_held.packComplexHeld;
 
     /// Replaces the solver's G and C with `g` and `c`, indexed by CSC slot
     /// of the source pattern (a circuit's `g_vals`/`c_vals` layout). The
@@ -965,6 +973,54 @@ test "packed held factors preserve ragged harmonics, transpose solves and singul
                 B.solve(built.tab, built.idx.ptr, lower.ptr, upper.ptr, &diag, &rhs_plane, &work, &got, N, k, adjoint);
             }
         }
+        for (0..N) |k| for (0..nn) |i|
+            try testing.expectEqual(@as(u64, @bitCast(want[k * nn + i])), @as(u64, @bitCast(got[i * N + k])));
+    }
+}
+
+test "packed complex held factors solve bitwise as solveEach on ragged harmonics, both ways" {
+    // The device's complex held solve is `complexSolve` on these packed
+    // planes; a swapped re/im plane in the pack fails here.
+    const gpa = testing.allocator;
+    const lk = @import("kernels/lane.zig");
+    const B = @import("kernels/frequency.zig").Bodies(lk.HostP);
+    const n: u32 = 20;
+    const nn = 2 * n;
+    var ring: Ring = .init(n, 1e-3);
+    for (0..n) |j| for (ring.col_ptr[j]..ring.col_ptr[j + 1]) |p| {
+        if (ring.row_idx[p] == j) ring.g[p] = 3;
+    };
+    const nz = ring.col_ptr[n];
+    var fs = try FreqSolver.fromPlanes(gpa, n, ring.col_ptr[0 .. n + 1], ring.row_idx[0..nz], ring.g[0..nz], ring.c[0..nz]);
+    defer fs.deinit();
+    fs.complex_held = true;
+    const omegas = [_]f64{ 1, 3, 9, 27, -2 };
+    const N = omegas.len;
+    try fs.factorEach(&omegas);
+    try testing.expect(fs.heldTape() == null);
+    const tape = fs.complexHeldTape().?;
+    const built = try lk.buildTab(gpa, tape.lu, tape.src_col_ptr, tape.growth, direct.pivot_tol);
+    defer gpa.free(built.idx);
+    try testing.expectEqual(tape.lu.lx.items.len, built.tab.nnz_l);
+    const lower = try gpa.alloc(f64, 2 * tape.lu.lx.items.len * N);
+    defer gpa.free(lower);
+    const upper = try gpa.alloc(f64, 2 * tape.lu.ux.items.len * N);
+    defer gpa.free(upper);
+    var diag: [nn * N]f64 = undefined;
+    fs.packComplexHeld(N, lower, upper, &diag);
+    var rhs: [nn * N]f64 = undefined;
+    var rhs_plane: [nn * N]f64 = undefined;
+    for (0..N) |k| for (0..nn) |i| {
+        const value = @as(f64, @floatFromInt((k + 1) * (i + 1))) / 11;
+        rhs[k * nn + i] = value;
+        rhs_plane[i * N + k] = value;
+    };
+    var want: [nn * N]f64 = undefined;
+    var got: [nn * N]f64 = undefined;
+    var work: [nn * N]f64 = undefined;
+    for ([_]bool{ false, true }) |adjoint| {
+        fs.solveEach(&rhs, &want, adjoint);
+        for (0..N) |k| B.complexSolve(built.tab, built.idx.ptr, lower.ptr, upper.ptr, &diag, &rhs_plane, &work, &got, N, k, adjoint);
         for (0..N) |k| for (0..nn) |i|
             try testing.expectEqual(@as(u64, @bitCast(want[k * nn + i])), @as(u64, @bitCast(got[i * N + k])));
     }

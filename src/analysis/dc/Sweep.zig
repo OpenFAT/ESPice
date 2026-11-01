@@ -12,7 +12,7 @@
 //! dev/analysis/dc-sweep.md and dev/analysis/optimize.md (tangent rows).
 //!
 //! Contents:
-//! - fields (`ctx`, `ckt`, `opts`, `t`, `saved`, `t2`, `saved2`, `sweeps_temp`, `temp_c`, `n_inner`, `n_outer`, `ncols`, `data`, `hist`, `force`, `ws`, `block_index`, `cold`, `v`, `v2`)
+//! - fields (`ctx`, `ckt`, `opts`, `t`, `saved`, `t2`, `saved2`, `sweeps_temp`, `temp_c`, `n_inner`, `n_outer`, `ncols`, `data`, `hist`, `force`, `ws`, `block_index`, `cold`, `v`, `v2`, `currents`)
 //! - `pub fn init(s: *Sweep, ctx: *const RunCtx, opts: Options) !void`
 //! - `pub fn deinit(s: *Sweep) void`
 //! - `pub fn take(s: *Sweep) Allocator.Error!Result`
@@ -30,6 +30,7 @@ const converger = @import("solver").converger;
 const Library = @import("device").Library;
 const root = @import("../types.zig");
 const op = @import("op.zig");
+const emir = @import("../tran/emir.zig");
 const Options = @import("core").query.Dc;
 
 ctx: *const root.RunCtx,
@@ -58,6 +59,9 @@ block_index: usize = 0,
 cold: bool = true,
 v: f64 = 0,
 v2: f64 = 0,
+/// `opts.emir`: the first point's terminal currents, in the result's
+/// allocator.
+currents: @import("core").Emir = .{},
 
 const Sweep = @This();
 
@@ -142,6 +146,7 @@ pub fn take(s: *Sweep) Allocator.Error!root.Result {
         .is_complex = false,
         .npoints = s.n_inner * s.n_outer * (1 + s.opts.tangents.len),
         .data = data,
+        .emir = s.currents,
     };
 }
 
@@ -245,6 +250,7 @@ pub fn endPoint(s: *Sweep, pt: usize, warm_converged: bool) !void {
     // Each sweep point is an accepted point for device state.
     _ = ckt.stateCtl(.commit);
     for (ctx.probes, row[1..]) |node, *o| o.* = x[node];
+    if (opts.emir and at == 0) s.currents = try emir.atPoint(ctx, x);
     if (opts.tangents.len != 0) try tangentRows(ctx, ckt, s.ws, x, opts.tangents, s.hist[2 * ckt.n ..], s.data[(block + at) * ncols ..], block * ncols, ncols);
     s.cold = false;
     // ngspice copies state0 into state1 after the first point

@@ -8,7 +8,9 @@
 //! - `pub const Session`, `pub const Selection`, `pub const Format`, `pub const Result`, `pub const Plot`
 //! - `pub const validateQuery`, `pub const write`
 //! - `pub const printMeasures`, `pub const printFailedMeasures`, `pub const MeasurePoint`,
-//!   `pub const printMeasureStatistics`, `pub const measureValues`, `pub const measureOutcomes`,
+//!   `pub const printMeasureStatistics`, `pub const MeasureJson`, `pub const writeMeasureStatistics`,
+//!   `pub const Sss`, `pub const printSss`, `pub const writeSss`, `pub const writeVariantJson`,
+//!   `pub const writeJsonNumber`, `pub const measureValues`, `pub const measureOutcomes`,
 //!   `pub const sampleMeasure`
 //! - `pub fn parseFormat(s: []const u8) ?Format`
 
@@ -32,6 +34,20 @@ pub const printFailedMeasures = measure.printFailed;
 pub const MeasurePoint = measure.Point;
 /// `.meas` statistics over Monte Carlo trials.
 pub const printMeasureStatistics = measure.printStatistics;
+/// Where `printMeasures` also writes its results as JSON (#235).
+pub const MeasureJson = measure.Json;
+/// `printMeasureStatistics` as JSON objects.
+pub const writeMeasureStatistics = measure.writeStatistics;
+/// A SIGMA_SCALE run's counts and fit (#239), printed or as JSON.
+pub const Sss = measure.Sss;
+/// `Sss` in the listing's format.
+pub const printSss = measure.printSss;
+/// `Sss` as a JSON object.
+pub const writeSss = measure.writeSss;
+/// A result's JSON `variant` object: what row of `core.Variants` made it.
+pub const writeVariantJson = measure.writeVariant;
+/// An f64 as the shortest JSON number that reads back as it; `null` when not finite.
+pub const writeJsonNumber = measure.writeNumber;
 /// Every `.meas` card's value over one result; see `measure.evaluateAll`.
 pub const measureValues = measure.evaluateAll;
 /// `measureValues`, also flagging cards that name a missing vector.

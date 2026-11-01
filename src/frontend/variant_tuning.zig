@@ -20,6 +20,7 @@
 //! - `pub fn hash(c: NameContext, name: []const u8) u64`
 //! - `pub fn eql(c: NameContext, a: []const u8, b: []const u8) bool`
 //! - `pub fn refusedRow(t: *Tuning, current: core.Variants) !core.Variants`
+//! - `pub fn drop(t: *Tuning, gpa: std.mem.Allocator, below: u32) !core.Variants`
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -102,7 +103,7 @@ pub const Tuner = struct {
         const p = &t.planner;
         p.nominal = nominal;
         p.sim = arena;
-        inline for (.{ &p.labels, &p.temps, &p.axes, &p.write_refs, &p.write_values }) |list| list.clearRetainingCapacity();
+        inline for (.{ &p.labels, &p.temps, &p.axes, &p.kinds, &p.write_refs, &p.write_values }) |list| list.clearRetainingCapacity();
         p.starts.shrinkRetainingCapacity(1);
         const b = t.bases[base];
         const live = try arena.dupe(f64, b.live);
@@ -175,15 +176,22 @@ pub const Tuning = struct {
     templates: std.ArrayList(Template) = .empty,
     /// The template the last row runs on, and later rows diff against.
     template: u32 = 0,
-    /// The deck's variant table with each call's row appended, in the
-    /// session arena (`Planner.sim`); seeded on the first call.
+    /// The deck's variant table with each call's row appended, from row
+    /// `base` (`drop`); seeded on the first call. It lives in the session
+    /// arena (`Planner.sim`) until the first `drop`, then in
+    /// `table_arenas[table_at]`.
     seeded: bool = false,
+    base: u32 = 0,
+    table_arenas: ?[2]std.heap.ArenaAllocator = null,
+    table_at: u1 = 0,
     labels: std.ArrayList([]const u8) = .empty,
     temps: std.ArrayList(?f64) = .empty,
     axes: std.ArrayList(f64) = .empty,
     starts: std.ArrayList(u32) = .empty,
     refs: std.ArrayList(u32) = .empty,
     write_values: std.ArrayList(f64) = .empty,
+    /// The deck's rows' kinds; the rows a call appends read `.step`.
+    kinds: []const core.Variants.Kind = &.{},
 
     /// What one call changed: the whole variant table, whose last row is
     /// the call's, the template that row runs on (0 for the nominal
@@ -248,12 +256,13 @@ pub const Tuning = struct {
         return t;
     }
 
-    /// Frees the templates and the planner. The variant table stays with
-    /// the session arena.
+    /// Frees the templates, the planner and the variant table's arenas;
+    /// a table never dropped stays with the session arena.
     pub fn deinit(t: *Tuning) void {
         for (t.templates.items) |tm| tm.deinit(t.gpa);
         t.templates.deinit(t.gpa);
         for (&t.arenas) |*a| a.deinit();
+        if (t.table_arenas) |*arenas| for (arenas) |*a| a.deinit();
     }
 
     /// Re-opens the planner over template `k`, with the netlist at the
@@ -340,8 +349,8 @@ pub const Tuning = struct {
     /// Seeds the table and makes room for one more row, so `closeRow`
     /// cannot fail.
     fn reserveRow(t: *Tuning, current: core.Variants) !void {
-        const sim = t.planner.sim;
         try t.seed(current);
+        const sim = t.tableAllocator();
         try t.labels.ensureUnusedCapacity(sim, 1);
         try t.temps.ensureUnusedCapacity(sim, 1);
         try t.axes.ensureUnusedCapacity(sim, 1);
@@ -359,6 +368,7 @@ pub const Tuning = struct {
     /// Copies the deck's table on the first row appended.
     fn seed(t: *Tuning, current: core.Variants) !void {
         if (t.seeded) return;
+        std.debug.assert(current.base == 0);
         const p = &t.planner;
         try t.labels.appendSlice(p.sim, current.labels);
         try t.temps.appendSlice(p.sim, current.temp_c);
@@ -366,18 +376,68 @@ pub const Tuning = struct {
         try t.starts.appendSlice(p.sim, if (current.starts.len == 0) &.{0} else current.starts);
         try t.refs.appendSlice(p.sim, current.refs);
         try t.write_values.appendSlice(p.sim, current.values);
+        t.kinds = current.kinds;
         t.seeded = true;
     }
 
     fn table(t: *const Tuning) core.Variants {
         return .{
+            .base = t.base,
             .labels = t.labels.items,
             .temp_c = t.temps.items,
             .axis = t.axes.items,
             .starts = t.starts.items,
             .refs = t.refs.items,
             .values = t.write_values.items,
+            .kinds = t.kinds,
         };
+    }
+
+    fn tableAllocator(t: *Tuning) std.mem.Allocator {
+        return if (t.table_arenas) |*arenas| arenas[t.table_at].allocator() else t.planner.sim;
+    }
+
+    /// Drops the rows below `below`, which nothing reads again, and returns
+    /// the table: the rows kept move to a fresh arena of `gpa` (the same
+    /// allocator on every call) and the old one is freed, so no copy of the
+    /// table taken before this call may be read after it. All-or-nothing.
+    /// Asserts that `below` lies past `base` and within the table.
+    pub fn drop(t: *Tuning, gpa: std.mem.Allocator, below: u32) !core.Variants {
+        std.debug.assert(t.seeded and t.base < below and below <= t.base + t.labels.items.len);
+        // Until the first drop succeeds the table stays in the session arena,
+        // which an arena of its own must never be asked to resize or free.
+        const first = t.table_arenas == null;
+        if (first) t.table_arenas = .{ .init(gpa), .init(gpa) };
+        errdefer if (first) {
+            t.table_arenas = null;
+        };
+        const arenas = &t.table_arenas.?;
+        const next = &arenas[~t.table_at];
+        errdefer _ = next.reset(.free_all);
+        const a = next.allocator();
+        const k = below - t.base;
+        const lo = t.starts.items[k];
+        const labels = try a.alloc([]const u8, t.labels.items.len - k);
+        for (labels, t.labels.items[k..]) |*dst, src| dst.* = try a.dupe(u8, src);
+        const starts = try a.dupe(u32, t.starts.items[k..]);
+        for (starts) |*st| st.* -= lo;
+        const temps = try a.dupe(?f64, t.temps.items[k..]);
+        const axes = try a.dupe(f64, t.axes.items[k..]);
+        const refs = try a.dupe(u32, t.refs.items[lo..]);
+        const values = try a.dupe(f64, t.write_values.items[lo..]);
+        t.labels = .fromOwnedSlice(labels);
+        t.temps = .fromOwnedSlice(temps);
+        t.axes = .fromOwnedSlice(axes);
+        t.starts = .fromOwnedSlice(starts);
+        t.refs = .fromOwnedSlice(refs);
+        t.write_values = .fromOwnedSlice(values);
+        // The deck's kinds live in the planner's arena; appended rows have none.
+        t.kinds = t.kinds[@min(k, t.kinds.len)..];
+        // Before the first drop the old rows stay in the session arena.
+        _ = arenas[t.table_at].reset(.free_all);
+        t.table_at = ~t.table_at;
+        t.base = below;
+        return t.table();
     }
 
     /// `set` once `t.next` holds the point's values.
@@ -386,7 +446,7 @@ pub const Tuning = struct {
         const p = &t.planner;
         const nl = p.nl;
         var label: std.ArrayList(u8) = .empty;
-        for (nl.tunable, 0..) |k, i| try label.print(p.sim, "{s}{s}={d}", .{ if (i == 0) "" else ", ", nl.live.names[k], t.next[k] });
+        for (nl.tunable, 0..) |k, i| try label.print(t.tableAllocator(), "{s}{s}={d}", .{ if (i == 0) "" else ", ", nl.live.names[k], t.next[k] });
         if (t.planned != t.template) try t.open(t.template, nominal);
         // `nominal` is the Problem's own circuit; the one the planner opened
         // over in `init` was moved into it since.
@@ -432,8 +492,8 @@ pub const Tuning = struct {
             if (try p.load(pt, label.items) != .row) return p.refuse(label.items, "a parameter value that changes the topology");
         }
         try p.pointWrites(pt);
-        try t.refs.appendSlice(p.sim, p.write_refs.items);
-        try t.write_values.appendSlice(p.sim, p.write_values.items);
+        try t.refs.appendSlice(t.tableAllocator(), p.write_refs.items);
+        try t.write_values.appendSlice(t.tableAllocator(), p.write_values.items);
         t.template = t.planned;
         t.closeRow(label.items);
         @memcpy(t.values, t.next);

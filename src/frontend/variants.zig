@@ -9,11 +9,11 @@
 //! a new template (`Tuning`). In: a netlist and its nominal circuit. Out:
 //! a `Plan`. Stages: variant_planner.zig (rows and rebuilds),
 //! variant_mismatch.zig, variant_draws.zig, variant_tuning.zig,
-//! variant_params.zig.
+//! variant_wcd.zig, variant_params.zig.
 //! Cites: dev/analysis/variants.md; HSPICE [SA] Ch.25-27.
 //!
 //! Contents:
-//! - `pub const Planner, Tuner, Tuning, Params, collect, Sampler, Trial, setPoint, drawOnce, variations, siteVariations` (stage files)
+//! - `pub const Planner, Tuner, Tuning, WorstCase, Params, collect, Sampler, Trial, Sss, sssCards, setPoint, drawOnce, variations, siteVariations` (stage files)
 //! - `pub const Plan`
 //! - `pub const Run`
 //! - `pub const Rebuild`
@@ -40,6 +40,7 @@ const variant_params = @import("variant_params.zig");
 const variant_tuning = @import("variant_tuning.zig");
 const variant_mismatch = @import("variant_mismatch.zig");
 const variant_circuit = @import("variant_circuit.zig");
+const variant_wcd = @import("variant_wcd.zig");
 
 /// Planning state (variant_planner.zig).
 pub const Planner = variant_planner.Planner;
@@ -47,6 +48,8 @@ pub const Planner = variant_planner.Planner;
 pub const Tuner = variant_tuning.Tuner;
 /// Live `.param` values set after the build (variant_tuning.zig).
 pub const Tuning = variant_tuning.Tuning;
+/// `.wcd` worst-case distance rows (variant_wcd.zig).
+pub const WorstCase = variant_wcd.WorstCase;
 /// A circuit's parameters by ordinal (variant_params.zig).
 pub const Params = variant_params.Params;
 /// Every parameter of a circuit (variant_params.zig).
@@ -55,6 +58,10 @@ pub const collect = variant_params.collect;
 pub const Sampler = variant_draws.Sampler;
 /// One Monte Carlo trial (variant_draws.zig).
 pub const Trial = variant_draws.Trial;
+/// A `SWEEP MONTE ... SIGMA_SCALE=` card (variant_draws.zig).
+pub const Sss = variant_draws.Sss;
+/// The deck's SIGMA_SCALE cards (variant_draws.zig).
+pub const sssCards = variant_draws.sssCards;
 /// Sets a netlist's live values to a point's (variant_draws.zig).
 pub const setPoint = variant_draws.setPoint;
 /// Draws every distribution site once from `.option seed`.
@@ -106,6 +113,8 @@ pub const Point = struct {
     /// Monte Carlo trial, whose draws answer the distribution calls and
     /// the `DEV`/`LOT`/`.variation` rows.
     trial: ?variant_draws.Trial = null,
+    /// What the row is (`core.Variants.kinds`).
+    kind: core.Variants.Kind = .step,
 };
 
 /// A card's primary value for one point, by card name.
@@ -168,13 +177,23 @@ pub fn plan(p: *variant_planner.Planner) !Plan {
                 // A rebuilt trial draws from it after `plan` returns.
                 const sampler = try p.scratch.create(variant_draws.Sampler);
                 sampler.* = try .init(p.scratch, deck.config, std.mem.max(u32, m.list));
-                for (m.list) |t| try p.addTrial(sampler, t, t - 1);
+                for (m.list) |t| try p.addTrial(sampler, t, t - 1, 1);
                 if (lanes) span.lanes = .{ .axis = "run", .dc_plot = false };
             } else {
-                const sampler = try p.scratch.create(variant_draws.Sampler);
-                sampler.* = try .init(p.scratch, deck.config, m.n);
-                if (m.n > std.math.maxInt(u32) - m.first + 1) return p.refuse(a.line, "a MONTE trial number past 4294967295");
-                for (0..m.n) |k| try p.addTrial(sampler, m.first + @as(u32, @intCast(k)), @intCast(k));
+                // `SIGMA_SCALE=s1,...` (#239): MONTE trials per scale, each
+                // scale's trial numbers after the last's, so their draws are
+                // independent.
+                const scales: []const f64 = if (m.scales.len != 0) m.scales else &.{1};
+                if (@as(u64, m.n) * scales.len > @as(u64, std.math.maxInt(u32)) - m.first + 1) return p.refuse(a.line, "a MONTE trial number past 4294967295");
+                if (m.scales.len != 0 and deck.alters.len != 0) return p.refuse(a.line, "SIGMA_SCALE together with .alter");
+                for (scales, 0..) |scale, j| {
+                    const sampler = try p.scratch.create(variant_draws.Sampler);
+                    sampler.* = try .init(p.scratch, deck.config, m.n);
+                    // Latin hypercube counts are not binomial: the interval would be wrong.
+                    if (m.scales.len != 0 and sampler.lhs) return p.refuse(a.line, "SIGMA_SCALE with sampling_method=lhs");
+                    const first = m.first + @as(u32, @intCast(j * m.n));
+                    for (0..m.n) |k| try p.addTrial(sampler, first + @as(u32, @intCast(k)), @intCast(k), scale);
+                }
                 if (lanes) span.lanes = .{ .axis = "run", .dc_plot = false };
             },
         }
@@ -201,7 +220,7 @@ pub fn plan(p: *variant_planner.Planner) !Plan {
         if (!own) fanout.global.count = p.count() - fanout.global.first;
     }
     if (p.prefix.len != 0 and p.count() == 0) {
-        try p.closeRow(p.prefix, 0, null);
+        try p.closeRow(p.prefix, 0, null, .alter);
         fanout.global = .{ .first = 0, .count = 1, .nominal = false };
     }
     _ = try nl.setLive(p.scratch, &p.stack, nl.live.nominal, null);
@@ -217,4 +236,5 @@ test {
     _ = variant_planner;
     _ = variant_mismatch;
     _ = variant_circuit;
+    _ = variant_wcd;
 }

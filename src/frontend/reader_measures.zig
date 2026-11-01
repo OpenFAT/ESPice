@@ -1,6 +1,8 @@
-//! `.meas`, `.check`, `.power` and `.stim` cards, and the measure callbacks
-//! measure.zig evaluates values through.
-//! Cites: ngspice com_measure2.c; HSPICE [CR] .MEASURE, .STIM, .POWER.
+//! `.meas`, `.check`, `.power` and `.stim` cards, the cards that read them
+//! (`FAIL=`, `.wcd`), and the measure callbacks measure.zig evaluates values
+//! through.
+//! Cites: ngspice com_measure2.c; HSPICE [CR] .MEASURE, .STIM, .POWER;
+//! #238-#240.
 //!
 //! Contents:
 //! - `pub fn Methods(comptime S: type) type`
@@ -12,6 +14,8 @@
 //! - `pub fn measureExpr(r: *R, text: []const u8) Error![]const core.MeasureOp`
 //! - `pub fn measureOption(r: *R, name: []const u8) ?f64`
 //! - `pub fn measureValue(r: *R, text: []const u8) Error!f64`
+//! - `pub fn compileFails(r: *R) Error!void`
+//! - `pub fn readWcd(r: *R, line: []const u8) Error!Wcd`
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -32,6 +36,8 @@ const netlist_view = @import("netlist_view.zig");
 const reader_frame = @import("reader_frame.zig");
 const Kind = card_rows.Kind;
 const Error = card_rows.Error;
+const Wcd = card_rows.Wcd;
+const WcdSpec = card_rows.WcdSpec;
 const isGround = netlist_view.isGround;
 const Frame = reader_frame.Frame;
 
@@ -245,7 +251,8 @@ pub fn Methods(comptime S: type) type {
 
         /// A `PARAM=` or `par()` measure expression in postfix: names of
         /// earlier `.meas` cards read their results, global parameters fold
-        /// to numbers, `v(a[,b])` and `i(x)` read result vectors. Arithmetic
+        /// to numbers, `v(a[,b])` and `i(x)` read result vectors, and
+        /// `soa_count()` the result's SOA excursions (#238). Arithmetic
         /// only; anything else is a ParseError. The ops live in the arena.
         pub fn measureExpr(r: *R, text: []const u8) Error![]const core.MeasureOp {
             const body = if (text.len > 0 and (text[0] == '{' or F.isQuote(text[0]))) F.body(text) else text;
@@ -276,6 +283,7 @@ pub fn Methods(comptime S: type) type {
                 .mul => .mul,
                 .div => .div,
                 .pow => .pow,
+                .ucall => if (op.b == 0 and std.ascii.eqlIgnoreCase(names[op.a], "soa_count")) .soa_count else return error.ParseError,
                 else => return error.ParseError,
             });
             return out.items;
@@ -303,6 +311,84 @@ pub fn Methods(comptime S: type) type {
                 .num => |n| n,
                 else => error.ParseError,
             };
+        }
+
+        /// Compiles each SIGMA_SCALE card's FAIL now that every `.meas`
+        /// card is read: a name reads that card's value (`.live`, its index
+        /// in `measures`). A name of no card of the analysis, a probe, a
+        /// distribution or an unknown function is refused, as is a second
+        /// MONTE card of the analysis (its trials would count too).
+        pub fn compileFails(r: *R) Error!void {
+            for (r.analyses.items, 0..) |*a, i| {
+                if (a.sweep != .monte or a.sweep.monte.scales.len == 0) continue;
+                for (r.analyses.items, 0..) |b, j| if (j != i and b.kind == a.kind and b.sweep == .monte)
+                    return r.unsupported(a.line, "SIGMA_SCALE beside another MONTE card of its analysis");
+                // ponytail: one result per trial; a `.temp` list would give several.
+                for (r.config.items) |c| if (c.temp and c.args.len > 1) return r.unsupported(a.line, "SIGMA_SCALE with a .temp list");
+                const fail = &a.sweep.monte.fail;
+                const mark = r.scratch.mark();
+                defer r.scratch.reset(mark);
+                expr.compileAll(S, r.arena, &r.scratch, fail.text) catch |err| return r.failed(a.line, err);
+                const ops = try r.arena.dupe(expr.Op, r.scratch.ops.items[mark.ops..]);
+                const names = r.scratch.names.items;
+                for (ops) |*op| switch (op.code) {
+                    .ident => op.* = .{ .code = .live, .a = for (r.measures.items, 0..) |m, k| {
+                        if (m.analysis == a.kind and std.mem.eql(u8, m.name, names[op.a])) break @intCast(k);
+                    } else return r.unsupported(a.line, "FAIL names no .meas card of its analysis") },
+                    .vprobe, .iprobe, .ucall => return r.unsupported(a.line, "FAIL reads its analysis's .meas cards, not vectors or unknown functions"),
+                    .call => if (expr.isDistribution(@fromBackingInt(@intCast(op.a)))) return r.unsupported(a.line, "a distribution in FAIL"),
+                    else => {}, // else: numbers, arithmetic, comparisons, logic and math calls
+                };
+                fail.ops = ops;
+                fail.consts = try r.arena.dupe(f64, r.scratch.consts.items);
+            }
+        }
+
+        /// The `.wcd` card `line` (#240), now that every `.meas` card is
+        /// read: `name 'op number'` pairs, op one of `>=`, `>`, `<=`, `<`
+        /// and the number as a `.meas` value, then `MAXITER=`, `TOL=` and
+        /// `TOP=`. Refuses a name of no `.meas` card, a card named twice,
+        /// SWEEP OPTIMIZE (whose variant table it would share) and an
+        /// HSPICE `.temp` list (one value per spec and point).
+        pub fn readWcd(r: *R, line: []const u8) Error!Wcd {
+            r.card = line;
+            if (r.optimize != null) return r.unsupported(line, ".wcd together with SWEEP OPTIMIZE");
+            for (r.config.items) |c| if (c.temp and c.args.len > 1) return r.unsupported(line, ".wcd with a .temp list");
+            var w: Wcd = .{ .specs = &.{}, .line = r.written(line) };
+            var specs: std.ArrayList(WcdSpec) = .empty;
+            var f = F.init(line);
+            _ = f.next(); // the card
+            while (f.next()) |t| {
+                if (!F.isWord(t)) return r.failed(line, error.ParseError);
+                if (f.takeEq()) {
+                    const v = S.parseNum(f.next() orelse return r.failed(line, error.ParseError)) orelse return r.failed(line, error.ParseError);
+                    const count = v >= 1 and v <= 1e6 and v == @floor(v);
+                    if (std.mem.eql(u8, t, "maxiter") and count) {
+                        w.maxiter = @intFromFloat(v);
+                    } else if (std.mem.eql(u8, t, "top") and (count or v == 0)) {
+                        w.top = @intFromFloat(v);
+                    } else if (std.mem.eql(u8, t, "tol") and v > 0 and v < std.math.inf(f64)) {
+                        w.tol = v;
+                    } else return r.failed(line, error.ParseError);
+                    continue;
+                }
+                const card: u32 = for (r.measures.items, 0..) |m, k| {
+                    if (std.mem.eql(u8, m.name, t)) break @intCast(k);
+                } else return r.unsupported(line, "a .wcd spec that names no .meas card");
+                for (specs.items) |s| if (s.measure == card) return r.unsupported(line, "a .meas card named twice in .wcd");
+                const q = f.next() orelse return r.failed(line, error.ParseError);
+                if (!F.isQuote(q[0]) and q[0] != '{') return r.failed(line, error.ParseError);
+                const rel = std.mem.trim(u8, F.body(q), " \t");
+                const above = rel.len != 0 and rel[0] == '>';
+                if (!above and !(rel.len != 0 and rel[0] == '<')) return r.failed(line, error.ParseError);
+                const op_len: usize = if (rel.len > 1 and rel[1] == '=') 2 else 1;
+                const limit = r.measureValue(std.mem.trim(u8, rel[op_len..], " \t")) catch |err| return r.failed(line, err);
+                if (!std.math.isFinite(limit)) return r.failed(line, error.ParseError);
+                try specs.append(r.arena, .{ .measure = card, .above = above, .limit = limit, .bound = rel });
+            }
+            if (specs.items.len == 0) return r.failed(line, error.ParseError);
+            w.specs = specs.items;
+            return w;
         }
     };
 }

@@ -8,13 +8,13 @@
 //!
 //! Contents:
 //! - `pub const gpa: std.mem.Allocator`
-//! - namespaces: `numerics`, `query`, `validate`, `lm`, `bisect`, `eigen`, `testing`
+//! - namespaces: `numerics`, `query`, `validate`, `lm`, `bisect`, `eigen`, `sss`, `form`, `testing`
 //! - deck (`deck.zig`): `Deck`, `Ic`, `AcOverride`, `Variants`, `QueryBindings`,
-//!   `SaveOp`, `Mosra`, `MosraModel`, `Stim`
+//!   `SaveOp`, `Mosra`, `MosraModel`, `Stim`, `Soa`, `SoaLimit`, `OpVar`
 //! - measures (`measure_card.zig`): `Measure`, `MeasureClause`, `GoalBound`,
 //!   `MeasureFunc`, `Check`, `MeasureOp`, `MeasureRef`, `measure_unset`,
 //!   `measure_last`, `measure_no_at`
-//! - results (`result.zig`): `Result`, `Measured`, `Schema`, `QuerySchema`
+//! - results (`result.zig`): `Result`, `Measured`, `Emir`, `EmirTerminal`, `Schema`, `QuerySchema`
 //! - names (`intern.zig`): `InternPool`, `Name`
 //! - ids (`ids.zig`): `DeviceType`, `GROUND`
 
@@ -40,6 +40,10 @@ pub const lm = @import("lm.zig");
 pub const bisect = @import("bisect.zig");
 /// Dense real eigenvalues (balance, Hessenberg, Francis QR).
 pub const eigen = @import("eigen.zig");
+/// Scaled-sigma sampling: the failure-rate fit over sigma scales (#239).
+pub const sss = @import("sss.zig");
+/// First-order reliability: a spec's worst-case distance (`.wcd`, #240).
+pub const form = @import("form.zig");
 /// Test support: the allocator every allocation-failure sweep runs over.
 pub const testing = @import("testing.zig");
 
@@ -57,6 +61,9 @@ pub const SaveOp = deck.SaveOp;
 pub const Mosra = deck.Mosra;
 pub const MosraModel = deck.MosraModel;
 pub const Stim = deck.Stim;
+pub const Soa = deck.Soa;
+pub const SoaLimit = deck.SoaLimit;
+pub const OpVar = deck.OpVar;
 
 pub const Measure = measure_card.Measure;
 pub const MeasureClause = measure_card.MeasureClause;
@@ -71,6 +78,8 @@ pub const measure_no_at = measure_card.measure_no_at;
 
 pub const Result = result.Result;
 pub const Measured = result.Measured;
+pub const Emir = result.Emir;
+pub const EmirTerminal = result.EmirTerminal;
 pub const Schema = result.Schema;
 pub const QuerySchema = result.QuerySchema;
 
@@ -83,10 +92,13 @@ pub const GROUND = ids.GROUND;
 test {
     _ = numerics;
     _ = @import("freq_sweep.zig");
+    _ = @import("normal.zig");
     _ = intern;
     _ = lm;
     _ = bisect;
     _ = eigen;
+    _ = sss;
+    _ = form;
     _ = query;
     _ = @import("query/card_names.zig");
     _ = @import("query/periodic.zig");

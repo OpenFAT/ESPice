@@ -6,8 +6,9 @@
 //! (`freq_engine.zig`). Failed lanes peel in point-local frequency order
 //! before the next round, so readout stays unchanged. The sweep precompute
 //! (`solveAll`) replays the host's complex tapes while a point's complex
-//! lanes are on, its stacked tapes after; live rounds and held
-//! preconditioner factors (`freq_held.zig`) use stacked tapes.
+//! lanes are on, its stacked tapes after, as do live rounds. Held
+//! preconditioner factors (`freq_held.zig`) upload whichever tape the
+//! host's `factorEach` held.
 //! Cites: none (FreqSolver's lane-chunk protocol).
 //!
 //! Contents:
