@@ -167,6 +167,7 @@ pub fn main(init: std.process.Init) !u8 {
     if (cli.tangents.items.len == 0) cli.point.tangent_step = 0 else if (cli.point.tangent_step == 0) cli.point.tangent_step = 1e-6;
     // One per process: VerA's VPI is process-global.
     const vpi = vpi_host.init(init.gpa, init.io);
+    defer vpi_host.deinit();
     var failed = false;
     for (cli.paths.items) |path| {
         if (!try runDeck(init, &cli, backend, vpi, path)) failed = true;

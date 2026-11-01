@@ -11,6 +11,7 @@
 //!
 //! Contents:
 //! - `pub fn init(gpa: std.mem.Allocator, io: std.Io) *const espice.Vpi`
+//! - `pub fn deinit() void`
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -109,6 +110,22 @@ pub fn init(gpa: std.mem.Allocator, io: std.Io) *const espice.Vpi {
     assert(host.attached == null);
     assert(host.apps.items.len == 0);
     return &interface;
+}
+
+/// Frees what the host and VerA's VPI hold (the open design, the
+/// registries, the application paths); `init` must run again before the
+/// interface is used. The applications stay mapped, as they always have.
+/// Precondition: every Problem that took the interface is gone.
+pub fn deinit() void {
+    host.mutex.lockUncancelable(host.io);
+    host.binding.detach();
+    vpi.close();
+    for (host.apps.items) |a| host.gpa.free(a);
+    host.apps.deinit(host.gpa);
+    if (host.attached) |p| host.gpa.free(p);
+    host.names_arena.deinit();
+    host.mutex.unlock(host.io);
+    host = undefined;
 }
 
 // ---- private ----

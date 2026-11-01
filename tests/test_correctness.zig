@@ -467,7 +467,9 @@ fn sameResults(a: Allocator, base: []const Plot, got: []const Plot, v: metamorph
 }
 
 /// Runs espice on `netlist` from its own directory, so relative includes
-/// resolve. `error.Timeout` after `timeout_seconds`.
+/// resolve. `error.Timeout` after `timeout_seconds`; `error.MemoryLeaked`
+/// when the run's allocator reported a leak, whatever it exited with: Zig's
+/// start code leaves the exit code alone on one, so only stderr shows it.
 fn simulate(a: Allocator, io: Io, app: []const u8, netlist: []const u8, output: []const u8, timeout_seconds: u32, tokenizer: ?[]const u8) !std.process.RunResult {
     // A total deadline also covers a child that closes its streams then hangs.
     const Event = union(enum) { process: std.process.RunError!std.process.RunResult, timeout: Io.Cancelable!void };
@@ -491,11 +493,20 @@ fn simulate(a: Allocator, io: Io, app: []const u8, netlist: []const u8, output: 
     };
     try select.concurrent(.process, std.process.run, .{ a, io, options });
     try select.concurrent(.timeout, Io.sleep, .{ io, Io.Duration.fromSeconds(timeout_seconds), Io.Clock.awake });
-    return switch (try select.await()) {
-        .process => |result| result,
-        .timeout => error.Timeout,
+    const result = switch (try select.await()) {
+        .process => |result| try result,
+        .timeout => return error.Timeout,
     };
+    if (std.mem.indexOf(u8, result.stderr, leak_report) != null) {
+        diagnostic("  leak\n{s}\n", .{result.stderr});
+        return error.MemoryLeaked;
+    }
+    return result;
 }
+
+/// What a Debug or ReleaseSafe espice's allocator prints per leaked block
+/// at exit (std.heap.SafeAllocator).
+const leak_report = "error(SafeAllocator): leaked";
 
 fn requireSuccess(result: std.process.RunResult) !void {
     if (result.term == .exited and result.term.exited == 0) return;
@@ -1208,6 +1219,23 @@ test "deadline kills a simulator that closes output streams before hanging" {
     const a = arena.allocator();
     const app = try tmp.dir.realPathFileAlloc(io, "simulator", a);
     try std.testing.expectError(error.Timeout, simulate(a, io, app, "tests/conformance/tests/netlist/op/divider_default.sp", "/dev/null", 1, null));
+}
+
+// Oracle: a script that prints the allocator's leak line and exits 0 must
+// fail, and the same script without that line must pass.
+test "a run whose allocator reports a leak fails, whatever its exit code" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    try tmp.dir.writeFile(io, .{ .sub_path = "leaky", .data = "#!/bin/sh\necho 'error(SafeAllocator): leaked [addr: 1, len: 8 (0x8) align: 8] allocated at:' >&2\n", .flags = .{ .permissions = .fromMode(0o755) } });
+    try tmp.dir.writeFile(io, .{ .sub_path = "clean", .data = "#!/bin/sh\necho 'warning: unrelated' >&2\n", .flags = .{ .permissions = .fromMode(0o755) } });
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const deck = "tests/conformance/tests/netlist/op/divider_default.sp";
+    try std.testing.expectError(error.MemoryLeaked, simulate(a, io, try tmp.dir.realPathFileAlloc(io, "leaky", a), deck, "/dev/null", 10, null));
+    try requireSuccess(try simulate(a, io, try tmp.dir.realPathFileAlloc(io, "clean", a), deck, "/dev/null", 10, null));
 }
 
 // Oracle: a triangle wave whose period and swing are known by construction.
