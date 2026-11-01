@@ -13,7 +13,7 @@
 //! - `pub const Prepared = struct`, with `name_max` and `fn name(self) []const u8`
 //! - `pub const Error = error{...}`
 //! - `pub const Result = Error!?Prepared`
-//! - `pub fn prepareAll(gpa: Allocator, io: std.Io, files: []const []const u8, loaded: []const []const u8, paths: BuildPaths, results: []Result) std.Io.Cancelable!void`
+//! - `pub fn prepareAll(gpa: Allocator, io: std.Io, files: []const []const u8, loaded: []const []const u8, paths: BuildPaths, results: []Result, logs: []std.Io.Writer.Allocating) std.Io.Cancelable!void`
 //! - `pub fn pending(sources: []const []const u8, arena: Allocator, files: []const []const u8) Allocator.Error!Pending`
 //! - `pub const Pending = struct`
 
@@ -152,20 +152,25 @@ var zig_accepted: std.atomic.Value(u64) = .init(0);
 
 /// Compiles and opens every file in `files` in parallel into `results`
 /// (parallel to `files`), skipping modules named in `loaded` (lowercased,
-/// as `Library.names` holds them). Registers nothing: the caller walks
-/// `results` in order. Fails only when the task group is canceled. Asserts
-/// that `results` has one entry per file.
-pub fn prepareAll(gpa: Allocator, io: std.Io, files: []const []const u8, loaded: []const []const u8, paths: BuildPaths, results: []Result) std.Io.Cancelable!void {
+/// as `Library.names` holds them). Each file's messages (VerA's
+/// diagnostics, the compile line, the compiler's errors) go to its own
+/// entry of `logs`, never to stderr: the builds finish in any order, so the
+/// caller prints the logs in `files` order. A log that runs out of memory
+/// keeps what it had. Registers nothing: the caller walks `results` in
+/// order. Fails only when the task group is canceled. Asserts that
+/// `results` and `logs` have one entry per file.
+pub fn prepareAll(gpa: Allocator, io: std.Io, files: []const []const u8, loaded: []const []const u8, paths: BuildPaths, results: []Result, logs: []std.Io.Writer.Allocating) std.Io.Cancelable!void {
     assert(results.len == files.len);
+    assert(logs.len == files.len);
     var group: std.Io.Group = .init;
     defer group.cancel(io);
-    const Task = struct { loaded: []const []const u8, gpa: Allocator, path: []const u8, slot: *Result, paths: BuildPaths };
-    for (files, results) |path, *slot| {
+    const Task = struct { loaded: []const []const u8, gpa: Allocator, path: []const u8, slot: *Result, log: *std.Io.Writer, paths: BuildPaths };
+    for (files, results, logs) |path, *slot, *log| {
         group.async(io, struct {
             fn run(inner_io: std.Io, t: Task) void {
-                t.slot.* = prepareOne(t.loaded, t.gpa, inner_io, t.path, t.paths);
+                t.slot.* = prepareOne(t.loaded, t.gpa, inner_io, t.path, t.paths, t.log);
             }
-        }.run, .{ io, Task{ .loaded = loaded, .gpa = gpa, .path = path, .slot = slot, .paths = paths } });
+        }.run, .{ io, Task{ .loaded = loaded, .gpa = gpa, .path = path, .slot = slot, .log = &log.writer, .paths = paths } });
     }
     try group.await(io);
 }
@@ -193,9 +198,10 @@ pub fn pending(sources: []const []const u8, arena: Allocator, files: []const []c
 
 // ---- private ----
 
-/// Compiles and opens one source. Reads `loaded` only, so several run
-/// concurrently. Returns null when the module is already in `loaded`.
-fn prepareOne(loaded: []const []const u8, gpa: Allocator, io: std.Io, path: []const u8, paths: BuildPaths) Error!?Prepared {
+/// Compiles and opens one source, its messages to `log`. Reads `loaded`
+/// only, so several run concurrently. Returns null when the module is
+/// already in `loaded`.
+fn prepareOne(loaded: []const []const u8, gpa: Allocator, io: std.Io, path: []const u8, paths: BuildPaths, log: *std.Io.Writer) Error!?Prepared {
     const hdl = hdl_extensions.get(std.fs.path.extension(path)) orelse return error.UnsupportedHdlExtension;
     const source = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(source_bytes_max));
     defer gpa.free(source);
@@ -223,13 +229,13 @@ fn prepareOne(loaded: []const []const u8, gpa: Allocator, io: std.Io, path: []co
             // that names something 2023 reserves (BSIM-CMG 112's `expm1`)
             // narrows itself with `begin_keywords "VAMS-2.3"`.
             va = fastvaf.compileSourceOpts(gpa, source, .build, .{ .file_name = path, .include_dirs = dirs, .diags = &bag, .display = .record, .int_systfs = paths.int_systfs }) catch |err| {
-                printDiags(&bag);
+                printDiags(&bag, log);
                 return err;
             };
             break :blk va.?.mir.name;
         },
         .v => blk: {
-            v = try emitDigital(arena_state.allocator(), path, source);
+            v = try emitDigital(arena_state.allocator(), path, source, log);
             break :blk v.name;
         },
     };
@@ -242,26 +248,28 @@ fn prepareOne(loaded: []const []const u8, gpa: Allocator, io: std.Io, path: []co
         .v => .{ .text = v.zig },
     };
     // Warnings of a successful compile, and codegen's refusals (E0515).
-    printDiags(&bag);
+    printDiags(&bag, log);
     if (va != null and va.?.device_has_compile_error) return error.HdlCodegenRefused;
-    const built = try buildLibrary(gpa, io, arena_state.allocator(), module_name, path, device, paths);
+    const built = try buildLibrary(gpa, io, arena_state.allocator(), module_name, path, device, paths, log);
     out.vtable = built.vtable;
     if (key) |k| recordInputs(io, paths.work_dir, k, module_name, &built.digest_hex);
     return out;
 }
 
 /// Builds `device` into `lib<name>.<generation>.so` under its own work
-/// directory and opens it; `path` names the source in the progress line.
-/// Returns the vtable and the build tree's name for `recordInputs`.
-fn buildLibrary(gpa: Allocator, io: std.Io, arena: Allocator, module_name: []const u8, path: []const u8, device: fastvaf.codegen.Output, paths: BuildPaths) !struct { vtable: *const DeviceVtable, digest_hex: [64]u8 } {
+/// directory and opens it; `path` names the source in the progress line,
+/// which goes to `log` with the compiler's errors. Returns the vtable and
+/// the build tree's name for `recordInputs`.
+fn buildLibrary(gpa: Allocator, io: std.Io, arena: Allocator, module_name: []const u8, path: []const u8, device: fastvaf.codegen.Output, paths: BuildPaths, log: *std.Io.Writer) !struct { vtable: *const DeviceVtable, digest_hex: [64]u8 } {
     assert(module_name.len > 0);
     // A wrong Zig fails mid-build with its own confusing message (0.16:
     // "unrecognized optimization mode"), so ask it first.
     checkZig(gpa, io, paths.zig) catch |err| {
-        zigHint(err, paths.zig);
+        zigHint(err, paths.zig, log);
         return err;
     };
-    std.debug.print("loader: compiling '{s}' ({s}) — first load, cached afterwards\n", .{ module_name, path });
+    // A full log drops the line; the build goes on.
+    log.print("loader: compiling '{s}' ({s}) — first load, cached afterwards\n", .{ module_name, path }) catch {};
     // The orchestrator hashes this list into its cache key. `sim` and its
     // imports are VerA's build.zig `module_specs` rows, which a `.v` device
     // needs; a `.va` device never imports them, so they cost it nothing.
@@ -333,7 +341,7 @@ fn buildLibrary(gpa: Allocator, io: std.Io, arena: Allocator, module_name: []con
         else => return err, // else: any other unlink failure aborts the build (see above)
     };
     var built = fastvaf.orchestrator.compileRelease(gpa, io, options, device, generation) catch |err| {
-        zigHint(err, paths.zig);
+        zigHint(err, paths.zig, log);
         return err;
     };
     defer built.deinit(gpa);
@@ -343,7 +351,7 @@ fn buildLibrary(gpa: Allocator, io: std.Io, arena: Allocator, module_name: []con
         // so a compile failure here is an engine bug; show the compiler's
         // own errors.
         .failed => |bundle| {
-            bundle.renderToStderr(io, .{}, .off) catch {}; // stderr gone: the error still returns
+            bundle.renderToWriter(.{}, log) catch {}; // log full: the error still returns
             return error.GeneratedDeviceDoesNotCompile;
         },
     };
@@ -372,11 +380,12 @@ fn named(module_name: []const u8, is_digital: bool) ?Prepared {
     return out;
 }
 
-/// Prints what to fix for the two errors a wrong or missing compiler gives.
-fn zigHint(err: anyerror, zig: []const u8) void {
+/// Writes to `log` what to fix for the two errors a wrong or missing
+/// compiler gives. A full log drops the hint; the error still returns.
+fn zigHint(err: anyerror, zig: []const u8, log: *std.Io.Writer) void {
     switch (err) {
-        error.CompilerGone => std.debug.print("loader: the Zig compiler '{s}' did not start or exited mid-build; runtime .hdl needs zig {s} on PATH, or its path in $ZIG\n", .{ zig, builtin.zig_version_string }),
-        error.ProtocolMismatch => std.debug.print("loader: '{s}' is not zig {s}, the compiler this espice was built with; put that version on PATH or in $ZIG\n", .{ zig, builtin.zig_version_string }),
+        error.CompilerGone => log.print("loader: the Zig compiler '{s}' did not start or exited mid-build; runtime .hdl needs zig {s} on PATH, or its path in $ZIG\n", .{ zig, builtin.zig_version_string }) catch {},
+        error.ProtocolMismatch => log.print("loader: '{s}' is not zig {s}, the compiler this espice was built with; put that version on PATH or in $ZIG\n", .{ zig, builtin.zig_version_string }) catch {},
         else => {}, // else: the remaining errors name themselves; the caller reports them
     }
 }
@@ -637,27 +646,22 @@ fn contains(list: []const []const u8, path: []const u8) bool {
 }
 
 /// VerA's `.v` contract device for `source`: 4-state, under the static
-/// schedule (the CLI's default). Prints VerA's diagnostics, the W1155 1 s
-/// tick warning included, and fails with `DigitalFailed` on its E1103
-/// refusal.
-fn emitDigital(arena: Allocator, path: []const u8, source: []const u8) !DeviceZig {
+/// schedule (the CLI's default). Writes VerA's diagnostics to `log`, the
+/// W1155 1 s tick warning included, and fails with `DigitalFailed` on its
+/// E1103 refusal.
+fn emitDigital(arena: Allocator, path: []const u8, source: []const u8, log: *std.Io.Writer) !DeviceZig {
     var bag: fastvaf.diag.Bag = .init(arena);
     try bag.setSingleFile(path, source);
     const dev = digital.emitDevice(arena, source, .{ .file_name = path }, .static, &bag);
-    printDiags(&bag);
+    printDiags(&bag, log);
     return dev;
 }
 
-/// Prints VerA's diagnostics (file:line, code, message) to stderr.
-fn printDiags(bag: *fastvaf.diag.Bag) void {
+/// Writes VerA's diagnostics (file:line, code, message) to `log`.
+fn printDiags(bag: *fastvaf.diag.Bag, log: *std.Io.Writer) void {
     if (bag.isEmpty()) return;
-    var buf: [1024]u8 = undefined;
-    const stderr = std.debug.lockStderr(&buf);
-    defer std.debug.unlockStderr();
-    const w = &stderr.file_writer.interface;
-    // A closed stderr drops the diagnostics; the error still returns.
-    fastvaf.diag.render(bag, w, .{}) catch {};
-    w.flush() catch {};
+    // A full log drops the diagnostics; the error still returns.
+    fastvaf.diag.render(bag, log, .{}) catch {};
 }
 
 /// Opens a device library for the life of the process and returns its
@@ -813,4 +817,50 @@ test "named lowercases and refuses a name past name_max" {
     try std.testing.expectEqualStrings("mymod", p.name());
     try std.testing.expect(named(&(@as([Prepared.name_max + 1]u8, @splat('a'))), true) == null);
     try std.testing.expect(named(&(@as([Prepared.name_max]u8, @splat('a'))), true) != null);
+}
+
+test "prepareAll: each file's messages land in its own log, whatever builds beside it" {
+    const g = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // Two sources VerA refuses, each with its own diagnostics: no compiler runs.
+    try tmp.dir.writeFile(io, .{ .sub_path = "a.va", .data = "module a(p); electrical p; analog V(p) <+ ;\nendmodule\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "b.va", .data = "module b(q) electrical q; endmodule\n" });
+    const dir = try std.fs.path.join(g, &.{ std.testing.TmpDir.parent_dir_path, &tmp.sub_path });
+    defer g.free(dir);
+    const a = try std.fs.path.join(g, &.{ dir, "a.va" });
+    defer g.free(a);
+    const b = try std.fs.path.join(g, &.{ dir, "b.va" });
+    defer g.free(b);
+    const paths: BuildPaths = .{ .work_dir = dir, .contract = "c", .dyn = "d", .gompute = "g", .device_abi = "x", .core = "k", .zig = "/nonexistent-espice-test-dir/zig" };
+    const Run = struct {
+        /// Each file's log after one `prepareAll` over `files`; caller frees.
+        fn logs(files: []const []const u8, p: BuildPaths) ![2][]u8 {
+            var results: [2]Result = undefined;
+            var bufs: [2]std.Io.Writer.Allocating = .{ .init(std.testing.allocator), .init(std.testing.allocator) };
+            defer for (&bufs) |*l| l.deinit();
+            try prepareAll(std.testing.allocator, std.testing.io, files, &.{}, p, results[0..files.len], bufs[0..files.len]);
+            for (results[0..files.len]) |r| try std.testing.expect(std.meta.isError(r));
+            var out: [2][]u8 = .{ &.{}, &.{} };
+            for (bufs[0..files.len], 0..) |*l, i| out[i] = try std.testing.allocator.dupe(u8, l.written());
+            return out;
+        }
+    };
+    const only_a = try Run.logs(&.{a}, paths);
+    defer g.free(only_a[0]);
+    const only_b = try Run.logs(&.{b}, paths);
+    defer g.free(only_b[0]);
+    try std.testing.expect(std.mem.indexOf(u8, only_a[0], "a.va") != null);
+    try std.testing.expect(std.mem.indexOf(u8, only_a[0], "b.va") == null);
+    try std.testing.expect(std.mem.indexOf(u8, only_b[0], "b.va") != null);
+    try std.testing.expect(std.mem.indexOf(u8, only_b[0], "a.va") == null);
+    // Built together, in either order, each log is what it was alone.
+    for ([_][2][]const u8{ .{ a, b }, .{ b, a } }) |order| {
+        const both = try Run.logs(&order, paths);
+        defer for (both) |l| g.free(l);
+        const swapped = order[0].ptr == b.ptr;
+        try std.testing.expectEqualStrings(if (swapped) only_b[0] else only_a[0], both[0]);
+        try std.testing.expectEqualStrings(if (swapped) only_a[0] else only_b[0], both[1]);
+    }
 }

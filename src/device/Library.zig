@@ -359,7 +359,14 @@ pub fn loadWith(self: *Library, io: std.Io, files: []const []const u8, paths: lo
     assert(todo.files.len == todo.resolved.len);
     const results = try self.gpa.alloc(loader.Result, todo.files.len);
     defer self.gpa.free(results);
-    try loader.prepareAll(self.gpa, io, todo.files, self.names.items[builtin_count..], paths, results);
+    const logs = try self.gpa.alloc(std.Io.Writer.Allocating, todo.files.len);
+    defer self.gpa.free(logs);
+    for (logs) |*l| l.* = .init(self.gpa);
+    defer for (logs) |*l| l.deinit();
+    try loader.prepareAll(self.gpa, io, todo.files, self.names.items[builtin_count..], paths, results, logs);
+    // Every file's messages before any result can fail the load, in `files`
+    // order: the builds finished in whatever order they ran.
+    printLogs(logs);
     try self.sources.ensureUnusedCapacity(self.gpa, todo.resolved.len);
     for (results, todo.resolved) |result, resolved| {
         if (try result) |prepared| {
@@ -381,6 +388,17 @@ pub fn loadWith(self: *Library, io: std.Io, files: []const []const u8, paths: lo
 }
 
 // ---- private ----
+
+/// Writes each of `logs` to stderr, in order, under one lock.
+fn printLogs(logs: []std.Io.Writer.Allocating) void {
+    var buf: [1024]u8 = undefined;
+    const stderr = std.debug.lockStderr(&buf);
+    defer std.debug.unlockStderr();
+    const w = &stderr.file_writer.interface;
+    // A closed stderr drops the messages; the results still register.
+    for (logs) |*l| w.writeAll(l.written()) catch {};
+    w.flush() catch {};
+}
 
 fn noVpiApp(_: *anyopaque, _: usize, _: []const f64, partials: []f64) f64 {
     @memset(partials, 0);
