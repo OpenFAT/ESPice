@@ -55,6 +55,9 @@ pub const Ops = struct {
             .sqt = @splat(0),
         };
         g.sims[o.l] = s.ckt.sim;
+        // The lane's operating point held every batch's `analog initial`
+        // results (`tran.gpuLaneRefusal` takes no UIC or OPtran start).
+        g.sims[o.l].analog_initial = false;
         g.lte_in[o.l] = .{ .dt = s.dt, .dt1 = s.dt_old[0], .dt2 = s.dt_old[1], .reltol = s.options.tol.reltol, .abstol = s.options.tol.abstol, .chgtol = s.options.tol.chgtol, .trtol = s.options.tol.trtol, .ag0 = a.c.ag0, .ag1 = a.c.ag1, .ag2 = a.c.ag2 };
         g.round[o.l] = 1;
     }

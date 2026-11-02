@@ -231,7 +231,7 @@ pub fn enqueueEval(self: *GpuContext, x: []const f64, sim_at: SimState, buf: u1,
         try ctx_state.syncSeededLim(self, bg);
         // Scalars are passed by pointer and must outlive the launch call.
         var count: u64 = bg.count;
-        var sim = sim_at;
+        var sim = bg.simFor(sim_at);
         var limiting: u64 = @intFromBool(bg.lim_active);
         try bg.launch(if (bg.const_kernel) |*k| k else &bg.kernel, &self.stream, &.{
             gompute.interface.arg(&count),
@@ -285,7 +285,7 @@ pub fn enqueueCharge(self: *GpuContext, x: []const f64, t: f64) !void {
         const k = if (bg.q_kernel) |*k| k else continue;
         if (bg.count == 0) continue;
         var count: u64 = bg.count;
-        var sim = sim_at;
+        var sim = bg.simFor(sim_at);
         var with_tape: u64 = @intFromBool(bg.tape.len > 0);
         try bg.launch(k, &self.stream, &.{
             gompute.interface.arg(&count),
@@ -518,7 +518,7 @@ fn enqueueTape(self: *GpuContext, buf: u1, sim_at: SimState) !void {
         const k = if (bg.qtp_kernel) |*k| k else continue;
         if (bg.tape.len == 0) continue;
         var count: u64 = bg.count;
-        var sim = sim_at;
+        var sim = bg.simFor(sim_at);
         try bg.launch(k, &self.stream, &.{
             gompute.interface.arg(&count),
             gompute.interface.arg(&sim),

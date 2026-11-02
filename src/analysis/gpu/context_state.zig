@@ -175,6 +175,7 @@ fn acceptStatesOnGpu(self: *GpuContext, x: []const f64, t: f64) !?f64 {
         self.poisoned = true;
         return error.GpuStateReject;
     }
+    if (states) latchInitial(self);
     const tr = try finishStates(self, x);
     if (query) self.query_hit = std.mem.readInt(u32, self.pin_flags[4..8], .little) != 0;
     return tr;
@@ -223,7 +224,7 @@ fn applyLimitsOnGpu(self: *GpuContext, x: []f64, x_old: []const f64) !bool {
         var count: u64 = bg.count;
         var lim_active: u64 = @intFromBool(bg.lim_active);
         var halves: u64 = device_ir.lim_pass_limit;
-        var sim = self.sim;
+        var sim = bg.simFor(self.sim);
         try bg.launch(lk, &self.stream, &.{
             gompute.interface.arg(&count),
             self.d_x2.argPtr(),
@@ -292,6 +293,7 @@ fn updateStatesOnGpu(self: *GpuContext, x: []const f64) !?f64 {
             self.poisoned = true;
             return error.GpuStateReject;
         }
+        latchInitial(self);
     }
     return finishStates(self, x);
 }
@@ -315,7 +317,7 @@ fn enqueueStates(self: *GpuContext, x: []const f64) !bool {
         var count: u64 = bg.count;
         var lim_active: u64 = 0;
         var halves: u64 = device_ir.lim_pass_state;
-        var sim = self.sim;
+        var sim = bg.simFor(self.sim);
         try bg.launch(lk, &self.stream, &.{
             gompute.interface.arg(&count),
             self.d_x2.argPtr(),
@@ -334,6 +336,15 @@ fn enqueueStates(self: *GpuContext, x: []const f64) !bool {
         launched = true;
     }
     return launched;
+}
+
+/// The host batch's `updateDone` for every batch `enqueueStates` ran the
+/// state half of: its `analog initial` results are held from now on.
+fn latchInitial(self: *GpuContext) void {
+    for (self.batches) |*bg| {
+        if (bg.lim_kernel == null or bg.count == 0 or !bg.has_state) continue;
+        if (bg.held_initial) |held| held.* = true;
+    }
 }
 
 /// The host half of `updateStates`, after the device verdict.
@@ -369,6 +380,15 @@ fn stateCtlOnGpu(self: *GpuContext, op: device_ir.StateCtlOp) !bool {
     };
     if (self.params_dirty) try ctx_sync.repack(self);
     const launched = try enqueueCtl(self, op, &self.d_flags);
+    // The host batch's `stateCtl` moves its latch with its held values.
+    for (self.batches) |*bg| if (bg.ctl_kernel != null and bg.count != 0) if (bg.held_initial) |held| {
+        const committed = bg.committed_initial.?;
+        switch (op) {
+            .commit => committed.* = held.*,
+            .revert => held.* = committed.*,
+            .query => {},
+        }
+    };
     // Every caller discards what `.commit` and `.revert` return, so they
     // stay on the stream unwaited; the next wait surfaces a fault. Only a
     // `.query` reads the flag, and it shares its wait with the charge

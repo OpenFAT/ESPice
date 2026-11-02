@@ -494,6 +494,8 @@ pub fn DeviceBatch(comptime D: type) type {
                 .states = if (comptime has_state) std.mem.sliceAsBytes(self.states) else &.{},
                 .lim_active = if (comptime has_limit) self.lim_active else false,
                 .brk = if (comptime has_src_brk) std.mem.sliceAsBytes(self.src_brk) else &.{},
+                .held_initial = &self.held_initial,
+                .committed_initial = &self.committed_initial,
             };
         }
     };

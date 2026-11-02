@@ -277,7 +277,9 @@ pub fn stepBegin(s: anytype, sc: anytype, sim: anytype, lin: anytype) bool {
         .kind = s.kind_tran,
         .initial_step = s.steps == 0,
         .final_step = t + dt >= s.t_stop,
-        .analog_initial = true,
+        // The lane starts from an operating point that held every batch's
+        // `analog initial` results (LRM 5.2.1: once per analysis).
+        .analog_initial = false,
         .iteration = s.iteration,
     };
     const m = methodAt(s.top, s.order);

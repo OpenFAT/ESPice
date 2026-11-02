@@ -692,6 +692,13 @@ pub const GpuPayload = struct {
     /// step control starts each lane from it, so its corners round from the
     /// same request times as the host's.
     brk: []const u8 = &.{},
+    /// The host batch's LRM §5.2.1 latch (`held_initial`,
+    /// `committed_initial`). A resident batch's state and ctl passes advance
+    /// it where the host walk would, and every launch reads it: the kernels
+    /// run with `analog_initial` false once it is held. Null for a device
+    /// with no `analog initial` latch to keep.
+    held_initial: ?*bool = null,
+    committed_initial: ?*bool = null,
 };
 
 /// Runtime ABI version, mixed into `layoutHash`. `hashType` sees only sizes,
@@ -756,7 +763,9 @@ pub const GpuPayload = struct {
 //     for device operating-point variables (#236).
 // 38: `Hooks.original_ids`, a partitioned batch's add order, so a card
 //     names its frozen instance (#237).
-pub const abi_version: u32 = 38;
+// 39: `GpuPayload.held_initial`/`committed_initial`, the host batch's
+//     `analog initial` latch, which resident GPU batches advance.
+pub const abi_version: u32 = 39;
 
 /// A device type's construction entry points, exported by each device object
 /// and by runtime-loaded `.so` devices. Every blob pointer it takes must be

@@ -104,6 +104,11 @@ pub const BatchGpu = struct {
     /// Host `seedJunctions` wrote the host lim plane; upload it before the
     /// next launch that reads it.
     lim_dirty: bool = false,
+    /// The host batch's §5.2.1 latch (`GpuPayload.held_initial`); null
+    /// without one. The host walk advances a stepped batch's, the device
+    /// passes a resident batch's (`ctx_state`).
+    held_initial: ?*bool,
+    committed_initial: ?*bool,
     /// The Instance bytes host and device last agreed on, kept only when a
     /// kernel writes the resident Instance (the status latch, the limit/state
     /// pass or the accepted-step latch); empty otherwise. `syncInstances`
@@ -120,6 +125,15 @@ pub const BatchGpu = struct {
         for ([_]*Buffer{ &self.d_models, &self.d_model_of, &self.d_instances, &self.d_gath, &self.d_rhs_idx, &self.d_slots, &self.d_lim, &self.d_states, &self.d_tape }) |b| b.free();
         for ([_]*?Raw{ &self.lim_kernel, &self.ctl_kernel, &self.qtp_kernel, &self.q_kernel, &self.const_kernel }) |opt| if (opt.*) |*k| k.deinit();
         self.kernel.deinit();
+    }
+
+    /// `sim` as this batch's kernels take it: `analog_initial` false once
+    /// its `analog initial` results are held, as the host batch's
+    /// `setSimState` makes it, so the block runs once (a09_analog_initial_once).
+    pub fn simFor(self: *const BatchGpu, sim: device_ir.SimState) device_ir.SimState {
+        var s = sim;
+        if (self.held_initial) |held| s.analog_initial = s.analog_initial and !held.*;
+        return s;
     }
 
     /// `launchOn` with this batch's grid.
@@ -249,6 +263,8 @@ pub fn loadBatch(gpa: std.mem.Allocator, bg: *BatchGpu, b: device_ir.Batch, expl
         .has_charge = b.has_charge,
         .has_status = b.hooks.status != null,
         .stepped = stepped,
+        .held_initial = p.held_initial,
+        .committed_initial = p.committed_initial,
         .base = base,
         .dev = dev,
     };
@@ -321,4 +337,21 @@ test renamed {
     try std.testing.expect(renamed(&buf, "", "arp_qtp_") == null);
     // Too long for the buffer: no tape kernel, not a panic.
     try std.testing.expect(renamed(&buf, "arp_eval_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "arp_qtp_") == null);
+}
+
+test "simFor runs the analog initial block until the host latch holds" {
+    // Oracle: the host batch's `setSimState`, which clears `analog_initial`
+    // once `held_initial` is set and never sets it.
+    var held = false;
+    var bg: BatchGpu = undefined;
+    bg.held_initial = &held;
+    try std.testing.expect(bg.simFor(.{}).analog_initial);
+    held = true;
+    try std.testing.expect(!bg.simFor(.{}).analog_initial);
+    // A caller's false stays false, held or not.
+    held = false;
+    try std.testing.expect(!bg.simFor(.{ .analog_initial = false }).analog_initial);
+    // No latch (a device without one): the caller's state as it is.
+    bg.held_initial = null;
+    try std.testing.expect(bg.simFor(.{}).analog_initial);
 }
