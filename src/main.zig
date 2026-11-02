@@ -27,7 +27,7 @@ pub const std_options: std.Options = .{ .signal_stack_size = if (builtin.mode ==
 pub const vera_validate_contract = builtin.mode == .debug;
 
 /// `--version`; a test pins it to build.zig.zon's `.version`.
-const version = "0.3.0";
+const version = "0.20.0";
 
 /// The backends compiled in, for `--version`; a GPU one also needs its
 /// device at run time.
