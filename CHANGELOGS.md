@@ -4,6 +4,8 @@ Newest first.
 
 ## Unreleased
 
+- The merge gate runs the allocation-failure suites with `-Dcertify=true`, so a certificate that panics on out-of-memory (as before #244) fails a pull request instead of the nightly.
+- The test that a Problem run batch after batch costs the same per batch counts allocation calls instead of comparing wall times, which failed once on a loaded machine (712 ms early, 2355 ms late); the C API batch test drops its wall-time and RSS checks.
 - A cold operating point whose gmin stepping crawls (its step factor under 1.122 for 20 solves in a row) moves on to source stepping: the `.op` of a 100k-transistor BSIM4 chain converges in 14:07 with a 2.8 GiB peak RSS, where it was still crawling the gmin ladder when killed at 32 min (#218).
 - `.wcd m1 '>= L1' m2 '<= L2' ...` finds each spec's worst-case distance β_w over the statistical parameters `SWEEP MONTE` draws, by FORM (iHL-RF, tangent rows for `.dc` and `.tran`), and reports it with Φ(β_w), the iterations, the simulations and the worst-case point; an unconverged search says so and never prints a guess; `--measures` writes it as `"kind": "wcd"` (#240).
 - `.four` and `.fft` read the deck's `.tran` result instead of integrating the same transient again, where that run keeps its waveform with the same options and operating point (CPU backend); the values are bit for bit the same (#231).
