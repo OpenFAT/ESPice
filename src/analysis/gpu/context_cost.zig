@@ -11,6 +11,8 @@
 //! - `pub const CostCache = struct (`key`, `read`, `learn`, `write`, `Rec`)`
 //! - `pub const heavy_image_bytes: usize`
 //! - `pub fn admit(gpa: std.mem.Allocator, host: Host, threads: u32, evals: f64, driver_up: bool) !Price`
+//! - `pub fn quote(gpa: std.mem.Allocator, host: Host, threads: u32) !price.Cost`
+//! - `pub fn recommend(gpa: std.mem.Allocator, host: Host, threads: u32, evals: f64, driver_up: bool, n_host: usize, n_up: usize) void`
 //! - `pub fn imageOf(kernel: []const u8) ?[:0]const u8`
 //! - `pub fn imageWarm(image: []const u8, knobs: Knobs) bool`
 //! - `pub fn markWarm(image: []const u8, knobs: Knobs) void`
@@ -24,6 +26,7 @@ const Knobs = @import("../Circuit.zig").Knobs;
 const devices = @import("devices.zig");
 const context = @import("context.zig");
 const ctx_scatter = @import("context_scatter.zig");
+const price = @import("price.zig");
 const Planes = device_ir.Planes;
 const backend = devices.backend;
 const Host = context.Host;
@@ -145,6 +148,7 @@ pub const heavy_image_bytes: usize = 1 << 20;
 /// its evals.
 const StubBatch = struct {
     spin_ns: u64,
+    count: u32 = 1,
     evals: u32 = 0,
 
     fn eval(ctx: *anyopaque, _: *const Planes, _: u32, _: u32, _: []const f64, _: f64) void {
@@ -154,10 +158,11 @@ const StubBatch = struct {
         while (nowNs() - t0 < self.spin_ns) {}
     }
 
-    fn payload(_: *anyopaque) device_ir.GpuPayload {
+    fn payload(ctx: *anyopaque) device_ir.GpuPayload {
+        const self: *StubBatch = @ptrCast(@alignCast(ctx));
         return .{
             .kernel = "",
-            .count = 1,
+            .count = self.count,
             .n_u = 2,
             .models = &.{},
             .model_of = &.{},
@@ -175,7 +180,7 @@ const StubBatch = struct {
     }
 
     fn batch(self: *StubBatch, hooks: *const device_ir.Hooks) device_ir.Batch {
-        return .{ .ctx = self, .eval = eval, .eval_newton = eval, .count = 1, .n_u = 2, .has_charge = false, .has_const_jacobian = false, .type_name = "stub", .hooks = hooks };
+        return .{ .ctx = self, .eval = eval, .eval_newton = eval, .count = self.count, .n_u = 2, .has_charge = false, .has_const_jacobian = false, .type_name = "stub", .hooks = hooks };
     }
 };
 
@@ -193,11 +198,6 @@ const cost_bus_b_per_us: f64 = 11_000;
 /// Staging clear and the two reduce levels, bytes of staging per
 /// microsecond (mos1_2000: 4.8 MB in 50 us).
 const cost_stage_b_per_us: f64 = 100_000;
-
-/// Device-kernel time as a fraction of one host thread's eval of the same
-/// batches, 2000 inverters: mos1 42 us against ~450 us, bsim4va ~700 us
-/// against ~7.3 ms.
-const cost_kernel_ratio: f64 = 0.12;
 
 /// One-time driver setup (cuInit, the context, module loads) in the first
 /// query of a Problem (`Driver`); later queries reuse it.
@@ -236,13 +236,37 @@ pub fn admit(gpa: std.mem.Allocator, host: Host, threads: u32, evals: f64, drive
         );
         return .{ .cpu_us = rec.cpu_us, .key = key };
     };
+    const q = try quote(gpa, host, threads);
+    const cpu_us = q.cpu_us;
+    const gpu_us = q.gpu_us;
+    if (!gpuWins(cpu_us, gpu_us, evals, init_us)) {
+        // The host's price, for an explicit device run to set beside
+        // its measured one (`CostCache.learn`).
+        CostCache.write(key, host.knobs, .{ .cpu_us = cpu_us, .gpu_us = 0 });
+        return decline(stats, cpu_us, gpu_us, "the CPU is priced faster");
+    }
+    if (stats) std.debug.print(
+        "gpu-stats: cost per eval cpu={d:.0} us gpu={d:.0} us, {d:.0} evals, setup {d:.0} ms: GPU\n",
+        .{ cpu_us, gpu_us, evals, init_us * 1e-3 },
+    );
+    return .{ .cpu_us = cpu_us, .key = key };
+}
+
+/// Both sides' price per eval of `host`'s GPU-eligible batches (`price`),
+/// from one host probe of each: three evals on scratch planes at a spread
+/// x, the fastest kept.
+pub fn quote(gpa: std.mem.Allocator, host: Host, threads: u32) !price.Cost {
     var slots: u64 = 0;
+    var n_rows: usize = 0;
     for (host.batches) |b| {
         const get = b.hooks.gpu_payload orelse continue;
         const p = get(b.ctx);
         // A constant batch's g/c stamps sit in the baseline.
         if (!b.has_const_jacobian) slots += p.slots.len;
+        n_rows += 1;
     }
+    const rows = try gpa.alloc(price.Row, n_rows);
+    defer gpa.free(rows);
     // Scratch planes: the probe must not disturb a linearization a
     // prerequisite query left behind.
     const ng = host.planes.g_vals.len;
@@ -257,34 +281,55 @@ pub fn admit(gpa: std.mem.Allocator, host: Host, threads: u32, evals: f64, drive
     const x = try gpa.alloc(f64, host.n + 1);
     defer gpa.free(x);
     for (x, 0..) |*xi, i| xi.* = @as(f64, @floatFromInt(i % 7)) * 0.3;
-    var host_ns: u64 = std.math.maxInt(u64);
-    for (0..3) |_| {
-        const t0 = nowNs();
-        for (host.batches) |b| {
-            if (b.hooks.gpu_payload != null) b.eval(b.ctx, &pl, 0, b.count, x, 0);
+    var i: usize = 0;
+    for (host.batches) |b| {
+        const get = b.hooks.gpu_payload orelse continue;
+        const p = get(b.ctx);
+        // The probe's evals at its made-up x must leave no trace in what
+        // the run reads (a status latch, an initial block's latch): an
+        // explicit device run probes too, and its output is the same
+        // with or without the advice.
+        const kept_instances = try gpa.dupe(u8, p.instances);
+        defer gpa.free(kept_instances);
+        const kept_states = try gpa.dupe(u8, p.states);
+        defer gpa.free(kept_states);
+        defer @memcpy(@constCast(p.instances), kept_instances);
+        defer @memcpy(@constCast(p.states), kept_states);
+        var host_ns: u64 = std.math.maxInt(u64);
+        for (0..3) |_| {
+            const t0 = nowNs();
+            b.eval(b.ctx, &pl, 0, b.count, x, 0);
+            host_ns = @min(host_ns, nowNs() - t0);
         }
-        host_ns = @min(host_ns, nowNs() - t0);
+        const held: f64 = @floatFromInt((p.instances.len + p.states.len) / @max(p.count, 1));
+        rows[i] = .{ .count = @max(p.count, 1), .host_us = @as(f64, @floatFromInt(host_ns)) * 1e-3, .held_bytes = held };
+        // placement.tsv's `rows` column, recorded from these lines.
+        if (host.knobs.gpu_stats != .off) std.debug.print("gpu-stats: price row {s} {d}:{d:.3}:{d:.0}\n", .{ b.type_name, rows[i].count, rows[i].host_us, held });
+        i += 1;
     }
-    const host_us = @as(f64, @floatFromInt(host_ns)) * 1e-3;
+    assert(i == n_rows);
 
     const n_planes: usize = if (host.has_charge) 4 else 2;
     const bus_bytes: f64 = @floatFromInt((n_planes * (ng + nr) / 2 + 2 * host.n) * @sizeOf(f64));
     const stage_bytes: f64 = @floatFromInt(slots * n_planes / 2 * @sizeOf(f64));
-    const gpu_us = cost_fixed_us + bus_bytes / cost_bus_b_per_us +
-        stage_bytes / cost_stage_b_per_us + host_us * cost_kernel_ratio;
+    const fixed_us = cost_fixed_us + bus_bytes / cost_bus_b_per_us + stage_bytes / cost_stage_b_per_us;
     const lanes = 1.0 + cost_lane_gain * @as(f64, @floatFromInt(@max(1, threads) - 1));
-    const cpu_us = host_us / lanes;
-    if (!gpuWins(cpu_us, gpu_us, evals, init_us)) {
-        // The host's price, for an explicit device run to set beside
-        // its measured one (`CostCache.learn`).
-        CostCache.write(key, host.knobs, .{ .cpu_us = cpu_us, .gpu_us = 0 });
-        return decline(stats, cpu_us, gpu_us, "the CPU is priced faster");
-    }
-    if (stats) std.debug.print(
-        "gpu-stats: cost per eval cpu={d:.0} us gpu={d:.0} us, {d:.0} evals, setup {d:.0} ms: GPU\n",
-        .{ cpu_us, gpu_us, evals, init_us * 1e-3 },
+    if (host.knobs.gpu_stats != .off) std.debug.print("gpu-stats: price fixed_us={d:.1} lanes={d:.2}\n", .{ fixed_us, lanes });
+    return price.ofQuery(rows, fixed_us, lanes);
+}
+
+/// Under an explicit device backend, one stderr line when `quote` prices
+/// the CPU faster for this query: how many batches stay on the host and
+/// both prices. Advice only; the run stays where it was asked to.
+pub fn recommend(gpa: std.mem.Allocator, host: Host, threads: u32, evals: f64, driver_up: bool, n_host: usize, n_up: usize) void {
+    if (evals < 20) return;
+    const init_us: f64 = if (driver_up) 0 else cost_init_us;
+    const q = quote(gpa, host, threads) catch return;
+    if (gpuWins(q.cpu_us, q.gpu_us, evals, init_us)) return;
+    std.debug.print(
+        "note: {d} of {d} GPU-eligible batches stay on the CPU, and the CPU is priced faster for this query ({d:.0} us against {d:.0} us per eval over {d:.0} evals); `--backend cpu` or `auto` runs it there\n",
+        .{ n_host, n_host + n_up, q.cpu_us, q.gpu_us, evals },
     );
-    return .{ .cpu_us = cpu_us, .key = key };
 }
 
 /// The embedded image that exports `kernel`, or null.
@@ -445,7 +490,7 @@ test "Cost.admit prices a measured host eval and leaves the planes alone" {
     host_hooks.gpu_payload = null;
     var vals: [8]f64 = @splat(7);
     const planes: Planes = .{ .g_vals = vals[0..2], .c_vals = vals[2..4], .rhs = vals[4..6], .q_vec = vals[6..8] };
-    const Case = struct { spin_ns: u64, evals: f64, driver_up: bool, admitted: bool, probed: bool };
+    const Case = struct { spin_ns: u64, count: u32 = 2000, evals: f64, driver_up: bool, admitted: bool, probed: bool };
     const cases = [_]Case{
         // Too few evals: declined before the probe.
         .{ .spin_ns = 2_000_000, .evals = 19, .driver_up = true, .admitted = false, .probed = false },
@@ -453,11 +498,13 @@ test "Cost.admit prices a measured host eval and leaves the planes alone" {
         .{ .spin_ns = 0, .evals = 1e6, .driver_up = true, .admitted = false, .probed = true },
         // >= 2 ms against <= 0.28 ms + 0.12 of it on the device.
         .{ .spin_ns = 2_000_000, .evals = 1e6, .driver_up = true, .admitted = true, .probed = true },
+        // The same eval in one instance: one device thread, 120x the host.
+        .{ .spin_ns = 2_000_000, .count = 1, .evals = 1e6, .driver_up = true, .admitted = false, .probed = true },
         // The same, but 20 evals cannot repay a cold 350 ms driver setup.
         .{ .spin_ns = 2_000_000, .evals = 20, .driver_up = false, .admitted = false, .probed = true },
     };
     for (cases) |c| {
-        var dev: StubBatch = .{ .spin_ns = c.spin_ns };
+        var dev: StubBatch = .{ .spin_ns = c.spin_ns, .count = c.count };
         var other: StubBatch = .{ .spin_ns = 0 };
         const batches = [_]device_ir.Batch{ other.batch(&host_hooks), dev.batch(&gpu_hooks) };
         const host: Host = .{ .batches = &batches, .planes = planes, .n = 2, .trash_slot = 2, .has_charge = false, .knobs = .{} };
@@ -467,6 +514,79 @@ test "Cost.admit prices a measured host eval and leaves the planes alone" {
         try std.testing.expectEqual(@as(u32, 0), other.evals);
         try std.testing.expectEqualSlices(f64, &@as([8]f64, @splat(7)), &vals);
     }
+}
+
+test "Cost.recommend probes once and leaves the planes alone" {
+    var gpu_hooks: device_ir.Hooks = undefined;
+    gpu_hooks.gpu_payload = StubBatch.payload;
+    var vals: [8]f64 = @splat(7);
+    const planes: Planes = .{ .g_vals = vals[0..2], .c_vals = vals[2..4], .rhs = vals[4..6], .q_vec = vals[6..8] };
+    var dev: StubBatch = .{ .spin_ns = 0 };
+    const batches = [_]device_ir.Batch{dev.batch(&gpu_hooks)};
+    const host: Host = .{ .batches = &batches, .planes = planes, .n = 2, .trash_slot = 2, .has_charge = false, .knobs = .{} };
+    // A free host eval: the CPU is priced faster, and the note prints.
+    recommend(std.testing.allocator, host, 1, 1e6, true, 0, 1);
+    try std.testing.expectEqual(@as(u32, 3), dev.evals);
+    // Too few evals to price: no probe.
+    recommend(std.testing.allocator, host, 1, 19, true, 0, 1);
+    try std.testing.expectEqual(@as(u32, 3), dev.evals);
+    try std.testing.expectEqualSlices(f64, &@as([8]f64, @splat(7)), &vals);
+}
+
+test "price: each recorded deck lands on its measured winner" {
+    // placement.tsv: measured walls and the price's inputs, with provenance.
+    // A deck within `cost_margin` of a tie may go either way; a `known`
+    // deck must miss, so a fix that lands it fails until the marker goes.
+    var rows_buf: [8]price.Row = undefined;
+    var lines = std.mem.tokenizeScalar(u8, @embedFile("placement.tsv"), '\n');
+    var decks: usize = 0;
+    var misses: usize = 0;
+    var header = true;
+    while (lines.next()) |line| {
+        if (line[0] == '#') continue;
+        if (header) {
+            header = false;
+            continue;
+        }
+        var f = std.mem.splitScalar(u8, line, '\t');
+        const deck = f.next().?;
+        const evals = try std.fmt.parseFloat(f64, f.next().?);
+        const init_us = try std.fmt.parseFloat(f64, f.next().?);
+        const fixed_us = try std.fmt.parseFloat(f64, f.next().?);
+        var n_rows: usize = 0;
+        var cells = std.mem.splitScalar(u8, f.next().?, ',');
+        while (cells.next()) |cell| : (n_rows += 1) {
+            var v = std.mem.splitScalar(u8, cell, ':');
+            rows_buf[n_rows] = .{
+                .count = try std.fmt.parseInt(u32, v.next().?, 10),
+                .host_us = try std.fmt.parseFloat(f64, v.next().?),
+                .held_bytes = try std.fmt.parseFloat(f64, v.next().?),
+            };
+        }
+        const rows = rows_buf[0..n_rows];
+        const cpu_s = try std.fmt.parseFloat(f64, f.next().?);
+        const cuda_s = try std.fmt.parseFloat(f64, f.next().?);
+        const host = try std.fmt.parseInt(usize, f.next().?, 10);
+        const known = !std.mem.eql(u8, f.next().?, "-");
+        try std.testing.expect(f.next() == null);
+
+        var kept: usize = 0;
+        for (rows) |r| kept += @intFromBool(price.staysOnHost(r.count, r.held_bytes));
+        if (kept != host) std.debug.print("{s}: {d} batches priced on the host, {d} recorded\n", .{ deck, kept, host });
+        try std.testing.expectEqual(host, kept);
+        // The measurement backs each one: the resident run lost by the bar.
+        if (host > 0) try std.testing.expect(cuda_s > price.host_ratio * cpu_s);
+
+        const q = price.ofQuery(rows, fixed_us, 1);
+        const on_gpu = gpuWins(q.cpu_us, q.gpu_us, evals, init_us);
+        const right = if (on_gpu) cost_margin * cpu_s >= cuda_s else cost_margin * cuda_s >= cpu_s;
+        if (right == known) std.debug.print("{s}: priced cpu={d:.1} gpu={d:.1} us per eval, {s}; measured cpu {d} s cuda {d} s\n", .{ deck, q.cpu_us, q.gpu_us, if (on_gpu) "GPU" else "CPU", cpu_s, cuda_s });
+        try std.testing.expect(right != known);
+        decks += 1;
+        misses += @intFromBool(known);
+    }
+    // An empty capture is a broken capture.
+    try std.testing.expect(decks > misses);
 }
 
 test markerPath {

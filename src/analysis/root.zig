@@ -49,6 +49,8 @@ test {
     _ = @import("gpu/periodic.zig");
     _ = @import("gpu/lane_color.zig");
     _ = @import("gpu/devices.zig");
+    _ = @import("gpu/price.zig");
+    _ = @import("gpu/context_cost.zig");
     _ = @import("tests/periodic.zig");
     _ = @import("tests/pz.zig");
     _ = @import("tests/session.zig");

@@ -49,7 +49,20 @@ frame size. Single-circuit evaluation can mix supported GPU batches with
 host batches. Devices with state across time points can update their state
 on the CPU. `auto` also estimates the
 cost: launching kernels and copying the solution vector each iteration has
-a fixed price, and a small circuit is faster on the CPU.
+a fixed price, and a small circuit is faster on the CPU. The estimate prices
+each device type by its instance count: the GPU runs one thread per
+instance, about 120 times slower than a CPU core on the same instance (on
+the tested RTX 4060 Laptop), so a type with fewer than about a hundred
+instances is cheaper on the CPU.
+
+A device that holds a waveform history (the `LTRA`, `CPL` and `TXL` lines,
+80 KB to 320 KB per instance) stays on the CPU under every backend, `cuda`
+and `hip` included: one GPU thread would walk the whole history every
+iteration (1973 s against 11 s on the CPU for
+`tran/ltra_tran_long_run_past_8192`). The rest of the circuit stays on the
+GPU. Under `cuda` or `hip`, when the estimate says the whole run is faster on
+the CPU, one `note:` line says so with both prices and suggests
+`--backend cpu` or `auto`; the run stays where it was asked to be.
 
 GPU transient lanes require device payloads and supported device state
 kernels. UIC, snapshots, OPtran, tangents, gear orders above two, delay
@@ -95,7 +108,7 @@ deck at a time; GPU results are compared within each fixture's tolerance.
 | `--backend=cpu` | CPU | CPU | CPU |
 | `--backend=auto` | CPU, with a warning | CPU, with a warning | CPU, silently |
 | `--gpu` | error | CPU, with a warning | CPU, silently |
-| `--backend=cuda` or `hip` | error | error | GPU anyway |
+| `--backend=cuda` or `hip` | error | error | GPU anyway, with a `note:` |
 
 An explicit `cuda` or `hip` that cannot run fails the deck, with an error
 naming the hardware ESPice found. Here a CPU-only binary (no kernel images)
