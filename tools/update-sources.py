@@ -22,7 +22,7 @@ import re
 import sys
 import urllib.request
 
-REPO = "OpenFAT/EGSpice"
+REPO = "OpenFAT/ESPice"
 # Nix system -> the CPU-only release variant built for that system's baseline.
 SYSTEMS = {
     "x86_64-linux": "linux-x86_64-v1-cpu",

@@ -12,7 +12,7 @@ Open to contributors, but please dont push slop.
 
 - **Pinned**: a commit and hash in your `build.zig.zon` (`zig fetch --save`). Nothing on `main` can move it.
 - **Released**: a `v*` tag's archives with `SHA256SUMS` and `BUILD-MATRIX.json`, built and smoked by `release.yml`.
-- **Head**: `nix run github:OpenFAT/EGSpice`. That is `main` at that moment: gated, but not a release.
+- **Head**: `nix run github:OpenFAT/ESPice`. That is `main` at that moment: gated, but not a release.
 
 Versions are 0.y.z: a minor bump may break, a patch may not. ESPice pins VerA and Gompute by commit and hash, and Zig through `flake.lock`. The Zig an `.hdl` deck compiles with at run time is the release's Zig (`espice --version`).
 

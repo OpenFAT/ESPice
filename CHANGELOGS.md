@@ -6,6 +6,7 @@ Newest first.
 
 The version now follows the VerA release it pins (VerA v0.20.0). 0.3.0 was never released; its entries are folded in below.
 
+- The repository is github.com/OpenFAT/ESPice (it was OpenFAT/EGSpice; GitHub redirects the old URLs, and `nix run github:OpenFAT/EGSpice` still resolves).
 - The source is reorganised by owner (frontend, core, device, solver, analysis, output, the facade and the C API), every file under 500 code lines; all 951 conformance decks give byte-identical output before and after.
 - Runtime `.hdl` builds print each model's VerA warnings and its `loader: compiling` line in the deck's file order once the builds finish, so stderr is the same on every run (it followed build completion order before).
 - A loaded VPI application's design, registries and paths are freed at exit; the corpus runner fails a run whose allocator reports a leak.
@@ -61,7 +62,7 @@ The version now follows the VerA release it pins (VerA v0.20.0). 0.3.0 was never
 - **Robustness:** bad decks fail with an error naming the card instead of running wrong; out-of-memory and Newton runaway are reported instead of publishing zeros.
 - **Models:** third-party compact models (PSP, BSIM-CMG/BULK/IMG/SOI, HiSIM, HICUM, Mextram, ASM-HEMT, MVSG and more) from their upstream releases, unmodified.
 - `ESPICE_THREADS` gives the same output at any thread count (#137).
-- Nix flake (`nix run github:OpenFAT/EGSpice`, CUDA package), the playground (`zig build wasm`) and the user documentation site.
+- Nix flake (`nix run github:OpenFAT/ESPice`, CUDA package), the playground (`zig build wasm`) and the user documentation site.
 
 ## 0.1.0 (2026-10-05)
 
