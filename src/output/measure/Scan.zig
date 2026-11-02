@@ -1,7 +1,7 @@
 //! One pass of a `Stream` card: the stream's current row in, the pass's
 //! state advanced out, and once it reads no more rows, what it found as the
 //! `Wave` function it stands for returns it (`core.Measured.Found`).
-//! Cites: none beyond scan.zig and Wave.zig, whose passes it runs.
+//! Cites: none beyond passes.zig and Wave.zig, whose passes it runs.
 //!
 //! Contents:
 //! - fields `y`, `y2`, `missing`, `over`, `time`, `pass`
@@ -15,7 +15,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const core = @import("core");
-const scan = @import("scan.zig");
+const scan = @import("passes.zig");
 const columns = @import("column.zig");
 const Wave = @import("Wave.zig");
 const Clause = core.MeasureClause;

@@ -2,7 +2,7 @@
 //! cards and a finished result in, the same event counting, linear
 //! interpolation and quadrature, printed in the same lines, out; `Stream`
 //! measures the same cards row by row while a transient runs, and
-//! `passes` (scan.zig) runs them on the GPU lanes. Aggregation only: the
+//! `passes` (passes.zig) runs them on the GPU lanes. Aggregation only: the
 //! files below never import this one.
 //! Cites: ngspice 45 com_measure2.c, measure.c; HSPICE [CR .MEASURE].
 //!
@@ -17,7 +17,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const core = @import("core");
 /// The one-sample-at-a-time passes, shared with the GPU lanes.
-pub const passes = @import("scan.zig");
+pub const passes = @import("passes.zig");
 pub const Stream = @import("Stream.zig");
 pub const markColumns = @import("rule.zig").markColumns;
 const listing = @import("listing.zig");
@@ -43,7 +43,7 @@ pub const evaluateOutcomes = card.evaluateOutcomes;
 pub const sample = card.sample;
 
 comptime {
-    // scan.zig imports only std, so it restates the core sentinels.
+    // passes.zig imports only std, so it restates the core sentinels.
     assert(passes.unset == core.measure_unset);
     assert(passes.last == core.measure_last);
 }

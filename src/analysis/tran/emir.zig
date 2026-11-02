@@ -13,7 +13,7 @@
 //! kept in the average.
 //! In: a circuit, its per-batch port counts and each accepted point. Out:
 //! `core.Emir`, one row per terminal.
-//! Cites #237; output/measure/scan.zig `Extremum` and
+//! Cites #237; output/measure/passes.zig `Extremum` and
 //! output/measure/Wave.zig `EmAvg`.
 //!
 //! Contents:

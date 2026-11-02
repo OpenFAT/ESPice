@@ -47,6 +47,10 @@ jobs:
         with:
           name: omarsiwy
           skipPush: true
+      # macOS and Windows check out case-insensitively: two tracked paths that
+      # differ only in case (output/measure/Scan.zig and scan.zig did) become one file there.
+      - name: Tracked paths are unique ignoring case
+        run: test -z "$(git ls-files | tr '[:upper:]' '[:lower:]' | sort | uniq -d | tee /dev/stderr)"
       - name: Release matrix and publication checks
         run: nix develop .#ci -c python3 -m unittest discover -s tools -p 'test_release*.py'
       - name: Every suite and the corpus

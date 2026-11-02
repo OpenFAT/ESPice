@@ -2,7 +2,7 @@
 //! over it: a result (or what its run already found, `Done`) and a clause
 //! in, an event time, a value at a point, an extremum, an average, an
 //! integral, an error figure or jitter out. Each runs a one-sample-at-a-time
-//! pass (scan.zig, or `EmAvg`, `RelError` here) over every sample in order,
+//! pass (passes.zig, or `EmAvg`, `RelError` here) over every sample in order,
 //! so a `Stream` that feeds the same passes row by row gets the same bits.
 //! Cites: ngspice 45 com_measure2.c (com_measure_when, measure_at,
 //! measure_minMaxAvg, measure_rms_integral); HSPICE [SA Ch.11 "Error
@@ -29,7 +29,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const core = @import("core");
-const scan = @import("scan.zig");
+const scan = @import("passes.zig");
 const columns = @import("column.zig");
 const Column = columns.Column;
 const Waveform = columns.Waveform;

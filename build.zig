@@ -124,7 +124,7 @@ pub fn build(b: *Build) void {
     roots.append(b.allocator, .{ .name = "lu", .root = b.path("src/solver/lu_device.zig") }) catch @panic("OOM");
     // The lane root runs `.meas` passes on the device (06 6.8) from the file
     // measure.zig shares with it.
-    const lane_scan = b.allocator.dupe(Import, &.{.{ .name = "measure_scan", .module = b.createModule(.{ .root_source_file = b.path("src/output/measure/scan.zig"), .strip = true }) }}) catch @panic("OOM");
+    const lane_scan = b.allocator.dupe(Import, &.{.{ .name = "measure_scan", .module = b.createModule(.{ .root_source_file = b.path("src/output/measure/passes.zig"), .strip = true }) }}) catch @panic("OOM");
     if (gpu_lanes) roots.append(b.allocator, .{ .name = "lane", .root = b.path("src/solver/lane_device.zig"), .imports = &laneKernelImports, .imports_ctx = @ptrCast(lane_scan.ptr) }) catch @panic("OOM");
     gompute_build.emitKernels(b, gompute, exe, .{
         .kernel_roots = roots.items,
