@@ -3,7 +3,7 @@
 # versioned packages install from, without nix (after VerA's tools/install.sh):
 #
 #   curl -fsSL https://raw.githubusercontent.com/OpenFAT/EGSpice/main/tools/install.sh | sh
-#   curl -fsSL .../install.sh | sh -s -- 0.3.0       # a pinned version
+#   curl -fsSL .../install.sh | sh -s -- 0.20.0       # a pinned version
 #
 # Each version lives in $ESPICE_INSTALL_HOME/<version> (the release tree: bin,
 # lib, include, share/espice) and $ESPICE_INSTALL_BIN/espice links to the one

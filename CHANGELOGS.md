@@ -2,8 +2,14 @@
 
 Newest first.
 
-## Unreleased
+## 0.20.0 (2026-11-02)
 
+The version now follows the VerA release it pins (VerA v0.20.0). 0.3.0 was never released; its entries are folded in below.
+
+- The source is reorganised by owner (frontend, core, device, solver, analysis, output, the facade and the C API), every file under 500 code lines; all 951 conformance decks give byte-identical output before and after.
+- Runtime `.hdl` builds print each model's VerA warnings and its `loader: compiling` line in the deck's file order once the builds finish, so stderr is the same on every run (it followed build completion order before).
+- A loaded VPI application's design, registries and paths are freed at exit; the corpus runner fails a run whose allocator reports a leak.
+- A built device library that will not open logs the system's reason (`loader: cannot open <path>: <reason>`) beside the error.
 - The merge gate runs the allocation-failure suites with `-Dcertify=true`, so a certificate that panics on out-of-memory (as before #244) fails a pull request instead of the nightly.
 - The test that a Problem run batch after batch costs the same per batch counts allocation calls instead of comparing wall times, which failed once on a loaded machine (712 ms early, 2355 ms late); the C API batch test drops its wall-time and RSS checks.
 - A cold operating point whose gmin stepping crawls (its step factor under 1.122 for 20 solves in a row) moves on to source stepping: the `.op` of a 100k-transistor BSIM4 chain converges in 14:07 with a 2.8 GiB peak RSS, where it was still crawling the gmin ladder when killed at 32 min (#218).
@@ -34,8 +40,6 @@ Newest first.
 - Releases attach `.deb`, `.rpm` and Arch packages (`espice`; `espice-cuda` for NVIDIA GPUs; `espice-hip` with a build per AMD GPU target, picked at start), an AUR `PKGBUILD` (`espice-bin`) and a Homebrew formula; `tools/install.sh` installs a release from `sources.json` with a checked, cached download; `nix run .#latest` and `.#"<version>"` install release binaries.
 - `nint(-0.5)` is -0, as in ngspice: `{1/nint(-0.5)}` folded to +inf instead of -inf.
 - Removed: the `ESPICE_LINEAR_CACHE` variable, the `-Dbsim4-narrow` build option and the `test-gpu-*` build steps (`test-gpu` runs the corpus on CUDA).
-
-## 0.3.0 (2026-10-20)
 
 - Sweeps (`.step`, `.mc`, `.dc DATA=`/`MONTE=`, `.temp` ranges) run their points in parallel across `--jobs`, about 2x faster with flat memory; output is the same at every `--jobs`. Monte Carlo draws differ from 1.1 (#213).
 - New CLI defaults: `--jobs` is one per CPU, and `--measures-only`, `--early-stop` and `--warm-start` turn on by themselves when nothing reads the transient waveforms; `--full-waveforms` turns them off. `--tokenizer` detects the dialect.

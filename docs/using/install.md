@@ -11,7 +11,7 @@ On Linux or macOS, without root:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/OpenFAT/EGSpice/main/tools/install.sh | sh
-curl -fsSL https://raw.githubusercontent.com/OpenFAT/EGSpice/main/tools/install.sh | sh -s -- 0.3.0
+curl -fsSL https://raw.githubusercontent.com/OpenFAT/EGSpice/main/tools/install.sh | sh -s -- 0.20.0
 ```
 
 It reads `sources.json` (each release's tarballs and checksums), downloads
@@ -40,10 +40,10 @@ Each release attaches a `.deb`, an `.rpm` and an Arch package for x86-64
 and ARM64 (CPU builds at the baseline instruction set):
 
 ```sh
-sudo apt install ./espice-0.3.0-linux-amd64.deb            # Debian, Ubuntu
-sudo dnf install ./espice-0.3.0-linux-amd64.rpm            # Fedora
-sudo zypper install ./espice-0.3.0-linux-amd64.rpm         # openSUSE
-sudo pacman -U ./espice-0.3.0-linux-amd64.pkg.tar.zst      # Arch
+sudo apt install ./espice-0.20.0-linux-amd64.deb            # Debian, Ubuntu
+sudo dnf install ./espice-0.20.0-linux-amd64.rpm            # Fedora
+sudo zypper install ./espice-0.20.0-linux-amd64.rpm         # openSUSE
+sudo pacman -U ./espice-0.20.0-linux-amd64.pkg.tar.zst      # Arch
 ```
 
 For GPUs, two more packages install in place of `espice` (each conflicts
@@ -111,7 +111,7 @@ from source (CPU build, baseline instruction set):
 
 ```sh
 nix run github:OpenFAT/EGSpice#latest -- my_circuit.sp
-nix run 'github:OpenFAT/EGSpice#"0.3.0"' -- my_circuit.sp
+nix run 'github:OpenFAT/EGSpice#"0.20.0"' -- my_circuit.sp
 ```
 
 `sources.json` lists each release's tarballs and checksums; the release
@@ -166,8 +166,8 @@ machine supports: `grep -o 'avx512f\|avx2' /proc/cpuinfo | sort -u` helps
 identify v3 and v4. A higher unsupported level can terminate with `SIGILL`.
 
 ```sh
-tar xzf espice-0.3.0-linux-x86_64-v3-cuda-sm_89.tar.gz
-./espice-0.3.0-linux-x86_64-v3-cuda-sm_89/bin/espice --version
+tar xzf espice-0.20.0-linux-x86_64-v3-cuda-sm_89.tar.gz
+./espice-0.20.0-linux-x86_64-v3-cuda-sm_89/bin/espice --version
 ```
 
 Archives contain `bin/espice`, `lib/libespice.a`, `include/espice.h`, and
@@ -187,8 +187,8 @@ The launcher's host prerequisites are a shell, `tar` and `bzip2`; they are
 needed before the bundled runtime can be extracted.
 
 ```sh
-chmod +x espice-0.3.0-linux-x86_64-v1-cpu.run
-./espice-0.3.0-linux-x86_64-v1-cpu.run circuit.sp
+chmod +x espice-0.20.0-linux-x86_64-v1-cpu.run
+./espice-0.20.0-linux-x86_64-v1-cpu.run circuit.sp
 ```
 
 To build the same bundle locally, use the repository's locked bundler:

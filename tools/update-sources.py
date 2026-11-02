@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Regenerates sources.json, the release binaries the flake's versioned
-packages install (`nix run '.#"0.3.0"'`, `nix run .#latest`), from the
+packages install (`nix run '.#"0.20.0"'`, `nix run .#latest`), from the
 GitHub releases. After VerA's tools/update-sources.py.
 
 Shape:
