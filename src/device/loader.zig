@@ -355,7 +355,7 @@ fn buildLibrary(gpa: Allocator, io: std.Io, arena: Allocator, module_name: []con
             return error.GeneratedDeviceDoesNotCompile;
         },
     };
-    const vt = try loadDevice(art.so_path);
+    const vt = try loadDevice(art.so_path, log);
     hdl_gpu.register(io, art.so_path, work_dir, paths);
     assert(vt.n_u >= vt.num_ports);
     return .{ .vtable = vt, .digest_hex = digest_hex };
@@ -613,7 +613,8 @@ fn cachedLoad(loaded: []const []const u8, gpa: Allocator, io: std.Io, paths: Bui
     defer lock.close(io);
     const so = libraryName(gpa, work_dir, module_name) catch return null;
     defer gpa.free(so);
-    out.vtable = loadDevice(so) catch return null;
+    // A library that will not open is a miss: the full build reports why.
+    out.vtable = loadDevice(so, null) catch return null;
     hdl_gpu.register(io, so, work_dir, paths);
     return out;
 }
@@ -667,9 +668,15 @@ fn printDiags(bag: *fastvaf.diag.Bag, log: *std.Io.Writer) void {
 /// Opens a device library for the life of the process and returns its
 /// vtable, which the mapping owns. Fails with `NotArpDevice` when a required
 /// symbol is missing, and `WrongAbiVersion`/`LayoutMismatch` when the
-/// library was built against a different ABI.
-fn loadDevice(path: []const u8) !*const DeviceVtable {
-    var lib = try std.DynLib.open(path);
+/// library was built against a different ABI. `std.DynLib` reports every
+/// `dlopen` failure as `FileNotFound`, so the loader's own reason
+/// (`dlerror`) goes to `log` when there is one.
+fn loadDevice(path: []const u8, log: ?*std.Io.Writer) !*const DeviceVtable {
+    var lib = std.DynLib.open(path) catch |err| {
+        if (builtin.link_libc) if (log) |w| if (std.c.dlerror()) |why|
+            w.print("loader: cannot open {s}: {s}\n", .{ path, why }) catch {};
+        return err;
+    };
     errdefer lib.close();
     const ver = lib.lookup(*const fn () callconv(.c) u32, "arp_abi_version") orelse return error.NotArpDevice;
     if (ver() != abi.abi_version) return error.WrongAbiVersion;
@@ -817,6 +824,22 @@ test "named lowercases and refuses a name past name_max" {
     try std.testing.expectEqualStrings("mymod", p.name());
     try std.testing.expect(named(&(@as([Prepared.name_max + 1]u8, @splat('a'))), true) == null);
     try std.testing.expect(named(&(@as([Prepared.name_max]u8, @splat('a'))), true) != null);
+}
+
+test "loadDevice: a library dlopen refuses logs the loader's reason, not only FileNotFound" {
+    const g = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // Present but no shared object: std.DynLib calls this FileNotFound too.
+    try tmp.dir.writeFile(io, .{ .sub_path = "libbad.so", .data = "not a library" });
+    const so = try std.fs.path.join(g, &.{ std.testing.TmpDir.parent_dir_path, &tmp.sub_path, "libbad.so" });
+    defer g.free(so);
+    var log: std.Io.Writer.Allocating = .init(g);
+    defer log.deinit();
+    try std.testing.expectError(error.FileNotFound, loadDevice(so, &log.writer));
+    try std.testing.expect(std.mem.indexOf(u8, log.written(), "loader: cannot open") != null);
+    try std.testing.expect(std.mem.indexOf(u8, log.written(), "libbad.so") != null);
 }
 
 test "prepareAll: each file's messages land in its own log, whatever builds beside it" {
