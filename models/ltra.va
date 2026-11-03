@@ -302,7 +302,8 @@ module ltra(p1, n1, p2, n2);
 
     // ---- accepted history (held: see header) ----
     real ht[0:cap-1], hv1[0:cap-1], hv2[0:cap-1], hi1[0:cap-1], hi2[0:cap-1];
-    integer nh;
+    real hb[0:cap-1];                 // bend of the triple centred on each point, 1 <= k <= nh-2
+    integer nh, hlo, hm;
     real v10, v20, i10, i20;          // initVolt/initCur snapshot at t = 0
     real brk[0:nbrk-1];               // pending wavefront breakpoints (ring)
     integer brk_head;
@@ -633,17 +634,15 @@ module ltra(p1, n1, p2, n2);
             // read no longer reaches it, else the least bent point, so the
             // window t - td stays sampled. It reads t and the accepted history
             // only, so it runs once per timepoint here, not in every Newton
-            // evaluation. ponytail: lossy past cap (ngspice grows); VerA has
-            // no growable held storage.
+            // evaluation, and reads each point's bend from hb, which the
+            // bookkeeping below keeps current. ponytail: lossy past cap
+            // (ngspice grows); VerA has no growable held storage.
             drop = 1;
             if (nh == cap && t > ht[nh - 1]) begin
                 found = 0;
                 bmin = 1e300;
                 for (k = 1; k + 1 < nh && !found; k = k + 1) begin
-                    bk = max(max(bend(ht[k - 1], hv1[k - 1], ht[k], hv1[k], ht[k + 1], hv1[k + 1], compactrel, compactabs),
-                                  bend(ht[k - 1], hv2[k - 1], ht[k], hv2[k], ht[k + 1], hv2[k + 1], compactrel, compactabs)),
-                             max(bend(ht[k - 1], hi1[k - 1], ht[k], hi1[k], ht[k + 1], hi1[k + 1], compactrel, compactabs),
-                                 bend(ht[k - 1], hi2[k - 1], ht[k], hi2[k], ht[k + 1], hi2[k + 1], compactrel, compactabs)));
+                    bk = hb[k];
                     if (bk < 1.0) begin
                         drop = k;
                         found = 1;
@@ -690,6 +689,7 @@ module ltra(p1, n1, p2, n2);
         if (nh == 0) begin
             v10 = v1; v20 = v2; i10 = ib1; i20 = ib2;
         end
+        hlo = -1;   // first triple a dropped point changed, -1 for none
         if (nh > 0 && t <= ht[nh - 1]) begin
             // Same-time recommit overwrites the tail.
             hv1[nh - 1] = v1; hv2[nh - 1] = v2; hi1[nh - 1] = ib1; hi2[nh - 1] = ib2;
@@ -698,12 +698,23 @@ module ltra(p1, n1, p2, n2);
                 // Full: drop the point the timepoint block chose.
                 for (k = drop; k < cap - 1; k = k + 1) begin
                     ht[k] = ht[k + 1]; hv1[k] = hv1[k + 1]; hv2[k] = hv2[k + 1];
-                    hi1[k] = hi1[k + 1]; hi2[k] = hi2[k + 1];
+                    hi1[k] = hi1[k + 1]; hi2[k] = hi2[k + 1]; hb[k] = hb[k + 1];
                 end
                 nh = nh - 1;
+                hlo = drop - 1;
             end
             ht[nh] = t; hv1[nh] = v1; hv2[nh] = v2; hi1[nh] = ib1; hi2[nh] = ib2;
             nh = nh + 1;
+        end
+        // Refresh the bends whose triple changed: the two around a dropped
+        // point, and the one centred next to the tail (appended or rewritten).
+        for (hm = 0; hm < 3; hm = hm + 1) begin
+            k = (hm < 2) ? hlo + hm : nh - 2;
+            if (k >= 1 && k + 1 < nh)
+                hb[k] = max(max(bend(ht[k - 1], hv1[k - 1], ht[k], hv1[k], ht[k + 1], hv1[k + 1], compactrel, compactabs),
+                                bend(ht[k - 1], hv2[k - 1], ht[k], hv2[k], ht[k + 1], hv2[k + 1], compactrel, compactabs)),
+                            max(bend(ht[k - 1], hi1[k - 1], ht[k], hi1[k], ht[k + 1], hi1[k + 1], compactrel, compactabs),
+                                bend(ht[k - 1], hi2[k - 1], ht[k], hi2[k], ht[k + 1], hi2[k + 1], compactrel, compactabs)));
         end
 
         // Wavefront breakpoint: when the launched wave (v + Z0 i) changes
