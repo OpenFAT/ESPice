@@ -350,6 +350,8 @@ const Sim = struct {
     tangents: ?*Tangents,
     stream: ?*Stream,
     ws: *converger.Workspace,
+    /// `newtonOptions(options)`: every attempt of the run solves with it.
+    nr_opts: converger.Options,
     n: usize,
     has_charge: bool,
     x_try: []f64,
@@ -528,6 +530,7 @@ const Sim = struct {
             .tangents = tangents,
             .stream = stream,
             .ws = ws,
+            .nr_opts = newtonOptions(options),
             .n = n,
             .has_charge = has_charge,
             .x_try = x_try,
@@ -787,14 +790,13 @@ const Sim = struct {
             .ag = undefined,
             .c = undefined,
             .hook = undefined,
-            .nr_opts = undefined,
+            .nr_opts = s.nr_opts,
         };
         a.c = if (gear_hi) blk: {
             a.ag = integrator.gearAg(s.order, &a.dts);
             break :blk .{ .ag0 = a.ag[0], .ag2 = 0 };
         } else integrator.coeffs(eff_method, dt, s.dt_old[0], options.xmu);
         ops.attempt(s, &a);
-        a.nr_opts = newtonOptions(options);
         return a;
     }
 
