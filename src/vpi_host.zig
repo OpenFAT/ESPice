@@ -1,7 +1,7 @@
 //! The VPI application host behind `--vpi` and `.options vpi=`: a user
 //! application `.so` (LRM 12.33.2 `vlog_startup_routines`) in -> its §12.32
 //! registrations, each `.hdl` module's `$systf` calls bound to their calltf
-//! through VerA's `vpi` module (an `analog_run.Binding` over a calls-only
+//! through VerA's `vpi` module (a `Binding` over a calls-only
 //! `Lib`), and the §12.31.3 analog callbacks driven by `.op` and `.tran`.
 //! Lives in the executable, so the `vpi_*` symbols an application resolves
 //! are exported from it alone (`rdynamic`), never from libespice.
@@ -40,7 +40,7 @@ const Host = struct {
     /// That module's `systf_calls`, in its device image (never unloaded).
     calls: []const contract.Systf = &.{},
     /// The attached module's calls, over VerA's installed design.
-    binding: vpi.analog_run.Binding = .{},
+    binding: vpi.Binding = .{},
 };
 
 /// The largest module source `attach` reads for its design.
@@ -78,9 +78,9 @@ const systf_host: contract.SystfHost = .{
 };
 
 /// The device side of VerA's analog walk, reduced to the call table: ESPice
-/// solves and walks the circuit itself, so `analog_run` never solves through
-/// it.
-const stub_lib: vpi.analog_run.Lib = .{
+/// solves and walks the circuit itself, so VerA's analog walk never solves
+/// through it.
+const stub_lib: vpi.analog.Lib = .{
     .open = stubOpen,
     .solve = stubSolve,
     .accept = stubAccept,
@@ -97,6 +97,8 @@ const stub_lib: vpi.analog_run.Lib = .{
     .systf_tok = systfTok,
     .systf_outs = systfOuts,
     .ac = stubAc,
+    .breakpoint = noBreakpoint,
+    .node = noNode,
 };
 
 // SAFETY: written by `init` before any `Vpi` function can be called.
@@ -119,7 +121,7 @@ pub fn init(gpa: std.mem.Allocator, io: std.Io) *const espice.Vpi {
 pub fn deinit() void {
     host.mutex.lockUncancelable(host.io);
     host.binding.detach();
-    vpi.close();
+    vpi.session.close();
     for (host.apps.items) |a| host.gpa.free(a);
     host.apps.deinit(host.gpa);
     if (host.attached) |p| host.gpa.free(p);
@@ -139,7 +141,7 @@ fn loadApp(_: *anyopaque, path: []const u8) VpiError!void {
         return error.VpiApplicationUnloadable;
     };
     // The symbol is the array itself, so its address is its first entry's.
-    const table = lib.lookup([*]const ?vpi.StartupFn, "vlog_startup_routines") orelse {
+    const table = lib.lookup([*]const ?vpi.abi.StartupFn, "vlog_startup_routines") orelse {
         lib.close();
         std.log.err("vpi: {s} exports no vlog_startup_routines (LRM 12.33.2), so it registers nothing", .{path});
         return error.VpiNoStartupRoutines;
@@ -151,7 +153,7 @@ fn loadApp(_: *anyopaque, path: []const u8) VpiError!void {
     }
     // From here the library stays open and listed: its calltfs enter VerA's
     // registry, even if the name list below fails.
-    vpi.runStartupTable(table);
+    vpi.session.runStartupTable(table);
     host.int_names = try vpi.systf.intAnalogNames(host.names_arena.allocator());
 }
 
@@ -186,19 +188,19 @@ fn attach(_: *anyopaque, source_path: []const u8, calls: []const contract.Systf)
     };
     defer host.gpa.free(source);
     const dir = std.fs.path.dirname(source_path) orelse ".";
-    var res = vera.compileSourceOpts(host.gpa, source, .lint, .{ .file_name = source_path, .include_dirs = &.{dir}, .int_systfs = host.int_names }) catch |err| {
+    var res = vera.analyze(host.gpa, source, .{ .file_name = source_path, .include_dirs = &.{dir}, .int_systfs = host.int_names }, null) catch |err| {
         std.log.err("vpi: {s}: VerA cannot build the module's design ({s})", .{ source_path, @errorName(err) });
         return error.VpiDesignFailed;
     };
-    defer res.deinit();
-    vpi.open(host.gpa, &res) catch |err| {
+    defer res.deinit(host.gpa);
+    vpi.session.open(host.gpa, &res) catch |err| {
         std.log.err("vpi: {s}: VerA cannot build the module's design ({s})", .{ source_path, @errorName(err) });
         return error.VpiDesignFailed;
     };
     host.calls = calls;
     try host.binding.attach(stub_lib, null);
-    vpi.callback.endOfCompile();
-    vpi.callback.startOfSimulation();
+    vpi.callback_fire.endOfCompile();
+    vpi.callback_fire.startOfSimulation();
     host.attached = try host.gpa.dupe(u8, source_path);
     assert(host.calls.len == calls.len);
     return &systf_host;
@@ -225,11 +227,11 @@ fn point(_: *anyopaque, p: espice.VpiAnalogPoint) void {
     host.mutex.lockUncancelable(host.io);
     defer host.mutex.unlock(host.io);
     assert(p.dt >= 0);
-    const kind: vpi.analog_run.Kind = switch (p.kind) {
+    const kind: vpi.analog.Kind = switch (p.kind) {
         .op => .op,
         .tran => .tran,
     };
-    vpi.analog_run.setPoint(.{ .kind = kind, .start = p.start, .stop = p.stop, .max_step = p.max_step }, p.t, p.dt, 0);
+    vpi.analog.setPoint(.{ .kind = kind, .start = p.start, .stop = p.stop, .max_step = p.max_step }, p.t, p.dt, 0);
     const b = &host.binding;
     b.have_solution = true;
     b.open_step = p.dt > 0;
@@ -244,7 +246,7 @@ fn verdict(_: *anyopaque) espice.VpiVerdict {
     host.mutex.lockUncancelable(host.io);
     defer host.mutex.unlock(host.io);
     const b = &host.binding;
-    if (vpi.callback.convergenceRejected() or b.reject_step) return .reject;
+    if (vpi.callback_fire.convergenceRejected() or b.reject_step) return .reject;
     return if (b.fail_converge) .again else .accept;
 }
 
@@ -254,23 +256,24 @@ fn accept(_: *anyopaque, first: bool, last: bool) void {
     host.mutex.lockUncancelable(host.io);
     defer host.mutex.unlock(host.io);
     const b = &host.binding;
-    const cb = vpi.callback;
+    const cb = vpi.callback_fire;
+    const user = vpi.user;
     b.open_step = false;
     b.awaiting = false;
-    b.t_accepted = vpi.analog_run.time();
-    if (first) cb.fireAnalog(cb.acbInitialStep);
+    b.t_accepted = vpi.analog.time();
+    if (first) cb.fireAnalog(user.acbInitialStep);
     cb.fireTimed(b.t_accepted);
-    if (!first) cb.fireAnalog(cb.acbAcceptedPoint);
+    if (!first) cb.fireAnalog(user.acbAcceptedPoint);
     if (last) {
-        cb.fireAnalog(cb.acbFinalStep);
-        vpi.analog_run.setPoint(null, b.t_accepted, 0, 0);
+        cb.fireAnalog(user.acbFinalStep);
+        vpi.analog.setPoint(null, b.t_accepted, 0, 0);
     }
 }
 
 fn nextForced(_: *anyopaque, after: f64) ?f64 {
     host.mutex.lockUncancelable(host.io);
     defer host.mutex.unlock(host.io);
-    return vpi.callback.nextForced(after, std.math.inf(f64));
+    return vpi.callback_fire.nextForced(after, std.math.inf(f64));
 }
 
 fn stubOpen(_: u8) callconv(.c) void {}
@@ -297,7 +300,16 @@ fn stubAc(_: f64, _: [*]f64, _: [*]f64) callconv(.c) bool {
     return false;
 }
 
-fn bindCalls(_: ?*anyopaque, _: ?vpi.analog_run.HostCall, _: ?vpi.analog_run.HostOut) callconv(.c) void {}
+// ESPice places its own time points; VerA's walk, which asks this, never runs.
+fn noBreakpoint(_: f64) callconv(.c) f64 {
+    return std.math.inf(f64);
+}
+
+fn noNode(_: [*]const u8, _: usize) callconv(.c) isize {
+    return -1;
+}
+
+fn bindCalls(_: ?*anyopaque, _: ?vpi.analog.HostCall, _: ?vpi.analog.HostOut) callconv(.c) void {}
 
 fn nSystf() callconv(.c) usize {
     return host.calls.len;

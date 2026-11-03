@@ -25,6 +25,7 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const fastvaf = @import("fastvaf");
+const zigbuild = @import("zigbuild");
 const digital = @import("vera_digital");
 const abi = @import("device_abi");
 const hdl_gpu = @import("hdl_gpu.zig");
@@ -97,9 +98,10 @@ pub const Prepared = struct {
 /// tree may be left in the cache, and the next load rebuilds it. The rest
 /// of the set is forwarded unchanged from the step that failed: reading the
 /// source and its includes, statting this executable for the cache key,
-/// VerA's compile and codegen (`fastvaf.Error`, the digital `Error`), the
-/// build directory and its lock, VerA's orchestrator build (`CompilerGone`
-/// and `ProtocolMismatch` print what to fix), and `dlopen`.
+/// VerA's analysis and codegen (`fastvaf.AnalyzeError`, `GenerateError`,
+/// the digital `Error`, the bag's `AddFileError`), the build directory and
+/// its lock, VerA's library build (`zigbuild.BuildError`; `CompilerGone` and
+/// `ProtocolMismatch` print what to fix), and `dlopen`.
 pub const Error = error{
     /// The file is not `.va`, `.vams`, `.veriloga` or `.v`, in any case.
     UnsupportedHdlExtension,
@@ -119,12 +121,14 @@ pub const Error = error{
 } || std.Io.Dir.ReadFileAllocError ||
     std.process.ExecutablePathAllocError ||
     std.Io.Dir.StatFileError ||
-    fastvaf.Error ||
+    fastvaf.AnalyzeError ||
+    GenerateError ||
     @import("vera_sim").digital.Error ||
+    fastvaf.diag.AddFileError ||
     std.Io.Dir.CreateDirPathError ||
     std.Io.Dir.OpenError ||
     std.Io.Dir.DeleteFileError ||
-    OrchestratorError ||
+    zigbuild.BuildError ||
     std.DynLib.Error;
 
 /// What `prepareAll` leaves per file: the opened device, null when its
@@ -138,8 +142,9 @@ pub const Pending = struct { files: []const []const u8, resolved: []const []cons
 /// `digital.emitDevice`'s result. VerA keeps the type itself private.
 const DeviceZig = @typeInfo(@typeInfo(@TypeOf(digital.emitDevice)).@"fn".return_type.?).error_union.payload;
 
-/// VerA's `orchestrator.compileRelease` infers its error set; this names it.
-const OrchestratorError = @typeInfo(@typeInfo(@TypeOf(fastvaf.orchestrator.compileRelease)).@"fn".return_type.?).error_union.error_set;
+/// VerA's `Result.generate` returns codegen's error set, which `vera` does
+/// not re-export; this names it.
+const GenerateError = @typeInfo(@typeInfo(@TypeOf(fastvaf.Result.generate)).@"fn".return_type.?).error_union.error_set;
 
 /// The library's generation suffix (`lib<name>.<generation>.so`), shared by
 /// a fresh build and the cached-load path that reopens it.
@@ -239,8 +244,8 @@ fn prepareOne(loaded: []const []const u8, gpa: Allocator, io: std.Io, path: []co
     // The same VerA calls as tools/compile_va.zig, so a loaded model and a
     // built-in one are the same device, except that a loaded one keeps its
     // §9.4 display tasks as `say` (`Hooks.say`, #102).
-    var va: ?fastvaf.CompileResult = null;
-    defer if (va) |*r| r.deinit();
+    var va: ?fastvaf.Result = null;
+    defer if (va) |*r| r.deinit(gpa);
     var v: DeviceZig = undefined;
     const module_name = switch (hdl) {
         .va => blk: {
@@ -248,7 +253,7 @@ fn prepareOne(loaded: []const []const u8, gpa: Allocator, io: std.Io, path: []co
             // except the three build.zig pins to VAMS-2.3 (`.std`). A 2.3 file
             // that names something 2023 reserves (BSIM-CMG 112's `expm1`)
             // narrows itself with `begin_keywords "VAMS-2.3"`.
-            va = fastvaf.compileSourceOpts(gpa, source, .build, .{ .file_name = path, .include_dirs = dirs, .diags = &bag, .display = .record, .int_systfs = paths.int_systfs }) catch |err| {
+            va = fastvaf.analyze(gpa, source, .{ .file_name = path, .include_dirs = dirs, .display = .record, .int_systfs = paths.int_systfs }, &bag) catch |err| {
                 printDiags(&bag, log);
                 return err;
             };
@@ -263,13 +268,18 @@ fn prepareOne(loaded: []const []const u8, gpa: Allocator, io: std.Io, path: []co
     // Only the compiled MIR knows a `.va` module's name, so the compile runs
     // before this check; codegen and the build are skipped.
     if (isLoaded(loaded, out.name())) return null;
-    const device: fastvaf.codegen.Output = switch (hdl) {
-        .va => try va.?.generateOutput(),
+    var dev: ?fastvaf.Device = null;
+    defer if (dev) |*d| d.deinit(gpa);
+    const device: zigbuild.Output = switch (hdl) {
+        .va => blk: {
+            dev = try va.?.generate(gpa, .{}, &bag);
+            break :blk dev.?.output;
+        },
         .v => .{ .text = v.zig },
     };
     // Warnings of a successful compile, and codegen's refusals (E0515).
     printDiags(&bag, log);
-    if (va != null and va.?.device_has_compile_error) return error.HdlCodegenRefused;
+    if (dev != null and dev.?.refused) return error.HdlCodegenRefused;
     const built = try buildLibrary(gpa, io, arena_state.allocator(), module_name, path, device, paths, log);
     out.vtable = built.vtable;
     if (key) |k| recordInputs(io, paths.work_dir, k, module_name, &built.digest_hex);
@@ -280,7 +290,7 @@ fn prepareOne(loaded: []const []const u8, gpa: Allocator, io: std.Io, path: []co
 /// directory and opens it; `path` names the source in the progress line,
 /// which goes to `log` with the compiler's errors. Returns the vtable and
 /// the build tree's name for `recordInputs`.
-fn buildLibrary(gpa: Allocator, io: std.Io, arena: Allocator, module_name: []const u8, path: []const u8, device: fastvaf.codegen.Output, paths: BuildPaths, log: *std.Io.Writer) !struct { vtable: *const DeviceVtable, digest_hex: [64]u8 } {
+fn buildLibrary(gpa: Allocator, io: std.Io, arena: Allocator, module_name: []const u8, path: []const u8, device: zigbuild.Output, paths: BuildPaths, log: *std.Io.Writer) !struct { vtable: *const DeviceVtable, digest_hex: [64]u8 } {
     assert(module_name.len > 0);
     // A wrong Zig fails mid-build with its own confusing message (0.16:
     // "unrecognized optimization mode"), so ask it first.
@@ -290,9 +300,9 @@ fn buildLibrary(gpa: Allocator, io: std.Io, arena: Allocator, module_name: []con
     };
     // A full log drops the line; the build goes on.
     log.print("loader: compiling '{s}' ({s}) — first load, cached afterwards\n", .{ module_name, path }) catch {};
-    // The orchestrator hashes this list into its cache key.
+    // zigbuild hashes this list into its cache key.
     const own = 5;
-    var modules: [own + sim_modules.len]fastvaf.orchestrator.Module = undefined;
+    var modules: [own + sim_modules.len]zigbuild.Module = undefined;
     modules[0..own].* = .{
         .{ .name = "contract", .root = paths.contract },
         .{ .name = "gompute", .root = paths.gompute },
@@ -323,7 +333,7 @@ fn buildLibrary(gpa: Allocator, io: std.Io, arena: Allocator, module_name: []con
     // The vtable crosses the dlopen boundary with Zig calling convention and
     // auto layout, so the library must match the host's backend and mode
     // (`layoutHash` checks both).
-    const options: fastvaf.orchestrator.Options = .{
+    const options: zigbuild.Options = .{
         .work_dir = work_dir,
         .name = module_name,
         .optimize = builtin.mode,
@@ -351,13 +361,13 @@ fn buildLibrary(gpa: Allocator, io: std.Io, arena: Allocator, module_name: []con
         error.FileNotFound => {},
         else => return err, // else: any other unlink failure aborts the build (see above)
     };
-    var built = fastvaf.orchestrator.compileRelease(gpa, io, options, device, generation) catch |err| {
+    var built = zigbuild.buildLibrary(gpa, io, options, device, generation) catch |err| {
         zigHint(err, paths.zig, log);
         return err;
     };
     defer built.deinit(gpa);
-    const art = switch (built) {
-        .ok => |a| a,
+    const so_path = switch (built) {
+        .ok => |p| p,
         // The model already type-checked (or VerA emitted the `.v` device),
         // so a compile failure here is an engine bug; show the compiler's
         // own errors.
@@ -366,8 +376,8 @@ fn buildLibrary(gpa: Allocator, io: std.Io, arena: Allocator, module_name: []con
             return error.GeneratedDeviceDoesNotCompile;
         },
     };
-    const vt = try loadDevice(art.so_path, log);
-    hdl_gpu.register(io, art.so_path, work_dir, paths);
+    const vt = try loadDevice(so_path, log);
+    hdl_gpu.register(io, so_path, work_dir, paths);
     assert(vt.n_u >= vt.num_ports);
     return .{ .vtable = vt, .digest_hex = digest_hex };
 }

@@ -44,6 +44,7 @@ pub fn build(b: *Build) void {
     };
 
     const models = discoverModels(b);
+    const contract_files = contractFiles(b, vera.builder);
     const gen = b.allocator.alloc(Build.LazyPath, models.len) catch @panic("OOM");
     for (models, gen) |m, *out| {
         const run = b.addRunArtifact(vera_exe);
@@ -53,6 +54,7 @@ pub fn build(b: *Build) void {
             if (escape_models.has(m.name)) run.addArg("--allow=W0149");
             run.addArgs(&.{ "--zig", b.graph.zig_exe, "--contract" });
             run.addFileArg(vera.path("lib/contract.zig"));
+            for (contract_files) |f| run.addFileInput(f);
         }
         if (m.include) |inc| {
             run.addArg("-I");
@@ -453,6 +455,7 @@ fn graph(c: Cfg, vera: *Build.Dependency, gompute: *Module, models: []const Mode
         abi,
         core,
         .{ .name = "fastvaf", .module = vera.module("vera") },
+        .{ .name = "zigbuild", .module = vera.module("zigbuild") },
         .{ .name = "vera_sim", .module = vera.module("sim") },
         .{ .name = "vera_digital", .module = vera.module("digital") },
         build_options,
@@ -723,6 +726,22 @@ fn discoverModels(b: *Build) []const Model {
     for (out.items[1..], out.items[0 .. out.items.len - 1]) |cur, prev| {
         if (std.mem.eql(u8, cur.name, prev.name))
             std.debug.panic("models/{s} and models/{s} share the stem '{s}'", .{ prev.file, cur.file, cur.name });
+    }
+    return out.items;
+}
+
+/// Every file under VerA's `lib/contract/`, which `lib/contract.zig` imports:
+/// a model's regeneration reads them all, so each is an input of its run.
+fn contractFiles(b: *Build, vera: *Build) []const Build.LazyPath {
+    const io = b.graph.io;
+    var out: std.ArrayList(Build.LazyPath) = .empty;
+    var dir = vera.root.openDir(io, "lib/contract", .{ .iterate = true }) catch @panic("VerA lib/contract/ missing");
+    defer dir.close(io);
+    var walker = dir.walk(b.allocator) catch @panic("OOM");
+    defer walker.deinit();
+    while (walker.next(io) catch @panic("VerA lib/contract/ walk failed")) |e| {
+        if (e.kind != .file) continue;
+        out.append(b.allocator, vera.path(b.fmt("lib/contract/{s}", .{e.path}))) catch @panic("OOM");
     }
     return out.items;
 }
