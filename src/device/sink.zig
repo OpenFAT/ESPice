@@ -1,21 +1,20 @@
 //! Memory access for `evalRange` and `limitRange`: a batch's tapes and
 //! planes in, one inline accessor per gather or stamp out. `Sink` serves
 //! the host (adds, or staged stores) and the per-instance GPU kernels
-//! (staging stores); `RecordSink` wraps a host sink to record every write
-//! for the latency bypass; `LocalSink` stamps one instance in its own
+//! (staging stores); `RecordSink` wraps a host sink to record the Newton
+//! writes the latency bypass replays; `LocalSink` stamps one instance in its own
 //! unknowns for the operating-point variables (#236). Cites dev/devices/gpu-evaluation.md for the
 //! staging and reduce order, and 01 1.10 for store-not-add on the GPU.
 //!
 //! Contents:
-//! - `pub const RecordWrite = struct`
-//! - `pub const rec_res`, `rec_jac`, `rec_q`, `rec_qjac`
-//! - `pub fn RecordSink(comptime Inner: type) type`
+//! - `pub const RecordCap = struct`
+//! - `pub fn RecordSink(comptime Inner: type, comptime cap: RecordCap, comptime written: []const bool) type`
 //! - `pub fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool, comptime staged: bool) type`
 //! - `pub fn LocalSink(comptime D: type) type`
 //! - sink members: `skip_g`, `skip_c`, `on_device`, `skip_tape`, `stores`,
 //!   `x`, `xOld`, `gath`, `rhsRow`, `lim`, `setLim`, `model`, `inst`,
 //!   `scatterRes`, `scatterJac`, `scatterQ`, `tapeQ`, `scatterQJac`,
-//!   `resPtr`, `jacPtr`, `qPtr`, `qJacPtr`, `tapePtr`, `host`
+//!   `resPtr`, `jacPtr`, `qJacPtr`, `host`
 
 const std = @import("std");
 const contract = @import("contract");
@@ -28,31 +27,38 @@ const Planes = abi.Planes;
 const LimMap = layout.LimMap;
 const SlotMap = layout.SlotMap;
 
-/// One write `RecordSink` keeps: the cell's address with bit 0 set for a
-/// store (staging positions, the charge tape), clear for an add, and the
-/// value. `tag`: kind << 16 | local row << 8 | local column (residual and
-/// Jacobian writes); 0 for the charge tape.
-pub const RecordWrite = struct { ptr: usize, val: f64, tag: u32 = 0 };
+/// Per-segment capacities of one instance's bypass recording.
+pub const RecordCap = struct { res: usize, jac: usize, qjac: usize };
 
-pub const rec_res = 1;
-
-pub const rec_jac = 2;
-
-pub const rec_q = 3;
-
-pub const rec_qjac = 4;
-
-/// A host `Sink` that also records every write into `out`, in order: the
-/// latency bypass (`DeviceBatch.evalBypass`) replays them.
-pub fn RecordSink(comptime Inner: type) type {
+/// A host `Sink` that also records the Newton writes the latency bypass
+/// (`Bypass.evalBypass`) replays, one segment per kind so the replay walks
+/// each without a test: the residual writes (cell, value, the local row
+/// whose Jacobian moves it), the Jacobian writes (cell, value, local row and
+/// column), the charge Jacobian's (cell, value). Within a segment the writes
+/// keep their order, and the segments write different planes, so each plane
+/// cell sums as it did. Charges and the LTE tape are not kept: a replay
+/// re-reads them. A Jacobian value is kept as `val + 0.0`, the bits the
+/// replay used to add. `written`: the local rows `evalRange` writes a
+/// residual for (`layout.writtenRows(D, "jac_rows")`).
+pub fn RecordSink(comptime Inner: type, comptime cap: RecordCap, comptime written: []const bool) type {
     return struct {
         inner: *const Inner,
-        out: []RecordWrite,
         id: u32,
-        n: usize = 0,
+        /// `cap.res + cap.jac + cap.qjac` each: the segments at 0,
+        /// `cap.res` and `cap.res + cap.jac`.
+        cells: []*f64,
+        vals: []f64,
+        /// `cap.res + cap.jac`: each residual and Jacobian write's local row.
+        rows: []u8,
+        /// `cap.jac`: each Jacobian write's local column.
+        cols: []u8,
+        n_res: usize = 0,
+        n_jac: usize = 0,
+        n_qjac: usize = 0,
         overflow: bool = false,
         // evalRange writes residual rows in ascending local order, so the
-        // next row at or after the last one is the writer.
+        // next written row at or after the last one is the writer. An
+        // unwritten row can share its node (a gate tied to its source).
         res_ru: u32 = 0,
 
         pub const skip_g = Inner.skip_g;
@@ -61,18 +67,10 @@ pub fn RecordSink(comptime Inner: type) type {
         pub const skip_tape = Inner.skip_tape;
         const Rs = @This();
 
-        inline fn rec(s: *const Rs, p: *f64, val: f64, store: bool, tag: u32) void {
-            const m: *Rs = @constCast(s);
-            if (m.n == m.out.len) {
-                m.overflow = true;
-                return;
-            }
-            m.out[m.n] = .{ .ptr = @intFromPtr(p) | @intFromBool(store), .val = val, .tag = tag };
-            m.n += 1;
-        }
         fn rowOf(s: *const Rs, next: *u32, row: u32) u32 {
-            while (s.inner.rhsRow(s.id, next.*) != row) next.* += 1;
+            while (!written[next.*] or s.inner.rhsRow(s.id, next.*) != row) next.* += 1;
             next.* += 1;
+            std.debug.assert(next.* <= written.len);
             return next.* - 1;
         }
         pub inline fn x(s: *const Rs, gi: u32) f64 {
@@ -95,23 +93,46 @@ pub fn RecordSink(comptime Inner: type) type {
         }
         pub inline fn scatterRes(s: *const Rs, row: u32, val: f64) void {
             s.inner.scatterRes(row, val);
-            s.rec(s.inner.resPtr(row), val, Inner.stores, rec_res << 16 | s.rowOf(&@constCast(s).res_ru, row) << 8);
+            const m: *Rs = @constCast(s);
+            const ru = m.rowOf(&m.res_ru, row);
+            if (m.n_res == cap.res) {
+                m.overflow = true;
+                return;
+            }
+            m.cells[m.n_res] = s.inner.resPtr(row);
+            m.vals[m.n_res] = val;
+            m.rows[m.n_res] = @intCast(ru);
+            m.n_res += 1;
         }
         pub inline fn scatterJac(s: *const Rs, id: u32, comptime ru: usize, comptime cu: usize, val: f64) void {
             s.inner.scatterJac(id, ru, cu, val);
-            s.rec(s.inner.jacPtr(id, ru, cu), val, Inner.stores, rec_jac << 16 | ru << 8 | cu);
+            const m: *Rs = @constCast(s);
+            if (m.n_jac == cap.jac) {
+                m.overflow = true;
+                return;
+            }
+            m.cells[cap.res + m.n_jac] = s.inner.jacPtr(id, ru, cu);
+            m.vals[cap.res + m.n_jac] = val + 0.0;
+            m.rows[cap.res + m.n_jac] = ru;
+            m.cols[m.n_jac] = cu;
+            m.n_jac += 1;
         }
         pub inline fn scatterQ(s: *const Rs, row: u32, qv: f64) void {
             s.inner.scatterQ(row, qv);
-            s.rec(s.inner.qPtr(row), qv, Inner.stores, rec_q << 16);
         }
         pub inline fn scatterQJac(s: *const Rs, id: u32, comptime ru: usize, comptime cu: usize, val: f64) void {
             s.inner.scatterQJac(id, ru, cu, val);
-            s.rec(s.inner.qJacPtr(id, ru, cu), val, Inner.stores, rec_qjac << 16);
+            const m: *Rs = @constCast(s);
+            if (m.n_qjac == cap.qjac) {
+                m.overflow = true;
+                return;
+            }
+            m.cells[cap.res + cap.jac + m.n_qjac] = s.inner.qJacPtr(id, ru, cu);
+            m.vals[cap.res + cap.jac + m.n_qjac] = val + 0.0;
+            m.n_qjac += 1;
         }
         pub inline fn tapeQ(s: *const Rs, id: u32, j: usize, qv: f64) void {
             s.inner.tapeQ(id, j, qv);
-            s.rec(s.inner.tapePtr(id, j), qv, true, 0);
         }
     };
 }
@@ -236,14 +257,8 @@ pub fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool, 
         pub inline fn jacPtr(s: *const Sk, id: u32, comptime ru: usize, comptime cu: usize) *f64 {
             return &s.g_vals[s.slot(id, ru, cu)];
         }
-        pub inline fn qPtr(s: *const Sk, row: u32) *f64 {
-            return &s.q_vec[row];
-        }
         pub inline fn qJacPtr(s: *const Sk, id: u32, comptime ru: usize, comptime cu: usize) *f64 {
             return &s.c_vals[s.slot(id, ru, cu)];
-        }
-        pub inline fn tapePtr(s: *const Sk, id: u32, j: usize) *f64 {
-            return &s.q_tape[@as(usize, id) * (comptime layout.lteSites(D).len) + j];
         }
 
         /// Host sink over batch `b`, writing into `pl`. `xo` may be undefined
