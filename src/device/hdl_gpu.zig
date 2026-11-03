@@ -19,7 +19,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const assert = std.debug.assert;
-const BuildPaths = @import("loader.zig").BuildPaths;
+const loader = @import("loader.zig");
+const BuildPaths = loader.BuildPaths;
 
 /// Whether loaded models are recorded at all.
 pub const enabled = builtin.mode != .debug and !builtin.cpu.arch.isWasm() and builtin.os.tag == .linux;
@@ -131,16 +132,21 @@ fn build(s: Source, sm: u32) ![:0]const u8 {
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(a, &.{ s.paths.zig, "build-obj", "-target", "nvptx64-cuda", "-mcpu", try a.print("sm_{d}", .{sm}), "-fno-emit-bin", try a.print("-femit-asm={s}", .{tmp}) });
     const Mod = struct { name: []const u8, root: []const u8, deps: []const []const u8 };
-    const mods = [_]Mod{
+    // A `.v` device imports VerA's `sim` tree, as its host library does.
+    const own = 8;
+    var mods: [own + loader.sim_modules.len]Mod = undefined;
+    mods[0..own].* = .{
         .{ .name = "root", .root = s.paths.dyn, .deps = &.{ "models", "contract", "device_abi", "gompute", "lane_options" } },
         .{ .name = "models", .root = models, .deps = &.{"device"} },
-        .{ .name = "device", .root = try std.fs.path.join(a, &.{ s.work_dir, "device.zig" }), .deps = &.{"contract"} },
+        .{ .name = "device", .root = try std.fs.path.join(a, &.{ s.work_dir, "device.zig" }), .deps = &.{ "contract", "sim" } },
         .{ .name = "contract", .root = s.paths.contract, .deps = &.{} },
         .{ .name = "device_abi", .root = s.paths.device_abi, .deps = &.{ "contract", "core" } },
         .{ .name = "core", .root = try std.fs.path.join(a, &.{ std.fs.path.dirname(s.paths.core) orelse ".", "ids.zig" }), .deps = &.{} },
         .{ .name = "gompute", .root = try std.fs.path.join(a, &.{ std.fs.path.dirname(s.paths.gompute) orelse ".", "device.zig" }), .deps = &.{} },
         .{ .name = "lane_options", .root = lane_opts, .deps = &.{} },
     };
+    for (mods[own..], loader.sim_modules) |*m, v|
+        m.* = .{ .name = v.name, .root = try std.fs.path.join(a, &.{ loader.veraRoot(s.paths), v.sub }), .deps = v.deps };
     // Each module's own mode, strip and deps precede its -M, as the build
     // runner passes them.
     for (mods) |m| {

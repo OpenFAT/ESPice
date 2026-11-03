@@ -375,6 +375,10 @@ fn runCase(a: Allocator, io: Io, app: []const u8, path: []const u8, expected: []
     // (no CPU fallback); under it that deck has nothing to compare. `auto`
     // warns the same reason and runs the deck on the CPU.
     if (explicitGpu() and std.mem.indexOf(u8, result.stderr, "(CircuitNotEligible)") != null) return error.NotEligible;
+    // A runtime model whose device kernels failed to build runs on the host
+    // under a GPU backend (src/device/hdl_gpu.zig): the deck never tested
+    // the GPU path it asked for. Under `auto` too: a failed kernel build is a bug either way.
+    if (!equal(backend_name, "cpu") and std.mem.indexOf(u8, result.stderr, "hdl: no device kernels for ") != null) return error.DeviceKernelsFailed;
     try requireSuccess(result);
     // A `-Dcertify` build reports its KCL record on stderr (src/analysis/certify.zig).
     var lines = std.mem.splitScalar(u8, result.stderr, '\n');

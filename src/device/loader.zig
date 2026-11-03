@@ -10,6 +10,8 @@
 //!
 //! Contents:
 //! - `pub const BuildPaths = struct`
+//! - `pub const sim_modules`
+//! - `pub fn veraRoot(paths: BuildPaths) []const u8`
 //! - `pub const Prepared = struct`, with `name_max` and `fn name(self) []const u8`
 //! - `pub const Error = error{...}`
 //! - `pub const Result = Error!?Prepared`
@@ -55,6 +57,24 @@ pub const BuildPaths = struct {
     /// order (VerA's `-I`).
     include_dirs: []const []const u8 = &.{},
 };
+
+/// VerA's `sim` tree and its imports, VerA's build.zig `module_specs` rows:
+/// module name, root under VerA's directory, imports. A `.v` device imports
+/// `sim`; a `.va` device never does, so they cost it nothing. The host
+/// library (`buildLibrary`) and its device kernels (hdl_gpu.zig) both
+/// compile against them.
+pub const sim_modules = [_]struct { name: []const u8, sub: []const u8, deps: []const []const u8 = &.{} }{
+    .{ .name = "sim", .sub = "lib/sim/root.zig", .deps = &.{ "contract", "base", "diag", "frontend", "kernels" } },
+    .{ .name = "base", .sub = "lib/base/root.zig" },
+    .{ .name = "diag", .sub = "lib/diag/root.zig" },
+    .{ .name = "frontend", .sub = "lib/frontend/root.zig", .deps = &.{ "base", "diag", "kernels" } },
+    .{ .name = "kernels", .sub = "lib/kernels/root.zig", .deps = &.{"contract"} },
+};
+
+/// VerA's directory: `paths.contract` is `<VerA>/lib/contract.zig`.
+pub fn veraRoot(paths: BuildPaths) []const u8 {
+    return std.fs.path.dirname(std.fs.path.dirname(paths.contract) orelse ".") orelse ".";
+}
 
 /// A compiled and opened device, not yet registered.
 pub const Prepared = struct {
@@ -270,27 +290,18 @@ fn buildLibrary(gpa: Allocator, io: std.Io, arena: Allocator, module_name: []con
     };
     // A full log drops the line; the build goes on.
     log.print("loader: compiling '{s}' ({s}) — first load, cached afterwards\n", .{ module_name, path }) catch {};
-    // The orchestrator hashes this list into its cache key. `sim` and its
-    // imports are VerA's build.zig `module_specs` rows, which a `.v` device
-    // needs; a `.va` device never imports them, so they cost it nothing.
-    const vera_root = std.fs.path.dirname(std.fs.path.dirname(paths.contract) orelse ".") orelse ".";
-    const lib = struct {
-        fn join(a: Allocator, root: []const u8, sub: []const u8) ![]const u8 {
-            return std.fs.path.join(a, &.{ root, sub });
-        }
-    }.join;
-    const modules = [_]fastvaf.orchestrator.Module{
+    // The orchestrator hashes this list into its cache key.
+    const own = 5;
+    var modules: [own + sim_modules.len]fastvaf.orchestrator.Module = undefined;
+    modules[0..own].* = .{
         .{ .name = "contract", .root = paths.contract },
         .{ .name = "gompute", .root = paths.gompute },
         .{ .name = "core", .root = paths.core },
         .{ .name = "device_abi", .root = paths.device_abi, .deps = &.{ "contract", "core" } },
         .{ .name = "dyn", .root = paths.dyn, .deps = &.{ "contract", "gompute", "device_abi" } },
-        .{ .name = "sim", .root = try lib(arena, vera_root, "lib/sim/root.zig"), .deps = &.{ "contract", "base", "diag", "frontend", "kernels" } },
-        .{ .name = "base", .root = try lib(arena, vera_root, "lib/base/root.zig") },
-        .{ .name = "diag", .root = try lib(arena, vera_root, "lib/diag/root.zig") },
-        .{ .name = "frontend", .root = try lib(arena, vera_root, "lib/frontend/root.zig"), .deps = &.{ "base", "diag", "kernels" } },
-        .{ .name = "kernels", .root = try lib(arena, vera_root, "lib/kernels/root.zig"), .deps = &.{"contract"} },
     };
+    for (modules[own..], sim_modules) |*m, v|
+        m.* = .{ .name = v.name, .root = try std.fs.path.join(arena, &.{ veraRoot(paths), v.sub }), .deps = v.deps };
     // One build tree per (source, host ABI, module set): VerA's writer prunes
     // its tree, so unrelated sources must not share one, and a stable path
     // keeps Zig's compiler cache warm.
