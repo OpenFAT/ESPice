@@ -62,8 +62,12 @@ module bsource(p, n, c0, c1, c2, c3, c4, c5, c6, c7);
     analog begin : tape
         // Per-evaluation scratch, never held state (VAMS variables are
         // static; VerA's vera_scratch starts them at 0 on every evaluation).
+        // st skips that zeroing ("uninit"): only a push raises sp, and a push
+        // writes st[sp], so every read below sp reads a written slot, and the
+        // final read is guarded by sp <= 0 (a malformed tape that pops past
+        // the bottom). The 1152-byte memset was 3.5% of a B-source-heavy run.
         (* vera_scratch *) real vc[0:7];
-        (* vera_scratch *) real st[0:15];
+        (* vera_scratch = "uninit" *) real st[0:15];
         real a, b, r, f, tdev, dt, factor;
         integer k, sp, j, np, at;
         real d, xi, yi, lower, upper, seg_lo, seg_hi, u, w;
@@ -177,7 +181,7 @@ module bsource(p, n, c0, c1, c2, c3, c4, c5, c6, c7);
                 end
             endcase
         end
-        f = (sp == 0) ? 0.0 : st[0];
+        f = (sp <= 0) ? 0.0 : st[0];
         tdev = (temp <= 0.0) ? $temperature : temp;
         dt = (tdev + dtemp) - 300.15;
         factor = 1.0 + tc1 * dt + tc2 * dt * dt;
