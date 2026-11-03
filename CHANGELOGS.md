@@ -2,8 +2,19 @@
 
 Newest first.
 
-## Unreleased
+## 0.20.0 (2026-11-02)
 
+0.3.0 was never released; its entries are folded in below.
+
+- `auto`'s GPU estimate prices each device type by its instance count (one GPU thread runs ~120x slower than a CPU core on the tested RTX 4060 Laptop) and by the waveform history it holds (`LTRA`, `CPL`, `TXL`), so a single line stays on the CPU and a batch of a thousand goes to the GPU; under `--backend cuda`, where every device still runs on the GPU, `tran/ltra_tran_long_run_past_8192` took 1973 s and `tran/cpl_tran_history_past_2048` 317 s against 11.0 s and 0.58 s on the CPU, and a `note:` now says so. The release CUDA corpus runs `--backend auto`.
+- The repository is github.com/OpenFAT/ESPice (it was OpenFAT/EGSpice; GitHub redirects the old URLs, and `nix run github:OpenFAT/EGSpice` still resolves).
+- The source is reorganised by owner (frontend, core, device, solver, analysis, output, the facade and the C API), every file under 500 code lines; all 951 conformance decks give byte-identical output before and after.
+- Runtime `.hdl` builds print each model's VerA warnings and its `loader: compiling` line in the deck's file order once the builds finish, so stderr is the same on every run (it followed build completion order before).
+- A loaded VPI application's design, registries and paths are freed at exit; the corpus runner fails a run whose allocator reports a leak.
+- A built device library that will not open logs the system's reason (`loader: cannot open <path>: <reason>`) beside the error.
+- The merge gate runs the allocation-failure suites with `-Dcertify=true`, so a certificate that panics on out-of-memory (as before #244) fails a pull request instead of the nightly.
+- The test that a Problem run batch after batch costs the same per batch counts allocation calls instead of comparing wall times, which failed once on a loaded machine (712 ms early, 2355 ms late); the C API batch test drops its wall-time and RSS checks.
+- A cold operating point whose gmin stepping crawls (its step factor under 1.122 for 20 solves in a row) moves on to source stepping: the `.op` of a 100k-transistor BSIM4 chain converges in 14:07 with a 2.8 GiB peak RSS, where it was still crawling the gmin ladder when killed at 32 min (#218).
 - `.wcd m1 '>= L1' m2 '<= L2' ...` finds each spec's worst-case distance β_w over the statistical parameters `SWEEP MONTE` draws, by FORM (iHL-RF, tangent rows for `.dc` and `.tran`), and reports it with Φ(β_w), the iterations, the simulations and the worst-case point; an unconverged search says so and never prints a guess; `--measures` writes it as `"kind": "wcd"` (#240).
 - `.four` and `.fft` read the deck's `.tran` result instead of integrating the same transient again, where that run keeps its waveform with the same options and operating point (CPU backend); the values are bit for bit the same (#231).
 - `--emir=FILE` writes each device terminal's and independent source's average, EM_AVG, RMS and peak current over the deck's first `.tran` (or `--emir-window=T1:T2`), else its `.op`/`.dc` point, as JSON with each instance's `.model` name, one file per `.step`/`.alter`/sweep variant; a Spectre analysis's `emirformat`/`emirfile` sets it (#237).
@@ -16,7 +27,6 @@ Newest first.
 - `.save @m1[vth]` and `.meas ... find @m1[gm]`: device operating-point variables at the operating point, along `.dc` and in `.tran`: a model's own `desc` or `units` variables (`vth`, `vdsat`, `region`, BSIM-CMG's `ids`) and a MOSFET's terminal quantities (currents, gm, gds, gmbs, capacitances, ft, terminal voltages); an unknown name refuses the deck instead of being dropped (#236).
 - A pfet's `@m[id]`, `is`, `ig`, `ib`, `vgs`, `vds` and `vbs` are in ngspice's frame (type × the current into the terminal and × the voltage), so a saturated pfet's `id` is positive as ngspice's; BSIM4's `@m[cgg]` is its own intrinsic `cggb`, without the overlap, as ngspice's, while `ft` keeps the total gate capacitance (#236).
 - HSPICE `.probe op` (every device's operating-point variables) and `.probe lx7(m1)`/`lv9(m1)` (the MOSFET element templates lx1-lx4, lx7-lx9, lx18, lv9, lv10), Spectre `save m1:gm x1.mn1:vdsat`, and the same names in `.meas`; BSIM4 (`bsim4va`) gains `vth` and `vdsat` (#236).
-- VerA pinned at 1d599a0f (operating-point variables, `op_vars`/`opVars`).
 - `espice --version` prints the ESPice and VerA versions and the GPU backends built in.
 - `-I DIR` / `--include=DIR` adds a search directory for `.hdl` includes.
 - `espice_release_points` also frees each point's parameter row and label (#225).
@@ -26,12 +36,14 @@ Newest first.
 - Faster and leaner on large decks: quicker sparse LU, faster parsing of large hierarchies (a 100k-transistor chain parses in half the memory), CSV and `.print` sweeps stream to disk (a 200-point sweep: ~1 GB → ~50 MB), and Monte Carlo shares unchanged model rows (1.04 → 0.19 GB on a 1k chain).
 - The compact models ship in the source tree; building no longer downloads them.
 - Cached `.hdl` builds rebuild once (new device ABI).
-- VerA v0.20.0 and Gompute 1.5.0.
+- VerA v0.23.0 and Gompute 1.5.0.
+- A `.hdl` model's `$strobe`/`$display` prints `%e` with a precision of 59 or more as the number instead of `?` (VerA v0.21.0, OpenFAT/VerA#98).
+- `.hdl` models VerA now refuses: an analog assignment to a `reg`, or to a bit or part of one (E0316), `ac_stim` or `flicker_noise` with a fourth argument (E0506), and a protected model that needs a license (E0146). Inputs that crashed VerA (a 5000-arm `case`, a 5000-deep `begin` nest, a NaN noise-table knot) are a coded refusal or compile (VerA v0.21.0-v0.22.0, OpenFAT/VerA#114, #116).
+- `.hdl` models VerA now accepts: an instance whose two ports share a net (`res r1(a, a)`, was E0315) and a read of the flow into an instance's own port (`I(<a>)`, was E0997) (VerA v0.21.0-v0.22.0, OpenFAT/VerA#116).
 - GPU lane batches also size their waves to each device's free memory, so a batch too large for the card runs in smaller waves instead of on the CPU (#217).
 - Releases attach `.deb`, `.rpm` and Arch packages (`espice`; `espice-cuda` for NVIDIA GPUs; `espice-hip` with a build per AMD GPU target, picked at start), an AUR `PKGBUILD` (`espice-bin`) and a Homebrew formula; `tools/install.sh` installs a release from `sources.json` with a checked, cached download; `nix run .#latest` and `.#"<version>"` install release binaries.
+- `nint(-0.5)` is -0, as in ngspice: `{1/nint(-0.5)}` folded to +inf instead of -inf.
 - Removed: the `ESPICE_LINEAR_CACHE` variable, the `-Dbsim4-narrow` build option and the `test-gpu-*` build steps (`test-gpu` runs the corpus on CUDA).
-
-## 0.3.0 (2026-10-20)
 
 - Sweeps (`.step`, `.mc`, `.dc DATA=`/`MONTE=`, `.temp` ranges) run their points in parallel across `--jobs`, about 2x faster with flat memory; output is the same at every `--jobs`. Monte Carlo draws differ from 1.1 (#213).
 - New CLI defaults: `--jobs` is one per CPU, and `--measures-only`, `--early-stop` and `--warm-start` turn on by themselves when nothing reads the transient waveforms; `--full-waveforms` turns them off. `--tokenizer` detects the dialect.
@@ -53,7 +65,7 @@ Newest first.
 - **Robustness:** bad decks fail with an error naming the card instead of running wrong; out-of-memory and Newton runaway are reported instead of publishing zeros.
 - **Models:** third-party compact models (PSP, BSIM-CMG/BULK/IMG/SOI, HiSIM, HICUM, Mextram, ASM-HEMT, MVSG and more) from their upstream releases, unmodified.
 - `ESPICE_THREADS` gives the same output at any thread count (#137).
-- Nix flake (`nix run github:OpenFAT/EGSpice`, CUDA package), the playground (`zig build wasm`) and the user documentation site.
+- Nix flake (`nix run github:OpenFAT/ESPice`, CUDA package), the playground (`zig build wasm`) and the user documentation site.
 
 ## 0.1.0 (2026-10-05)
 

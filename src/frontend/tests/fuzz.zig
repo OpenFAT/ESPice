@@ -216,6 +216,40 @@ fn exactDigest(nl: *const Netlist) u64 {
     return h.final();
 }
 
+/// Three `outer` instances of two `inner` instances each, whose cards read
+/// literals, instance parameters, defaults and shadowed globals. `copies`
+/// gives every instance its own textual copy of its subcircuit.
+fn instancedDeck(a: std.mem.Allocator, copies: bool) ![]const u8 {
+    var src: std.ArrayList(u8) = .empty;
+    try src.appendSlice(a, "replay\n.param w=5u l=1u\n.model nch nmos level=1\n");
+    const sides: []const []const u8 = if (copies) &.{ "a", "b" } else &.{""};
+    const outers: usize = if (copies) 3 else 1;
+    for (0..outers) |k| {
+        const o: []const u8 = if (copies) try a.print("{d}", .{k}) else "";
+        for (sides) |side| try src.print(a,
+            \\.subckt inner{s}{s} d g s w=2u
+            \\m1 d g s s nch w={{w}} l=0.5u nf=2 ad=1p
+            \\r1 d s {{l*2}}
+            \\c1 d s 1p
+            \\e1 d s g s 2
+            \\.ends
+            \\
+        , .{ o, side });
+        try src.print(a,
+            \\.subckt outer{s} a b l=3
+            \\xi1 a b 0 inner{s}{s} w={{l*1e-6}}
+            \\xi2 b a 0 inner{s}{s}
+            \\r2 a b l
+            \\.ends
+            \\
+        , .{ o, o, sides[0], o, sides[sides.len - 1] });
+    }
+    for ([_][]const u8{ "n1 n2", "n2 n3", "n3 n1" }, [_][]const u8{ "", " l=7", " l=1" }, 0..) |pins, extra, k|
+        try src.print(a, "x{d} {s} outer{s}{s}\n", .{ k, pins, if (copies) try a.print("{d}", .{k}) else "", extra });
+    try src.appendSlice(a, "v1 n1 0 1\n.end\n");
+    return src.items;
+}
+
 /// The full oracle on one deck. `src` drives the transforms' choices.
 fn check(gpa: std.mem.Allocator, src: anytype, deck_text: []const u8, dialect: Dialect) !void {
     const base = outcome(gpa, deck_text, dialect);
@@ -431,40 +465,6 @@ test "a body card replayed per instance digests as the same card read once per c
     const shared = outcome(std.testing.allocator, one, .ngspice);
     try std.testing.expect(shared == .digest);
     try expectSame("one body copy per instance", shared, outcome(std.testing.allocator, copies, .ngspice), one, copies);
-}
-
-/// Three `outer` instances of two `inner` instances each, whose cards read
-/// literals, instance parameters, defaults and shadowed globals. `copies`
-/// gives every instance its own textual copy of its subcircuit.
-fn instancedDeck(a: std.mem.Allocator, copies: bool) ![]const u8 {
-    var src: std.ArrayList(u8) = .empty;
-    try src.appendSlice(a, "replay\n.param w=5u l=1u\n.model nch nmos level=1\n");
-    const sides: []const []const u8 = if (copies) &.{ "a", "b" } else &.{""};
-    const outers: usize = if (copies) 3 else 1;
-    for (0..outers) |k| {
-        const o: []const u8 = if (copies) try a.print("{d}", .{k}) else "";
-        for (sides) |side| try src.print(a,
-            \\.subckt inner{s}{s} d g s w=2u
-            \\m1 d g s s nch w={{w}} l=0.5u nf=2 ad=1p
-            \\r1 d s {{l*2}}
-            \\c1 d s 1p
-            \\e1 d s g s 2
-            \\.ends
-            \\
-        , .{ o, side });
-        try src.print(a,
-            \\.subckt outer{s} a b l=3
-            \\xi1 a b 0 inner{s}{s} w={{l*1e-6}}
-            \\xi2 b a 0 inner{s}{s}
-            \\r2 a b l
-            \\.ends
-            \\
-        , .{ o, o, sides[0], o, sides[sides.len - 1] });
-    }
-    for ([_][]const u8{ "n1 n2", "n2 n3", "n3 n1" }, [_][]const u8{ "", " l=7", " l=1" }, 0..) |pins, extra, k|
-        try src.print(a, "x{d} {s} outer{s}{s}\n", .{ k, pins, if (copies) try a.print("{d}", .{k}) else "", extra });
-    try src.appendSlice(a, "v1 n1 0 1\n.end\n");
-    return src.items;
 }
 
 test "device cards scanned on 1 or 8 threads build the tables a whole read builds" {

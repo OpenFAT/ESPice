@@ -4,12 +4,17 @@
 //! often enough to count, and the failure probability follows
 //! ln P(s) = α + β ln s - γ/s². A weighted least-squares fit over the
 //! scales extrapolates it to s = 1. Pure arithmetic; the driver counts.
+//!
+//! Contents:
+//! - `pub const Error = error{ TooFewScales, Singular }`
+//! - `pub const Estimate = struct`, `Estimate.p(e: Estimate) f64`, `Estimate.interval(e: Estimate) [2]f64`
+//! - `pub fn sigmaOf(p: f64) f64`
+//! - `pub fn fit(scales: []const f64, trials: []const u64, failures: []const u64) Error!Estimate`
+
 const std = @import("std");
 const numerics = @import("numerics.zig");
 const assert = std.debug.assert;
-
-/// Φ⁻¹(0.975): the half-width of a two-sided 95 % interval, in sigmas.
-const z975 = 1.959963984540054;
+const testing = std.testing;
 
 /// Why `fit` gives no estimate.
 pub const Error = error{
@@ -41,6 +46,9 @@ pub const Estimate = struct {
         return .{ @min(1, @exp(e.log_p - h)), @min(1, @exp(e.log_p + h)) };
     }
 };
+
+/// Φ⁻¹(0.975): the half-width of a two-sided 95 % interval, in sigmas.
+const z975 = 1.959963984540054;
 
 /// The equivalent sigma of failure probability `p`, Φ⁻¹(1 - p), as
 /// -Φ⁻¹(p) so that 1 - p is never formed; negative above 1/2.
@@ -99,6 +107,8 @@ pub fn fit(scales: []const f64, trials: []const u64, failures: []const u64) Erro
     };
 }
 
+// ---- private ----
+
 /// Solves L y = v.
 fn forward(l: [3][3]f64, v: [3]f64) [3]f64 {
     var y: [3]f64 = undefined;
@@ -123,7 +133,19 @@ fn backward(l: [3][3]f64, y: [3]f64) [3]f64 {
     return x;
 }
 
-const testing = std.testing;
+/// The 3×3 determinant by cofactors along the first row.
+fn det3(m: [3][3]f64) f64 {
+    return m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) -
+        m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
+        m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+}
+
+/// Failures among `n` Bernoulli trials of probability `p`.
+fn bernoulli(r: std.Random, n: usize, p: f64) u64 {
+    var k: u64 = 0;
+    for (0..n) |_| k += @intFromBool(r.float(f64) < p);
+    return k;
+}
 
 test "counts drawn from the model itself give its parameters back (zero residual)" {
     // Oracle: k = n·P(s) to the count's last digit, so every ln p̂ sits on
@@ -180,12 +202,6 @@ test "three scales: the estimate interpolates, and its variance is Σ λ²(1 - p
     try testing.expect(iv[0] < e.p() and e.p() < iv[1]);
 }
 
-fn det3(m: [3][3]f64) f64 {
-    return m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) -
-        m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
-        m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
-}
-
 test "fewer than three informative scales, or three equal ones, give no estimate" {
     try testing.expectError(error.TooFewScales, fit(&.{ 1, 2, 3 }, &.{ 100, 100, 100 }, &.{ 0, 5, 100 }));
     try testing.expectError(error.TooFewScales, fit(&.{ 2, 3 }, &.{ 100, 100 }, &.{ 5, 10 }));
@@ -196,13 +212,6 @@ test "equivalent sigma: Φ⁻¹(1 - p), past the reach of 1 - p" {
     try testing.expectApproxEqAbs(@as(f64, 5), sigmaOf(numerics.normalTail(5)), 1e-7);
     try testing.expectApproxEqAbs(@as(f64, 0), sigmaOf(0.5), 1e-12);
     try testing.expect(sigmaOf(0.9) < 0 and std.math.isFinite(sigmaOf(0)) and std.math.isFinite(sigmaOf(1)));
-}
-
-/// Failures among `n` Bernoulli trials of probability `p`.
-fn bernoulli(r: std.Random, n: usize, p: f64) u64 {
-    var k: u64 = 0;
-    for (0..n) |_| k += @intFromBool(r.float(f64) < p);
-    return k;
 }
 
 test "coverage: the 95 % interval holds the closed form Q(5) in at least 34 of 40 seeds" {

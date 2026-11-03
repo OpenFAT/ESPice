@@ -47,10 +47,19 @@ jobs:
         with:
           name: omarsiwy
           skipPush: true
+      # macOS and Windows check out case-insensitively: two tracked paths that
+      # differ only in case (output/measure/Scan.zig and scan.zig did) become one file there.
+      - name: Tracked paths are unique ignoring case
+        run: test -z "$(git ls-files | tr '[:upper:]' '[:lower:]' | sort | uniq -d | tee /dev/stderr)"
       - name: Release matrix and publication checks
         run: nix develop .#ci -c python3 -m unittest discover -s tools -p 'test_release*.py'
       - name: Every suite and the corpus
         run: nix develop .#ci -c zig build test $FLAGS
+      # The KCL certificate (-Dcertify) on the allocation-failure suites, so
+      # a certify path that panics on out-of-memory fails here, not first in
+      # the nightly (#244). The certified corpus stays nightly; one deck here.
+      - name: Allocation-failure suites with KCL certificates
+        run: nix develop .#ci -c zig build test -Dcertify=true -Dtest-filter="allocation failure" $FLAGS -- --filter dc/ascending.sp
       # The same espice the corpus ran (cached), installed, then every deck
       # the docs show: a page whose example stopped running fails here.
       - name: Docs decks
