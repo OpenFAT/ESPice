@@ -919,24 +919,32 @@ fn evalRange(comptime D: type, comptime narrow: bool, comptime pad: bool, sink: 
     }
 }
 
-/// One write `RecordSink` keeps: the cell's address with bit 0 set for a
-/// store (staging positions, the charge tape), clear for an add, and the
-/// value. `tag`: kind << 16 | local row << 8 | local column (residual and
-/// Jacobian writes); 0 for the charge tape.
-const RecordWrite = struct { ptr: usize, val: f64, tag: u32 = 0 };
-const rec_res = 1;
-const rec_jac = 2;
-const rec_q = 3;
-const rec_qjac = 4;
+/// Per-segment capacities of one instance's bypass recording.
+const RecordCap = struct { res: usize, jac: usize, qjac: usize };
 
-/// A host `Sink` that also records every write into `out`, in order: the
-/// latency bypass (`DeviceBatch.evalBypass`) replays them.
-fn RecordSink(comptime Inner: type) type {
+/// A host `Sink` that also records the Newton writes a replay repeats, one
+/// segment per kind so the replay walks each without a test: the residual
+/// writes (cell, value, the local row whose Jacobian moves it), the
+/// Jacobian writes (cell, value, local row and column), the charge
+/// Jacobian's (cell, value). Within a segment the writes keep their order,
+/// and the segments write different planes, so each plane cell sums as it
+/// did. Charges and the LTE tape are not kept: a replay re-reads them.
+/// A Jacobian value is kept as `val + 0.0`, the bits the replay adds.
+fn RecordSink(comptime Inner: type, comptime cap: RecordCap) type {
     return struct {
         inner: *const Inner,
-        out: []RecordWrite,
         id: u32,
-        n: usize = 0,
+        /// `cap.res + cap.jac + cap.qjac` each: the segments at 0,
+        /// `cap.res` and `cap.res + cap.jac`.
+        cells: []*f64,
+        vals: []f64,
+        /// `cap.res + cap.jac`: each residual and Jacobian write's local row.
+        rows: []u8,
+        /// `cap.jac`: each Jacobian write's local column.
+        cols: []u8,
+        n_res: usize = 0,
+        n_jac: usize = 0,
+        n_qjac: usize = 0,
         overflow: bool = false,
         // evalRange writes residual rows in ascending local order, so the
         // next row at or after the last one is the writer.
@@ -948,15 +956,6 @@ fn RecordSink(comptime Inner: type) type {
         pub const skip_tape = Inner.skip_tape;
         const Rs = @This();
 
-        inline fn rec(s: *const Rs, p: *f64, val: f64, store: bool, tag: u32) void {
-            const m: *Rs = @constCast(s);
-            if (m.n == m.out.len) {
-                m.overflow = true;
-                return;
-            }
-            m.out[m.n] = .{ .ptr = @intFromPtr(p) | @intFromBool(store), .val = val, .tag = tag };
-            m.n += 1;
-        }
         fn rowOf(s: *const Rs, next: *u32, row: u32) u32 {
             while (s.inner.rhsRow(s.id, next.*) != row) next.* += 1;
             next.* += 1;
@@ -982,23 +981,46 @@ fn RecordSink(comptime Inner: type) type {
         }
         pub inline fn scatterRes(s: *const Rs, row: u32, val: f64) void {
             s.inner.scatterRes(row, val);
-            s.rec(s.inner.resPtr(row), val, Inner.stores, rec_res << 16 | s.rowOf(&@constCast(s).res_ru, row) << 8);
+            const m: *Rs = @constCast(s);
+            const ru = m.rowOf(&m.res_ru, row);
+            if (m.n_res == cap.res) {
+                m.overflow = true;
+                return;
+            }
+            m.cells[m.n_res] = s.inner.resPtr(row);
+            m.vals[m.n_res] = val;
+            m.rows[m.n_res] = @intCast(ru);
+            m.n_res += 1;
         }
         pub inline fn scatterJac(s: *const Rs, id: u32, comptime ru: usize, comptime cu: usize, val: f64) void {
             s.inner.scatterJac(id, ru, cu, val);
-            s.rec(s.inner.jacPtr(id, ru, cu), val, Inner.stores, rec_jac << 16 | ru << 8 | cu);
+            const m: *Rs = @constCast(s);
+            if (m.n_jac == cap.jac) {
+                m.overflow = true;
+                return;
+            }
+            m.cells[cap.res + m.n_jac] = s.inner.jacPtr(id, ru, cu);
+            m.vals[cap.res + m.n_jac] = val + 0.0;
+            m.rows[cap.res + m.n_jac] = ru;
+            m.cols[m.n_jac] = cu;
+            m.n_jac += 1;
         }
         pub inline fn scatterQ(s: *const Rs, row: u32, qv: f64) void {
             s.inner.scatterQ(row, qv);
-            s.rec(s.inner.qPtr(row), qv, Inner.stores, rec_q << 16);
         }
         pub inline fn scatterQJac(s: *const Rs, id: u32, comptime ru: usize, comptime cu: usize, val: f64) void {
             s.inner.scatterQJac(id, ru, cu, val);
-            s.rec(s.inner.qJacPtr(id, ru, cu), val, Inner.stores, rec_qjac << 16);
+            const m: *Rs = @constCast(s);
+            if (m.n_qjac == cap.qjac) {
+                m.overflow = true;
+                return;
+            }
+            m.cells[cap.res + cap.jac + m.n_qjac] = s.inner.qJacPtr(id, ru, cu);
+            m.vals[cap.res + cap.jac + m.n_qjac] = val + 0.0;
+            m.n_qjac += 1;
         }
         pub inline fn tapeQ(s: *const Rs, id: u32, j: usize, qv: f64) void {
             s.inner.tapeQ(id, j, qv);
-            s.rec(s.inner.tapePtr(id, j), qv, true, 0);
         }
     };
 }
@@ -1908,7 +1930,16 @@ pub fn DeviceBatch(comptime D: type) type {
             tol: ir.BypassTol,
             ref: []f64, // count * n_u
             meta: []Meta, // count
-            writes: []RecordWrite, // count * max_writes
+            /// `count * @sizeOf(D.Instance)`: the instance's bytes at its
+            /// recording, which hold latched and held values. `State` is
+            /// `updateState`'s staging, which `eval` never reads.
+            inst: []u8,
+            /// `RecordSink`'s columns, `count *` `cells_len`, `cells_len`,
+            /// `rec_cap.res + rec_cap.jac` and `rec_cap.jac`.
+            cells: []*f64,
+            vals: []f64,
+            rows: []u8,
+            cols: []u8,
             /// Instance evaluations that replayed and that evaluated, summed
             /// over ParEval's lanes; read between solves (`setSimState`).
             /// usize: wasm32 has no 64-bit atomics.
@@ -1919,7 +1950,41 @@ pub fn DeviceBatch(comptime D: type) type {
             /// Set once the hit rate proved too low to pay for recording:
             /// the batch evaluates plainly for the rest of the run.
             off: bool = false,
-            const Meta = struct { class: u16 = 0, len: u16 = 0, key: u64 = 0 };
+            /// A recording's iteration class (0: none), its segment
+            /// lengths, and the key of the planes its cells address.
+            const Meta = struct { class: u16 = 0, n_res: u16 = 0, n_jac: u16 = 0, n_qjac: u16 = 0, plane: u64 = 0 };
+
+            fn create(count: u32, tol: ir.BypassTol) !*Bypass {
+                const bp = try staging_gpa.create(Bypass);
+                errdefer staging_gpa.destroy(bp);
+                const ref = try staging_gpa.alloc(f64, count * n_u);
+                errdefer staging_gpa.free(ref);
+                const meta = try staging_gpa.alloc(Meta, count);
+                errdefer staging_gpa.free(meta);
+                const inst = try staging_gpa.alloc(u8, count * @sizeOf(D.Instance));
+                errdefer staging_gpa.free(inst);
+                const cells = try staging_gpa.alloc(*f64, count * cells_len);
+                errdefer staging_gpa.free(cells);
+                const vals = try staging_gpa.alloc(f64, count * cells_len);
+                errdefer staging_gpa.free(vals);
+                const rows = try staging_gpa.alloc(u8, count * (rec_cap.res + rec_cap.jac));
+                errdefer staging_gpa.free(rows);
+                const cols = try staging_gpa.alloc(u8, count * rec_cap.jac);
+                @memset(meta, .{});
+                bp.* = .{ .tol = tol, .ref = ref, .meta = meta, .inst = inst, .cells = cells, .vals = vals, .rows = rows, .cols = cols };
+                return bp;
+            }
+
+            fn destroy(bp: *Bypass) void {
+                staging_gpa.free(bp.cols);
+                staging_gpa.free(bp.rows);
+                staging_gpa.free(bp.vals);
+                staging_gpa.free(bp.cells);
+                staging_gpa.free(bp.inst);
+                staging_gpa.free(bp.meta);
+                staging_gpa.free(bp.ref);
+                staging_gpa.destroy(bp);
+            }
 
             /// After four evaluations per instance, a batch that replays
             /// under one in five pays the recording for nothing (a BSIM4
@@ -1933,27 +1998,34 @@ pub fn DeviceBatch(comptime D: type) type {
             }
         };
 
-        /// Upper bound on one instance's sink writes in a Newton pass: each
-        /// written row's residual and pattern entries, the same for charge,
-        /// and the LTE sites.
-        const max_writes: usize = blk: {
+        /// Upper bounds on one instance's recorded writes in a Newton pass:
+        /// one residual per written row, its row's pattern entries, and the
+        /// charge rows' pattern entries.
+        const rec_cap: RecordCap = blk: {
             @setEvalBranchQuota(100_000);
             const jp = rowPattern(D, "jac_pattern");
             const jr = writtenRows(D, "jac_rows");
-            var w: usize = 0;
+            var c: RecordCap = .{ .res = 0, .jac = 0, .qjac = 0 };
             for (0..n_u) |ru| if (jr[ru]) {
-                w += 1 + @popCount(jp[ru]);
+                c.res += 1;
+                c.jac += @popCount(jp[ru]);
             };
             if (has_q) {
                 const qp = rowPattern(D, "q_pattern");
                 const qr = writtenRows(D, "q_rows");
                 for (0..n_u) |ru| if (qr[ru]) {
-                    w += 1 + @popCount(qp[ru]);
+                    c.qjac += @popCount(qp[ru]);
                 };
-                w += lteSites(D).len;
             }
-            break :blk w;
+            break :blk c;
         };
+        const cells_len = rec_cap.res + rec_cap.jac + rec_cap.qjac;
+
+        comptime {
+            // Rows and columns ride in u8; a segment length in u16.
+            if (bypassable) std.debug.assert(n_u <= 256);
+            if (bypassable) std.debug.assert(cells_len <= std.math.maxInt(u16));
+        }
 
         const noise_order = if (@hasDecl(D, "noise_gens")) noiseOrder(D) else {};
 
@@ -2188,36 +2260,20 @@ pub fn DeviceBatch(comptime D: type) type {
                 if (!bp.off) @memset(bp.meta, .{});
                 return;
             }
-            const t = tol orelse return;
-            const ref = staging_gpa.alloc(f64, self.count * n_u) catch return;
-            const meta = staging_gpa.alloc(Bypass.Meta, self.count) catch return staging_gpa.free(ref);
-            const writes = staging_gpa.alloc(RecordWrite, self.count * max_writes) catch {
-                staging_gpa.free(meta);
-                return staging_gpa.free(ref);
-            };
-            const bp = staging_gpa.create(Bypass) catch {
-                staging_gpa.free(writes);
-                staging_gpa.free(meta);
-                return staging_gpa.free(ref);
-            };
-            @memset(meta, .{});
-            bp.* = .{ .tol = t, .ref = ref, .meta = meta, .writes = writes };
-            self.bypass = bp;
+            // Best effort: out of memory leaves the batch evaluating plainly.
+            self.bypass = Bypass.create(self.count, tol orelse return) catch null;
         }
 
         fn freeBypass(self: *Self) void {
             const bp = self.bypass orelse return;
-            staging_gpa.free(bp.writes);
-            staging_gpa.free(bp.meta);
-            staging_gpa.free(bp.ref);
-            staging_gpa.destroy(bp);
+            bp.destroy();
             self.bypass = null;
         }
 
         /// Newton evaluation with the latency bypass: each instance replays
         /// its recorded writes when its inputs are within tolerance of the
-        /// recording, else evaluates (recording afresh). The writes replay in
-        /// their recorded order, so each plane cell sums as a fresh
+        /// recording, else evaluates (recording afresh). Each plane cell's
+        /// writes replay in their recorded order, so it sums as a fresh
         /// evaluation with those values would.
         fn evalBypass(self: *Self, bp: *Bypass, sink: anytype, first: u32, last: u32, sim: SimState, limiting: bool, pl: *const Planes, comptime staged: bool) void {
             const SinkT = @typeInfo(@TypeOf(sink)).pointer.child;
@@ -2255,71 +2311,88 @@ pub fn DeviceBatch(comptime D: type) type {
                         if (@as(u64, @bitCast(xg)) != @as(u64, @bitCast(l))) corr = true;
                     };
                 }
-                const state_key = self.stateKey(id, plane_key);
                 const m = &bp.meta[id];
                 const ref = bp.ref[@as(usize, id) * n_u ..][0..n_u];
-                if (!corr and m.class == class and m.key == state_key) replay: {
-                    inline for (0..n_u) |u| {
-                        const tol = bp.tol.reltol * @max(@abs(lx[u]), @abs(ref[u])) +
-                            (if (comptime D.u_kinds[u] == .voltage) bp.tol.vntol else bp.tol.abstol);
-                        if (!(@abs(lx[u] - ref[u]) <= tol)) break :replay;
-                    }
-                    // Residual form: f(x) ~ f(ref) + J (x - ref). Charges and
-                    // the tape are re-read exactly (values only): a Meyer
-                    // model's C is not dq/dx, and the transient multiplies a
-                    // charge error by 2/dt.
-                    const ws = bp.writes[@as(usize, id) * max_writes ..][0..m.len];
-                    var jl = std.mem.zeroes([n_u][n_u]f64);
-                    var d: [n_u]f64 = undefined;
-                    inline for (0..n_u) |u| d[u] = lx[u] - ref[u];
-                    for (ws) |w| switch (w.tag >> 16) {
-                        rec_jac => jl[(w.tag >> 8) & 0xff][w.tag & 0xff] += w.val,
-                        else => {},
-                    };
-                    // SPICE's second test: the predicted change itself
-                    // within tolerance (an exponential junction moves far
-                    // more current than a vntol-sized step suggests).
-                    for (ws) |w| if (w.tag >> 16 == rec_res) {
-                        const dv = bypassDelta(w, &jl, &d);
-                        if (!(@abs(dv) <= bp.tol.reltol * @abs(w.val) + bp.tol.abstol)) break :replay;
-                    };
-                    for (ws) |w| switch (w.tag >> 16) {
-                        rec_q, 0 => {},
-                        else => {
-                            const p: *f64 = @ptrFromInt(w.ptr & ~@as(usize, 1));
-                            const v = w.val + bypassDelta(w, &jl, &d);
-                            if (w.ptr & 1 != 0) p.* = v else p.* += v;
-                        },
-                    };
+                const inst_now = std.mem.asBytes(&self.instances[id]);
+                const inst_rec = bp.inst[@as(usize, id) * @sizeOf(D.Instance) ..][0..@sizeOf(D.Instance)];
+                if (!corr and m.class == class and m.plane == plane_key and std.mem.eql(u8, inst_now, inst_rec) and
+                    replay(bp, id, m.*, &lx, ref, SinkT.stores))
+                {
+                    // Charges and the tape are re-read exactly (values
+                    // only): a Meyer model's C is not dq/dx, and the
+                    // transient multiplies a charge error by 2/dt.
                     if (comptime has_q) evalQRange(D, RealFor(@hasDecl(D, "collapse")), sink, id, id + 1, sim, null);
                     hits += 1;
                     continue;
                 }
                 misses += 1;
-                // Full evaluation, recorded.
-                var rec: RecordSink(SinkT) = .{ .inner = sink, .id = id, .out = bp.writes[@as(usize, id) * max_writes ..][0..max_writes] };
+                // Full evaluation, recorded, keyed on the bytes it read.
+                @memcpy(inst_rec, inst_now);
+                const at = @as(usize, id) * cells_len;
+                var rec: RecordSink(SinkT, rec_cap) = .{
+                    .inner = sink,
+                    .id = id,
+                    .cells = bp.cells[at..][0..cells_len],
+                    .vals = bp.vals[at..][0..cells_len],
+                    .rows = bp.rows[@as(usize, id) * (rec_cap.res + rec_cap.jac) ..][0 .. rec_cap.res + rec_cap.jac],
+                    .cols = bp.cols[@as(usize, id) * rec_cap.jac ..][0..rec_cap.jac],
+                };
                 self.evalSplit(&rec, id, id + 1, sim, limiting);
                 @memcpy(ref, &lx);
-                m.* = if (corr or rec.overflow) .{} else .{ .class = class, .len = @intCast(rec.n), .key = state_key };
+                m.* = if (corr or rec.overflow) .{} else .{
+                    .class = class,
+                    .n_res = @intCast(rec.n_res),
+                    .n_jac = @intCast(rec.n_jac),
+                    .n_qjac = @intCast(rec.n_qjac),
+                    .plane = plane_key,
+                };
             }
         }
 
-        /// A recorded residual write's first-order move to `d`.
-        fn bypassDelta(w: RecordWrite, jl: *const [n_u][n_u]f64, d: *const [n_u]f64) f64 {
-            if (w.tag >> 16 != rec_res) return 0;
-            var dv: f64 = 0;
-            for (jl[(w.tag >> 8) & 0xff], d) |j, dx| dv += j * dx;
-            return dv;
+        /// Replays instance `id`'s recording `m` at `lx` in residual form,
+        /// f(x) ~ f(ref) + J (x - ref), when every unknown and every
+        /// predicted residual change is within tolerance; false, writing
+        /// nothing, otherwise. `stores`: the cells are staging positions.
+        fn replay(bp: *const Bypass, id: u32, m: Bypass.Meta, lx: *const [n_u]f64, ref: *const [n_u]f64, comptime stores: bool) bool {
+            std.debug.assert(m.class != 0);
+            std.debug.assert(m.n_res <= rec_cap.res);
+            std.debug.assert(m.n_jac <= rec_cap.jac);
+            std.debug.assert(m.n_qjac <= rec_cap.qjac);
+            var d: [n_u]f64 = undefined;
+            inline for (0..n_u) |u| {
+                const tol = bp.tol.reltol * @max(@abs(lx[u]), @abs(ref[u])) +
+                    (if (comptime D.u_kinds[u] == .voltage) bp.tol.vntol else bp.tol.abstol);
+                d[u] = lx[u] - ref[u];
+                // An infinite `d` passes an infinite `tol`; the dense
+                // product this replaced turned it into a NaN and refused.
+                if (!(@abs(d[u]) <= tol) or std.math.isInf(d[u])) return false;
+            }
+            const at = @as(usize, id) * cells_len;
+            const cells = bp.cells[at..][0..cells_len];
+            const vals = bp.vals[at..][0..cells_len];
+            const rows = bp.rows[@as(usize, id) * (rec_cap.res + rec_cap.jac) ..][0 .. rec_cap.res + rec_cap.jac];
+            const cols = bp.cols[@as(usize, id) * rec_cap.jac ..][0..rec_cap.jac];
+            // J (x - ref) per local row, each row's columns in ascending
+            // order from +0.0. A pattern entry no write fills would add a
+            // ±0 product, which leaves a sum that is never -0 unchanged.
+            var jd: [n_u]f64 = @splat(0);
+            const js = rec_cap.res;
+            for (cols[0..m.n_jac], rows[js..][0..m.n_jac], vals[js..][0..m.n_jac]) |c, r, v| jd[r] += v * d[c];
+            // SPICE's second test: the predicted change itself within
+            // tolerance (an exponential junction moves far more current
+            // than a vntol-sized step suggests).
+            for (rows[0..m.n_res], vals[0..m.n_res]) |r, v| {
+                if (!(@abs(jd[r]) <= bp.tol.reltol * @abs(v) + bp.tol.abstol)) return false;
+            }
+            for (cells[0..m.n_res], rows[0..m.n_res], vals[0..m.n_res]) |p, r, v| put(p, v + jd[r], stores);
+            for (cells[js..][0..m.n_jac], vals[js..][0..m.n_jac]) |p, v| put(p, v, stores);
+            const qs = rec_cap.res + rec_cap.jac;
+            for (cells[qs..][0..m.n_qjac], vals[qs..][0..m.n_qjac]) |p, v| put(p, v, stores);
+            return true;
         }
 
-        /// What a recording depends on beyond the unknowns: the planes it
-        /// wrote and the instance's bytes, which hold latched and held
-        /// values. `State` is `updateState`'s staging, which `eval` never
-        /// reads.
-        fn stateKey(self: *Self, id: u32, plane_key: u64) u64 {
-            var h = std.hash.Wyhash.init(plane_key);
-            h.update(std.mem.asBytes(&self.instances[id]));
-            return h.final();
+        inline fn put(p: *f64, v: f64, comptime stores: bool) void {
+            if (stores) p.* = v else p.* += v;
         }
 
         /// The stored analysis state at eval time `t`.
@@ -3414,14 +3487,8 @@ fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool, comp
         pub inline fn jacPtr(s: *const Sk, id: u32, comptime ru: usize, comptime cu: usize) *f64 {
             return &s.g_vals[s.slot(id, ru, cu)];
         }
-        pub inline fn qPtr(s: *const Sk, row: u32) *f64 {
-            return &s.q_vec[row];
-        }
         pub inline fn qJacPtr(s: *const Sk, id: u32, comptime ru: usize, comptime cu: usize) *f64 {
             return &s.c_vals[s.slot(id, ru, cu)];
-        }
-        pub inline fn tapePtr(s: *const Sk, id: u32, j: usize) *f64 {
-            return &s.q_tape[@as(usize, id) * (comptime lteSites(D).len) + j];
         }
 
         /// Host sink over batch `b`, writing into `pl`. `xo` may be undefined

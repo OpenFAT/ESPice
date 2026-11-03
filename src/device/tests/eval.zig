@@ -1589,3 +1589,94 @@ test "BSIM4 linked admission and limited planes agree with forced wide across mo
     try std.testing.expect(admitted == 0 or admitted == 2);
     std.debug.print("bsim4-mode-gate: checked={d} admitted={d}\n", .{ checked, admitted });
 }
+
+test "a bypass replay stamps the plain evaluation's linearization at its recording" {
+    try checkBypassReplay(false);
+}
+
+/// Records one mos1 instance at x0 and replays it at a nearby x1. Oracle:
+/// the plain evaluation (which never bypasses) at x0 gives f0 and the
+/// assembled Jacobian G0; the replay must stamp G0 itself and f0 + G0 (x1 -
+/// x0), and re-read the charges at x1 exactly. `tied`: the gate shares the
+/// source's node (a depletion load), so the source row follows the unwritten
+/// gate row.
+fn checkBypassReplay(tied: bool) !void {
+    const D = @import("models").mos1;
+    const n = contract.nU(D);
+    // Node 0 is ground: the instance sits on nodes 1..n, x[0] stays 0.
+    const m = n + 1;
+    const U = D.U;
+    const vt = deviceVtable(D, "mos1_bypass_test");
+    const a = std.testing.allocator;
+    var rows: [m * m]u32 = undefined;
+    var columns: [m + 1]u32 = undefined;
+    for (&rows, 0..) |*row, i| row.* = @intCast(i % m);
+    for (&columns, 0..) |*column, i| column.* = @intCast(i * m);
+    const pattern: impl.test_access.PatternView = .{ .col_ptr = &columns, .row_idx = &rows, .n = m, .trash_slot = m * m };
+    const Planes = struct {
+        g: [m * m + 1]f64 = @splat(0),
+        c: [m * m + 1]f64 = @splat(0),
+        rhs: [m + 1]f64 = @splat(0),
+        q: [m + 1]f64 = @splat(0),
+        fn run(self: *@This(), f: anytype, b: Batch, x: []const f64) void {
+            self.* = .{};
+            f(b.ctx, &.{ .g_vals = &self.g, .c_vals = &self.c, .rhs = &self.rhs, .q_vec = &self.q }, 0, 1, x, 0);
+        }
+    };
+    // Tied: series resistors keep the internal nodes and branch currents,
+    // so the source row carries its branch current's entry.
+    var model: D.Model = .{ .vto = if (tied) -0.7 else 0.7, .kp = 110e-6, .gamma = 0.4, .lambda = 0.04, .phi = 0.65, .w = 0.5e-6, .l = 0.18e-6, .cgso = 1e-10, .cgdo = 1e-10, .rd = if (tied) 10 else 0, .rs = if (tied) 10 else 0 };
+    D.derive(Real, &model);
+    const instance: D.Instance = .{};
+    const collapse = D.collapse(Real, &model, &instance);
+    var nodes: [n]u32 = undefined;
+    for (&nodes, collapse, 0..) |*node, alias, u| node.* = 1 + if (alias) |root| root else @as(u32, @intCast(u));
+    if (tied) nodes[@intFromEnum(U.g)] = nodes[@intFromEnum(U.s)];
+    const proto = try vt.proto_create(a).unwrap();
+    defer proto.destroy(proto.ctx, a);
+    try vt.proto_add(proto.ctx, a, @ptrCast(&model), @ptrCast(&instance), &nodes).unwrap();
+    const b = try proto.finalize(proto.ctx, a, pattern).unwrap();
+    defer b.hooks.deinit(b.ctx, a);
+    b.hooks.clear_limits.?(b.ctx);
+    b.hooks.set_sim_state(b.ctx, .{ .kind = .tran, .analog_initial = false, .iteration = 2 });
+    b.hooks.set_bypass.?(b.ctx, .{ .reltol = 1e-4, .vntol = 1e-6, .abstol = 1e-12 });
+    const store: *DeviceBatch(D) = @ptrCast(@alignCast(b.ctx));
+
+    // Per unknown in `U` order (d g s b di si, then the two series
+    // currents), its value and its move; a collapsed alias takes its root's.
+    // Within both bypass tests: |dx| under reltol |x| + vntol (abstol for a
+    // current), |G0 dx| under reltol |f0| + abstol.
+    const at = [n]f64{ 1.0, 1.2, 0.1, -0.2, 0.99, 0.11, 1e-5, -1e-5 };
+    const step = [n]f64{ 3e-6, 2e-6, -1e-6, 1e-6, 2e-6, -2e-6, 1e-10, -1e-10 };
+    var x0: [m]f64 = @splat(0);
+    var x1: [m]f64 = @splat(0);
+    for (nodes, collapse, at, step) |node, alias, v, dv| if (alias == null) {
+        x0[node] = v;
+        x1[node] = v + dv;
+    };
+
+    var plain0: Planes = .{};
+    plain0.run(b.eval, b, &x0);
+    var plain1: Planes = .{};
+    plain1.run(b.eval, b, &x1);
+    var got: Planes = .{};
+    // The recording is a plain evaluation that also keeps its writes.
+    got.run(b.eval_newton, b, &x0);
+    try std.testing.expectEqual(@as(usize, 0), store.bypass.?.hits.load(.monotonic));
+    try std.testing.expectEqualSlices(f64, &plain0.g, &got.g);
+    try std.testing.expectEqualSlices(f64, &plain0.rhs, &got.rhs);
+    got.run(b.eval_newton, b, &x1);
+    try std.testing.expectEqual(@as(usize, 1), store.bypass.?.hits.load(.monotonic));
+    try std.testing.expectEqualSlices(f64, &plain0.g, &got.g);
+    try std.testing.expectEqualSlices(f64, &plain0.c, &got.c);
+    try std.testing.expectEqualSlices(f64, &plain1.q, &got.q);
+    // Row r moves by sum_c G0[r][c] (x1[c] - x0[c]); slot c * m + r.
+    var moved: [m]f64 = @splat(0);
+    var largest: f64 = 0;
+    for (1..m) |r| {
+        for (1..m) |c| moved[r] += plain0.g[c * m + r] * (x1[c] - x0[c]);
+        largest = @max(largest, @abs(moved[r]));
+    }
+    try std.testing.expect(largest > 1e-12);
+    for (1..m) |r| try std.testing.expectApproxEqAbs(moved[r], got.rhs[r] - plain0.rhs[r], 1e-6 * largest);
+}
