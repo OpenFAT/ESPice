@@ -372,7 +372,10 @@ fn graph(c: Cfg, vera: *Build.Dependency, gompute: *Module, models: []const Mode
     const b = c.b;
     // Device code: always stripped (DWARF on generated models crashed NVPTX).
     var dev = c;
-    dev.strip = true;
+    // On the host they follow -Ddebug-info: the exe's LLVM module imports the
+    // models, and a stripped model inlined into an unstripped caller segfaults
+    // Zig 0.18.0-dev.349 while emitting DWARF.
+    dev.strip = c.strip or c.gpu_kernels;
     const contract: Import = .{ .name = "contract", .module = vera.module("contract") };
     const gomp: Import = .{ .name = "gompute", .module = gompute };
     // emitKernels mutates the public Gompute module to import all GPU blobs.
