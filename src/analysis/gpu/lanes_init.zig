@@ -264,8 +264,13 @@ pub fn copyBack(self: *GpuLanes) void {
         for (self.ckts, 0..) |c, l| {
             if (self.detached[l]) continue;
             const hb = c.batches[bi];
-            const dst = @constCast(hb.hooks.gpu_payload.?(hb.ctx).states);
+            const p = hb.hooks.gpu_payload.?(hb.ctx);
+            const dst = @constCast(p.states);
             for (0..b.count) |id| @memcpy(dst[id * ss ..][0..ss], states[(id * N + l) * ss ..][0..ss]);
+            // An attached lane ran its state pass, which held the
+            // `analog initial` results these rows carry (a static lane's
+            // operating point included), as the host's `updateDone` would.
+            if (p.held_initial) |held| held.* = true;
         }
     }
 }
