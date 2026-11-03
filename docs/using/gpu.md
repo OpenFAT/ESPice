@@ -56,13 +56,13 @@ the tested RTX 4060 Laptop), so a type with fewer than about a hundred
 instances is cheaper on the CPU.
 
 A device that holds a waveform history (the `LTRA`, `CPL` and `TXL` lines,
-80 KB to 320 KB per instance) stays on the CPU under every backend, `cuda`
-and `hip` included: one GPU thread would walk the whole history every
-iteration (1973 s against 11 s on the CPU for
-`tran/ltra_tran_long_run_past_8192`). The rest of the circuit stays on the
-GPU. Under `cuda` or `hip`, when the estimate says the whole run is faster on
-the CPU, one `note:` line says so with both prices and suggests
-`--backend cpu` or `auto`; the run stays where it was asked to be.
+80 KB to 320 KB per instance) is priced by that history too: one GPU thread
+walks a whole instance's history every iteration, so `auto` keeps a single
+line on the CPU (`tran/ltra_tran_long_run_past_8192` takes 1973 s under
+`--backend cuda` against 11 s on the CPU) and puts a batch of a thousand
+lines on the GPU. Under `cuda` or `hip` every eligible device still runs on
+the GPU; when the history alone prices far slower there, one `note:` line
+says so and suggests `--backend auto` or `cpu`.
 
 GPU transient lanes require device payloads and supported device state
 kernels. UIC, snapshots, OPtran, tangents, gear orders above two, delay
@@ -98,8 +98,9 @@ for HIP lanes.
 The execution configuration's `gpu_lane_cap` defaults to 16,384 device
 lanes. It has no environment-variable override.
 
-`zig build test -- --backend cuda --jobs 1` runs the fixture corpus under `--backend cuda`, one
-deck at a time; GPU results are compared within each fixture's tolerance.
+`zig build test -- --backend auto --jobs 1` runs the fixture corpus under `--backend auto`, one
+deck at a time, as the release does; `--backend cuda` puts every eligible device on the
+GPU instead. GPU results are compared within each fixture's tolerance.
 
 ## What fails, and when
 

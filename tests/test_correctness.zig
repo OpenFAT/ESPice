@@ -1,8 +1,10 @@
 //! End-to-end fixture runner: simulates every tests/conformance/tests/netlist deck in a child
 //! espice and checks the raw output against its embedded .expected.json
 //! oracle. An unsupported feature is a failure, never a skip. The one skip:
-//! under a GPU backend (`zig build test -- --backend cuda --jobs 1`), a deck with nothing GPU-eligible, which
-//! an explicit `--backend cuda|hip` refuses by design. A deck whose
+//! under an explicit `--backend cuda|hip`, a deck with nothing GPU-eligible,
+//! which that backend refuses by design; `auto`, the release GPU corpus
+//! (`zig build test -- --backend auto --jobs 1`), runs such a deck on the
+//! CPU and compares it like any other. A deck whose
 //! header carries `* KNOWN GAP:` reports XFAIL when it fails, which does not
 //! fail the run, and XPASS when it passes, which does: drop the marker. From
 //! the root:
@@ -93,7 +95,7 @@ const Runner = struct {
     next: std.atomic.Value(u32) = .init(0),
     outcomes: []Outcome,
 };
-/// The `--backend` every run gets; `--backend cuda` checks the GPU path
+/// The `--backend` every run gets; `auto` and `cuda` check the GPU path
 /// against the same expectations. Set once in `main`, before any worker.
 var backend_name: []const u8 = "cpu";
 /// `--perturb`: the factor on every expected column, measure and statistic.
@@ -370,8 +372,9 @@ fn runCase(a: Allocator, io: Io, app: []const u8, path: []const u8, expected: []
     const result = try simulate(a, io, executable, netlist, output, timeout_seconds, oracle.tokenizer);
     if (oracle.expect.status == .@"error") return checkRejection(oracle.expect.category.?, result);
     // An explicit GPU backend refuses a circuit with no GPU-eligible device
-    // (no CPU fallback); under a GPU backend that deck has nothing to compare.
-    if (!equal(backend_name, "cpu") and std.mem.indexOf(u8, result.stderr, "(CircuitNotEligible)") != null) return error.NotEligible;
+    // (no CPU fallback); under it that deck has nothing to compare. `auto`
+    // warns the same reason and runs the deck on the CPU.
+    if (explicitGpu() and std.mem.indexOf(u8, result.stderr, "(CircuitNotEligible)") != null) return error.NotEligible;
     try requireSuccess(result);
     // A `-Dcertify` build reports its KCL record on stderr (src/analysis/certify.zig).
     var lines = std.mem.splitScalar(u8, result.stderr, '\n');
@@ -555,6 +558,11 @@ fn checkRejection(category: []const u8, result: std.process.RunResult) !void {
     }
     diagnostic("  wanted diagnostic category {s}, received:\n{s}\n", .{ category, result.stderr });
     return error.WrongDiagnostic;
+}
+
+/// `--backend cuda` or `hip`: no CPU fallback.
+fn explicitGpu() bool {
+    return !equal(backend_name, "cpu") and !equal(backend_name, "auto");
 }
 
 fn equal(a: []const u8, b: []const u8) bool {

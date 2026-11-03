@@ -450,7 +450,7 @@ pub const GpuContext = struct {
 
         // Every eligible batch demoted; `batches[0]` below needs one.
         if (n_up == 0) return Error.CircuitNotEligible;
-        if (auto_price == null) ctx_cost.recommend(gpa, host, threads, evals, if (driver) |d| d.started() else false, n_gpu - n_up, n_up);
+        if (auto_price == null) _ = ctx_cost.recommend(host);
         if (knobs.gpu_stats != .off) std.debug.print(
             "gpu-stats: resident batches={d} (host-stepped {d}) host batches={d} charge planes={s} lte tape={s}\n",
             .{ n_up, n_stepped, n_cpu, if (resident_charge) "device" else "host-only", if (tape_ok) "device" else "row-plane" },

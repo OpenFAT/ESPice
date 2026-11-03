@@ -1,8 +1,7 @@
 //! One resident device batch. In: a host batch's GPU payload. Out: its
 //! kernels loaded and its models, instances, tapes, lim plane and states
 //! uploaded, resident for the query, or a verdict that it stays on the host
-//! (no image in this build, a held history `price.staysOnHost` keeps there,
-//! or a cold heavy image under `auto`).
+//! (no image in this build, or a cold heavy image under `auto`).
 //! Cites #139.
 //!
 //! Contents:
@@ -25,7 +24,6 @@ const devices = @import("devices.zig");
 const hdl = @import("hdl.zig");
 const context = @import("context.zig");
 const ctx_cost = @import("context_cost.zig");
-const price = @import("price.zig");
 const backend = devices.backend;
 const Host = context.Host;
 const Error = context.Error;
@@ -149,18 +147,12 @@ pub const BatchGpu = struct {
 };
 
 /// Loads batch `b`'s kernels and uploads its working set into `bg`.
-/// False when it stays on the host: no GPU payload, no image in this
-/// build, or a held history `price.staysOnHost` prices on the host. Under
-/// `auto`, an image the driver has not compiled yet fails with
-/// `ImageNotCompiled`.
+/// False when it stays on the host: no GPU payload or no image in this
+/// build. Under `auto`, an image the driver has not compiled yet fails
+/// with `ImageNotCompiled`.
 pub fn loadBatch(gpa: std.mem.Allocator, bg: *BatchGpu, b: device_ir.Batch, explicit: bool, report: bool, knobs: Knobs) !bool {
     const get = b.hooks.gpu_payload orelse return false;
     const p = get(b.ctx);
-    const held = (p.instances.len + p.states.len) / @max(p.count, 1);
-    if (price.staysOnHost(p.count, @floatFromInt(held))) {
-        if (report) std.debug.print("note: GPU batch '{s}' ({d} instances) stays on the CPU: one GPU thread walks each instance's {d} KB of history serially\n", .{ b.type_name, p.count, held >> 10 });
-        return false;
-    }
     const image = ctx_cost.imageOf(p.kernel) orelse hdl.runtimeImage(@ptrCast(get)) orelse {
         if (report) std.debug.print("note: GPU batch '{s}' ({d} instances) stays on the CPU: no kernel image in this build\n", .{ b.type_name, p.count });
         return false;

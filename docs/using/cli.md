@@ -116,9 +116,9 @@ A flag that takes a value accepts it three ways: `--rawfile=out.raw`,
 : Where device models are evaluated: `cpu` (default), `auto`, `cuda` or
   `hip`. `auto` uses a GPU when one is present and the circuit is worth it,
   and falls back to the CPU otherwise. `cuda` and `hip` fail rather than
-  fall back, keep history-holding lines (`LTRA`, `CPL`, `TXL`) on the CPU,
-  and print a `note:` when the estimate says the CPU is faster for the
-  whole run. See [GPU backend](gpu.md).
+  fall back, and print a `note:` when a transmission line's history
+  (`LTRA`, `CPL`, `TXL`) makes the GPU far slower. See
+  [GPU backend](gpu.md).
 
 `--gpu`
 : The same as `--backend=auto`, except that a machine with no usable GPU

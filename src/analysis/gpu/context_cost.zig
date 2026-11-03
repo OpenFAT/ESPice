@@ -12,7 +12,7 @@
 //! - `pub const heavy_image_bytes: usize`
 //! - `pub fn admit(gpa: std.mem.Allocator, host: Host, threads: u32, evals: f64, driver_up: bool) !Price`
 //! - `pub fn quote(gpa: std.mem.Allocator, host: Host, threads: u32) !price.Cost`
-//! - `pub fn recommend(gpa: std.mem.Allocator, host: Host, threads: u32, evals: f64, driver_up: bool, n_host: usize, n_up: usize) void`
+//! - `pub fn recommend(host: Host) bool`
 //! - `pub fn imageOf(kernel: []const u8) ?[:0]const u8`
 //! - `pub fn imageWarm(image: []const u8, knobs: Knobs) bool`
 //! - `pub fn markWarm(image: []const u8, knobs: Knobs) void`
@@ -149,6 +149,8 @@ pub const heavy_image_bytes: usize = 1 << 20;
 const StubBatch = struct {
     spin_ns: u64,
     count: u32 = 1,
+    /// `GpuPayload.instances`: `count` instances' bytes.
+    held: []const u8 = &.{},
     evals: u32 = 0,
 
     fn eval(ctx: *anyopaque, _: *const Planes, _: u32, _: u32, _: []const f64, _: f64) void {
@@ -166,7 +168,7 @@ const StubBatch = struct {
             .n_u = 2,
             .models = &.{},
             .model_of = &.{},
-            .instances = &.{},
+            .instances = self.held,
             .gath = &.{},
             .rhs_idx = &.{},
             .slots = &.{ 0, 1 },
@@ -285,16 +287,6 @@ pub fn quote(gpa: std.mem.Allocator, host: Host, threads: u32) !price.Cost {
     for (host.batches) |b| {
         const get = b.hooks.gpu_payload orelse continue;
         const p = get(b.ctx);
-        // The probe's evals at its made-up x must leave no trace in what
-        // the run reads (a status latch, an initial block's latch): an
-        // explicit device run probes too, and its output is the same
-        // with or without the advice.
-        const kept_instances = try gpa.dupe(u8, p.instances);
-        defer gpa.free(kept_instances);
-        const kept_states = try gpa.dupe(u8, p.states);
-        defer gpa.free(kept_states);
-        defer @memcpy(@constCast(p.instances), kept_instances);
-        defer @memcpy(@constCast(p.states), kept_states);
         var host_ns: u64 = std.math.maxInt(u64);
         for (0..3) |_| {
             const t0 = nowNs();
@@ -318,18 +310,31 @@ pub fn quote(gpa: std.mem.Allocator, host: Host, threads: u32) !price.Cost {
     return price.ofQuery(rows, fixed_us, lanes);
 }
 
-/// Under an explicit device backend, one stderr line when `quote` prices
-/// the CPU faster for this query: how many batches stay on the host and
-/// both prices. Advice only; the run stays where it was asked to.
-pub fn recommend(gpa: std.mem.Allocator, host: Host, threads: u32, evals: f64, driver_up: bool, n_host: usize, n_up: usize) void {
-    if (evals < 20) return;
-    const init_us: f64 = if (driver_up) 0 else cost_init_us;
-    const q = quote(gpa, host, threads) catch return;
-    if (gpuWins(q.cpu_us, q.gpu_us, evals, init_us)) return;
+/// Under an explicit device backend, one stderr line when the history walk
+/// alone (`price.ofHistory`: counts and held bytes, no probe, so the same
+/// text on every run) loses on the device by far. Advice only; every
+/// eligible batch still runs where it was asked to. True when it printed.
+pub fn recommend(host: Host) bool {
+    var hist: price.Cost = .{ .cpu_us = 0, .gpu_us = 0 };
+    var n_lines: usize = 0;
+    var n_rows: usize = 0;
+    for (host.batches) |b| {
+        const get = b.hooks.gpu_payload orelse continue;
+        const p = get(b.ctx);
+        n_rows += 1;
+        const held: f64 = @floatFromInt((p.instances.len + p.states.len) / @max(p.count, 1));
+        if (held <= price.hist_floor_bytes) continue;
+        n_lines += 1;
+        const c = price.ofHistory(&.{.{ .count = @max(p.count, 1), .host_us = 0, .held_bytes = held }});
+        hist.cpu_us += c.cpu_us;
+        hist.gpu_us += c.gpu_us;
+    }
+    if (!price.historyLoses(hist)) return false;
     std.debug.print(
-        "note: {d} of {d} GPU-eligible batches stay on the CPU, and the CPU is priced faster for this query ({d:.0} us against {d:.0} us per eval over {d:.0} evals); `--backend cpu` or `auto` runs it there\n",
-        .{ n_host, n_host + n_up, q.cpu_us, q.gpu_us, evals },
+        "note: {d} of {d} GPU-eligible device types hold a waveform history that one GPU thread per instance walks serially, priced at {d:.0} us per iteration against {d:.0} us on the CPU; `--backend auto` or `cpu` runs this circuit faster\n",
+        .{ n_lines, n_rows, hist.gpu_us, hist.cpu_us },
     );
+    return true;
 }
 
 /// The embedded image that exports `kernel`, or null.
@@ -516,27 +521,36 @@ test "Cost.admit prices a measured host eval and leaves the planes alone" {
     }
 }
 
-test "Cost.recommend probes once and leaves the planes alone" {
+test "Cost.recommend speaks for one history line, not for a thousand" {
     var gpu_hooks: device_ir.Hooks = undefined;
     gpu_hooks.gpu_payload = StubBatch.payload;
     var vals: [8]f64 = @splat(7);
     const planes: Planes = .{ .g_vals = vals[0..2], .c_vals = vals[2..4], .rhs = vals[4..6], .q_vec = vals[6..8] };
-    var dev: StubBatch = .{ .spin_ns = 0 };
-    const batches = [_]device_ir.Batch{dev.batch(&gpu_hooks)};
-    const host: Host = .{ .batches = &batches, .planes = planes, .n = 2, .trash_slot = 2, .has_charge = false, .knobs = .{} };
-    // A free host eval: the CPU is priced faster, and the note prints.
-    recommend(std.testing.allocator, host, 1, 1e6, true, 0, 1);
-    try std.testing.expectEqual(@as(u32, 3), dev.evals);
-    // Too few evals to price: no probe.
-    recommend(std.testing.allocator, host, 1, 19, true, 0, 1);
-    try std.testing.expectEqual(@as(u32, 3), dev.evals);
-    try std.testing.expectEqualSlices(f64, &@as([8]f64, @splat(7)), &vals);
+    // ltra.va's history, 320 KB an instance.
+    const history = try std.testing.allocator.alloc(u8, 1000 * 5 * 8192 * 8);
+    defer std.testing.allocator.free(history);
+    for ([_]struct { count: u32, speaks: bool }{ .{ .count = 1, .speaks = true }, .{ .count = 1000, .speaks = false } }) |c| {
+        var dev: StubBatch = .{ .spin_ns = 0, .count = c.count, .held = history[0 .. c.count * 5 * 8192 * 8] };
+        const batches = [_]device_ir.Batch{dev.batch(&gpu_hooks)};
+        const host: Host = .{ .batches = &batches, .planes = planes, .n = 2, .trash_slot = 2, .has_charge = false, .knobs = .{} };
+        try std.testing.expectEqual(c.speaks, recommend(host));
+        // No probe: the advice is the same on every run.
+        try std.testing.expectEqual(@as(u32, 0), dev.evals);
+    }
+    // A compact model's few bytes: no advice.
+    var small: StubBatch = .{ .spin_ns = 0, .held = history[0..256] };
+    const batches = [_]device_ir.Batch{small.batch(&gpu_hooks)};
+    try std.testing.expect(!recommend(.{ .batches = &batches, .planes = planes, .n = 2, .trash_slot = 2, .has_charge = false, .knobs = .{} }));
 }
 
 test "price: each recorded deck lands on its measured winner" {
     // placement.tsv: measured walls and the price's inputs, with provenance.
-    // A deck within `cost_margin` of a tie may go either way; a `known`
-    // deck must miss, so a fix that lands it fails until the marker goes.
+    // The verdict: a deck within `cost_margin` of a tie may go either way;
+    // a `known` deck must miss, so a fix that lands it fails until the
+    // marker goes. The size: the priced wall ratio (setup included) within
+    // `tolerance` of the measured one either way, the oracle's own accuracy
+    // (one deck's walls wander 2-5x on the loaded machine that measured them).
+    const tolerance: f64 = 10;
     var rows_buf: [8]price.Row = undefined;
     var lines = std.mem.tokenizeScalar(u8, @embedFile("placement.tsv"), '\n');
     var decks: usize = 0;
@@ -563,25 +577,20 @@ test "price: each recorded deck lands on its measured winner" {
                 .held_bytes = try std.fmt.parseFloat(f64, v.next().?),
             };
         }
-        const rows = rows_buf[0..n_rows];
         const cpu_s = try std.fmt.parseFloat(f64, f.next().?);
         const cuda_s = try std.fmt.parseFloat(f64, f.next().?);
-        const host = try std.fmt.parseInt(usize, f.next().?, 10);
         const known = !std.mem.eql(u8, f.next().?, "-");
         try std.testing.expect(f.next() == null);
 
-        var kept: usize = 0;
-        for (rows) |r| kept += @intFromBool(price.staysOnHost(r.count, r.held_bytes));
-        if (kept != host) std.debug.print("{s}: {d} batches priced on the host, {d} recorded\n", .{ deck, kept, host });
-        try std.testing.expectEqual(host, kept);
-        // The measurement backs each one: the resident run lost by the bar.
-        if (host > 0) try std.testing.expect(cuda_s > price.host_ratio * cpu_s);
-
-        const q = price.ofQuery(rows, fixed_us, 1);
+        const q = price.ofQuery(rows_buf[0..n_rows], fixed_us, 1);
+        const priced = (init_us + evals * q.gpu_us) / (evals * q.cpu_us);
+        const measured = cuda_s / cpu_s;
         const on_gpu = gpuWins(q.cpu_us, q.gpu_us, evals, init_us);
         const right = if (on_gpu) cost_margin * cpu_s >= cuda_s else cost_margin * cuda_s >= cpu_s;
-        if (right == known) std.debug.print("{s}: priced cpu={d:.1} gpu={d:.1} us per eval, {s}; measured cpu {d} s cuda {d} s\n", .{ deck, q.cpu_us, q.gpu_us, if (on_gpu) "GPU" else "CPU", cpu_s, cuda_s });
+        const sized = priced < tolerance * measured and measured < tolerance * priced;
+        if (right == known or !sized) std.debug.print("{s}: priced cpu={d:.1} gpu={d:.1} us per eval, {s}, {d:.1}x; measured cpu {d} s cuda {d} s, {d:.1}x\n", .{ deck, q.cpu_us, q.gpu_us, if (on_gpu) "GPU" else "CPU", priced, cpu_s, cuda_s, measured });
         try std.testing.expect(right != known);
+        try std.testing.expect(sized);
         decks += 1;
         misses += @intFromBool(known);
     }

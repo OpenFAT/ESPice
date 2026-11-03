@@ -1,30 +1,31 @@
-# Measured placement oracle for price.zig and context_cost.zig `gpuWins` (the "price
-# picks the measured winner" test in context_cost.zig).
+# Measured placement oracle for price.zig and context_cost.zig `gpuWins` (the test
+# "price: each recorded deck lands on its measured winner" in context_cost.zig).
 # cpu_s, cuda_s: wall seconds of one process, run the way the corpus runs it
 # (`--backend X --format=binary -b -r out deck`), RTX 4060 Laptop (sm_89, persistence
 # off) and i9-14900HX, ReleaseSafe espice built from ea150655 (scratchpad rs-tip),
-# 2026-11-02. Medians of 3 except ltra_tran_long_run_past_8192 and
-# cpl_tran_history_past_2048 on cuda (one run each: 1973 s and 317 s, the second with
-# --timing-in-depth). Every cuda run had every batch resident: that binary has no host
-# routing, so `host` batches lost the device run by the measured ratio.
+# 2026-11-02. Medians of 3 except txl_wide_batch_1000 (one run each) and, on cuda,
+# ltra_tran_long_run_past_8192 and cpl_tran_history_past_2048 (1973 s and 317 s, the second with
+# --timing-in-depth). Every cuda run had every eligible batch on the device, as the
+# price assumes.
 # evals: Newton evals of the run (--timing-in-depth, ESPICE_GPU_STATS census).
 # rows: count:host_us:held_bytes per GPU-eligible batch. host_us from the `auto` probe
-# (ESPICE_GPU_STATS `cpu=`, split by instance count; R and V below the probe's 1 us
+# (ESPICE_GPU_STATS `cpu=`, split across the types by instance count and model weight; R and V below the probe's 1 us
 # print are 0.1). held_bytes of the history lines from their models/*.va caps.
 # fixed_us: ESPICE_GPU_STATS `gpu=` minus 0.12 of `cpu=` (that binary's kernel term), or
 # 40 where the planes are a few cells. init_us: a cold driver (each deck is a process).
-# host: batches the explicit-device placement keeps on the host (price.staysOnHost).
-# known: `-`, or the cause of a deck the price puts on the wrong side (it must fail).
-deck	evals	init_us	fixed_us	rows	cpu_s	cuda_s	host	known
-tran/ltra_tran_long_run_past_8192	50014	350000	40	2:0.1:64,1:0.1:64,1:0.1:327680	10.985	1973.4	1	-
-tran/cpl_tran_history_past_2048	32026	350000	40	4:0.1:64,1:0.1:64,1:0.3:147456	0.5755	317.2	1	-
-tran/bench_tline_cpl3_4_line	2034	350000	40	8:0.1:64,1:0.1:64,1:0.5:278528	0.0433	45.25	1	-
-tran/cpl_tran_even_mode	4024	350000	40	4:0.1:64,1:0.1:64,1:0.3:147456	0.0389	30.81	1	-
-tran/bench_tline_txl1_1_line	1170	350000	40	4:0.5:256,2:0.1:64,1:0.2:81920	0.0124	3.53	1	-
-tran/device_lossy_tline	1262	350000	40	2:0.1:64,1:0.1:64,1:0.1:327680	0.0157	1.83	1	-
-four/sine	50014	350000	40	1:0.1:64,1:0.1:64	0.014	2.287	0	-
-dc/device_hisim2	1704	350000	40	1:10:1024,2:0.1:64	0.023	3.210	0	-
-stress/scaling_parallel_inverters_100	2481	350000	41.6	100:10:256,100:10:256,2:0.1:64	0.0556	0.454	0	-
-stress/scaling_parallel_inverters_2000	2485	350000	104	2000:138:256,2000:138:256,2:0.1:64	0.624	0.794	0	-
-stress/scaling_inverter_chain_256	6986	350000	45	256:16:256,256:16:256,2:0.1:64	0.652	1.019	0	-
-stress/scaling_inverter_chain_4k	6955	350000	146	4000:142.5:256,4000:142.5:256,2:0.1:64	21.3	3.80	0	the probe prices the host eval at 285 us, the run spends 3.1 ms per eval (21.3 s over 6955)
+# known: `-`, or the cause of a deck the price puts on the wrong side (its verdict
+# must miss; its size must still hold).
+deck	evals	init_us	fixed_us	rows	cpu_s	cuda_s	known
+tran/ltra_tran_long_run_past_8192	50014	350000	40	2:0.1:64,1:0.1:64,1:0.1:327680	10.985	1973.4	-
+tran/cpl_tran_history_past_2048	32026	350000	40	4:0.1:64,1:0.1:64,1:0.3:147456	0.5755	317.2	-
+tran/bench_tline_cpl3_4_line	2034	350000	40	8:0.1:64,1:0.1:64,1:0.5:278528	0.0433	45.25	-
+tran/cpl_tran_even_mode	4024	350000	40	4:0.1:64,1:0.1:64,1:0.3:147456	0.0389	30.81	-
+tran/bench_tline_txl1_1_line	1170	350000	40	4:0.5:256,2:0.1:64,1:0.2:81920	0.0124	3.53	-
+tran/device_lossy_tline	1262	350000	40	2:0.1:64,1:0.1:64,1:0.1:327680	0.0157	1.83	-
+four/sine	50014	350000	40	1:0.1:64,1:0.1:64	0.014	2.287	-
+dc/device_hisim2	1704	350000	40	1:10:1024,2:0.1:64	0.023	3.210	-
+stress/scaling_parallel_inverters_100	2481	350000	41.6	100:10:256,100:10:256,2:0.1:64	0.0556	0.454	-
+stress/scaling_parallel_inverters_2000	2485	350000	104	2000:138:256,2000:138:256,2:0.1:64	0.624	0.794	-
+stress/scaling_inverter_chain_256	6986	350000	45	256:16:256,256:16:256,2:0.1:64	0.652	1.019	-
+stress/scaling_inverter_chain_4k	6955	350000	146	4000:142.5:256,4000:142.5:256,2:0.1:64	21.3	3.80	the probe prices the host eval at 285 us, the run spends 3.1 ms per eval (21.3 s over 6955)
+tran/txl_wide_batch_1000	174	350000	59.4	1000:50:81920,2000:4:64,1:0.1:64	6.60	3.44	-
