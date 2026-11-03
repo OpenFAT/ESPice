@@ -1,12 +1,12 @@
 .{
     .name = .espice,
-    .version = "0.3.0",
+    .version = "0.20.0",
     .fingerprint = 0x8b858d53fd1540a,
     .minimum_zig_version = "0.18.0-dev.349+d924f83bf",
     .dependencies = .{
         .vera = .{
-            .url = "git+https://github.com/OpenFAT/VerA#3fabee3cd24baefc72c32ea052d032e4757b10be",
-            .hash = "vera-0.20.0-fzAu7FQXLgFAvPn0QWF5P0zfUrFZY-Jz-_8DhcZfPAIf",
+            .url = "git+https://github.com/OpenFAT/VerA#0bc0092b345e7b87977e7240660ce6767ea78367",
+            .hash = "vera-0.23.0-fzAu7BznSAHTovhsbqKB1WQBFu66b65RDnBfVhQi4EF9",
         },
         .gompute = .{
             .url = "git+https://github.com/OmarSiwy/Gompute#15ab58137b094db1a82a74f67b0b0cba1c57d7af",
