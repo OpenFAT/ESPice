@@ -583,9 +583,9 @@ pub const PatternBuilder = struct {
     }
 
     /// Sorts and dedups the keys into an `n`-column CSC pattern and returns
-    /// nnz. Rows come out ascending within each column. O(keys): a counting
-    /// sort by column, then each column's few rows sorted in place, two
-    /// passes over the keys where a 16-bit radix sort makes four.
+    /// nnz. Rows come out ascending within each column. O(keys + n), with no
+    /// comparison sort, so a hub column (a supply or a shared gate net: 800k
+    /// keys on 200,000 parallel inverters) costs what a short one does.
     /// Caller owns `col_ptr_out` (n + 1 entries) and `row_idx_out` (nnz) and
     /// must free them with `gpa`; `scratch` is only used during the call.
     /// On error neither output is written. Asserts that every row and column
@@ -594,34 +594,52 @@ pub const PatternBuilder = struct {
         const all = self.keys.items;
         const col_ptr = try gpa.alloc(u32, n + 1);
         errdefer gpa.free(col_ptr);
+        const row_ptr = try scratch.alloc(u32, n + 1);
+        defer scratch.free(row_ptr);
+        const by_row = try scratch.alloc(u32, all.len);
+        defer scratch.free(by_row);
         const rows = try scratch.alloc(u32, all.len);
         defer scratch.free(rows);
-        const next = try scratch.alloc(u32, n);
-        defer scratch.free(next);
-        // Counting sort by column.
+        // A counting sort by row, then a stable one by column: each
+        // column's rows arrive ascending. Each `*_ptr[i]` serves as bucket
+        // i's cursor and ends as its end, which is bucket i + 1's start.
         @memset(col_ptr, 0);
+        @memset(row_ptr, 0);
         for (all) |k| {
             assert(k >> 32 < n);
+            assert(@as(u32, @truncate(k)) < n);
             col_ptr[@intCast((k >> 32) + 1)] += 1;
+            row_ptr[@as(u32, @truncate(k)) + 1] += 1;
         }
-        for (0..n) |j| col_ptr[j + 1] += col_ptr[j];
-        @memcpy(next, col_ptr[0..n]);
-        for (all) |k| {
-            const c: usize = @intCast(k >> 32);
-            rows[next[c]] = @truncate(k);
-            next[c] += 1;
-        }
-        // Each column sorted, then compacted toward the front: a write at
-        // `m` never passes the read.
-        var m: u32 = 0;
-        var lo: u32 = 0;
         for (0..n) |j| {
-            const hi = col_ptr[j + 1];
+            col_ptr[j + 1] += col_ptr[j];
+            row_ptr[j + 1] += row_ptr[j];
+        }
+        for (all) |k| {
+            const r: u32 = @truncate(k);
+            by_row[row_ptr[r]] = @intCast(k >> 32);
+            row_ptr[r] += 1;
+        }
+        var lo: u32 = 0;
+        for (row_ptr[0..n], 0..) |hi, r| {
+            for (by_row[lo..hi]) |c| {
+                rows[col_ptr[c]] = @intCast(r);
+                col_ptr[c] += 1;
+            }
+            lo = hi;
+        }
+        assert(lo == all.len);
+        // Each column compacted toward the front: a write at `m` never
+        // passes the read.
+        var m: u32 = 0;
+        lo = 0;
+        for (0..n) |j| {
+            const hi = col_ptr[j];
             const col = rows[lo..hi];
-            std.mem.sortUnstable(u32, col, {}, std.sort.asc(u32));
             const first = m;
             for (col) |r| {
                 assert(r < n);
+                if (m != first) assert(rows[m - 1] <= r);
                 if (m != first and rows[m - 1] == r) continue;
                 rows[m] = r;
                 m += 1;
