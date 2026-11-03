@@ -27,6 +27,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const gompute = @import("gompute");
+const drv = @import("driver.zig");
 const artifacts = @import("gompute_kernels");
 const lk = @import("solver").lane_kernels;
 
@@ -300,11 +301,11 @@ fn readDevices(out: []Device) usize {
     const be = backend orelse return 0;
     const dynamic = gompute.runtime.dynamic;
     const rt: dynamic.Backend = if (be == .cuda) .cuda else .hip;
-    const count = dynamic.deviceCount(rt) catch return 0;
+    const count = drv.deviceCount(rt) catch return 0;
     var infos: [devices_max]DeviceInfo = undefined;
     var n: usize = 0;
     for (0..@min(count, out.len)) |o| {
-        var c = dynamic.Compute.initDevice(rt, @intCast(o)) catch continue;
+        var c = drv.computeOn(rt, @intCast(o)) catch continue;
         defer c.deinit();
         const info = c.info() catch continue;
         if (info.fp64_ratio == 0) continue;

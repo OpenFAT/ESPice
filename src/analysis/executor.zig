@@ -31,7 +31,6 @@ const op = @import("dc/op.zig");
 const opvars_post = @import("post/opvars.zig");
 const gpu = @import("gpu/context.zig");
 const gpu_lu = @import("gpu/lu.zig");
-const gpu_devices = @import("gpu/devices.zig");
 const par_eval = @import("par_eval.zig");
 const ParEval = par_eval.ParEval;
 const worker = @import("worker.zig");
@@ -366,13 +365,10 @@ pub const Executor = struct {
             self.circuit.par_eval = null;
             if (par) |*p| p.deinit();
         }
-        // The query's device eval and device LU open on the least loaded
-        // device (multi-GPU stage 2); one device keeps them on it. An
-        // explicit `--backend cpu` opens no device: reading the device table
-        // starts the driver, ~140 ms a run on a machine with a GPU.
-        const devices = gpu_devices;
-        const placed: devices.Placement = if (self.config.backend == .cpu) .{ .slot = null, .prev = devices.ordinal } else devices.place();
-        defer placed.release();
+        // The device eval and the device LU each place the query on the
+        // least loaded device (multi-GPU stage 2) only once the price admits
+        // them (`GpuContext.init`, `GpuLu`): reading the device table starts
+        // the driver, 265-465 ms of wall on a tiny deck `auto` keeps on the CPU.
         const gpu_context = try self.prepareGpu(lanes);
         // The bypass serves host evaluations only.
         if (self.config.knobs.bypass and gpu_context == null) {
@@ -388,7 +384,7 @@ pub const Executor = struct {
             self.circuit.detachGpu();
             g.deinit();
         };
-        const lu_context = self.prepareGpuLu();
+        const lu_context = self.prepareGpuLu(gpu_context == null);
         defer {
             self.circuit.lu = null;
             if (lu_context) |l| l.deinit();
@@ -519,9 +515,11 @@ pub const Executor = struct {
     /// The device LU: `Knobs.gpu_lu` (`ESPICE_GPU_LU=1`) forces it on under a
     /// GPU backend, any other value off; otherwise it runs where the matrix is big enough to be
     /// worth asking the driver, on every pivot epoch with enough flops per
-    /// column or in all (`GpuLu.admits`), whatever the card's FP64 rate. A
-    /// driver that refuses leaves the host LU.
-    fn prepareGpuLu(self: *Executor) ?*gpu_lu.GpuLu {
+    /// column or in all (`GpuLu.admits`), whatever the card's FP64 rate. The
+    /// context starts no driver: its kernels load on the first admitted
+    /// epoch, and a driver that refuses them leaves the host LU. `place`:
+    /// no device eval placed this query, so the device LU places itself.
+    fn prepareGpuLu(self: *Executor, place: bool) ?*gpu_lu.GpuLu {
         // A lone operating point refactors on the device (logic_bsim4_10k
         // under `cuda`: 57 iterations, 6.3 s against 7.5-40 s of host LU).
         if (self.config.backend == .cpu or (self.config.gpu_lanes and self.config.may_batch and self.job == .op)) return null;
@@ -535,6 +533,7 @@ pub const Executor = struct {
             return null;
         };
         context.forced = forced;
+        context.place = place;
         self.circuit.lu = context;
         return context;
     }

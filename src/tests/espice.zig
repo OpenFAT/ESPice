@@ -3596,3 +3596,29 @@ test "GPU lane lockstep (#208): mixed sizing, moved edge, extreme wire, failed p
         }
     }
 }
+
+/// Tiny corpus decks `auto` prices on the CPU: cpu 4-64 ms, auto 265-465 ms
+/// while the driver started before the price (price plan, stage 1).
+const tiny_decks = [_][]const u8{
+    "tran/rc_pulse_history_trap.sp",  "op/gigaohm_load.sp",
+    "dc/device_mos1_body_effect.sp",  "dc/device_bsim4_pmos.sp",
+    "ac/bench_bjt_common_emitter.sp", "tran/device_mos1_large_signal.sp",
+    "tran/device_mos6_inverter.sp",   "op/controlled_source_scaling.sp",
+};
+
+test "auto: a deck priced on the CPU never starts the GPU driver (price plan stage 1)" {
+    // Oracle: one count per gompute entry that can start the driver
+    // (`gpu/driver.zig`), whatever the executor believes it ran.
+    const touches = &@import("analysis").driver_test_hooks.touches;
+    for (tiny_decks) |name| {
+        var path_buf: [256]u8 = undefined;
+        const path = try std.fmt.bufPrint(&path_buf, "tests/conformance/tests/netlist/{s}", .{name});
+        const before = touches.load(.monotonic);
+        const p = try api.Problem.init(t.allocator, t.io, .{ .source = .{ .file = path }, .backend = .{ .backend = .auto, .gpu_quiet = true } });
+        defer p.deinit();
+        try p.run_all();
+        const after = touches.load(.monotonic);
+        if (after != before) std.debug.print("{s}: {d} driver entries under auto\n", .{ name, after - before });
+        try t.expectEqual(before, after);
+    }
+}

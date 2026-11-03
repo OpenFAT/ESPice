@@ -20,6 +20,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const gompute = @import("gompute");
+const drv = @import("driver.zig");
 const artifacts = @import("gompute_kernels");
 const device_ir = @import("device").abi;
 const Knobs = @import("../Circuit.zig").Knobs;
@@ -62,7 +63,8 @@ pub const Audit = struct {
 /// kept beside the JIT markers in `<cache>/espice/gpu-cost/<key>` as the
 /// host and device microseconds per eval. `Cost.admit` prices from them
 /// instead of probing, and declines a circuit the device lost before
-/// without starting the driver. The key covers the card, the circuit's
+/// without starting the driver. The key covers the machine's cards (read
+/// without the driver: `machineId`), the circuit's
 /// shape and models, the kernel images, the host threads and the query's
 /// expected evals (an OP and a transient of one circuit price apart), so a
 /// rebuild, another card or another thread count measures again.
@@ -71,7 +73,7 @@ pub const CostCache = struct {
 
     pub fn key(host: Host, threads: u32, evals: f64) u64 {
         var h = std.hash.Wyhash.init(0x5e1ce);
-        h.update(std.mem.asBytes(&cardId()));
+        h.update(std.mem.asBytes(&machineId()));
         for ([_]u64{ host.n, host.planes.g_vals.len, @intFromBool(host.has_charge), threads, @bitCast(evals) }) |v| h.update(std.mem.asBytes(&v));
         for (host.batches) |b| {
             const get = b.hooks.gpu_payload orelse continue;
@@ -85,17 +87,6 @@ pub const CostCache = struct {
             h.update(std.mem.asBytes(&ih));
         }
         return h.final();
-    }
-
-    /// The uuid of the card this thread's queries open on
-    /// (`devices.place`), hashed; 0 without one.
-    fn cardId() u64 {
-        const be = backend orelse return 0;
-        const dyn = gompute.runtime.dynamic;
-        var c = dyn.Compute.initDevice(if (be == .cuda) .cuda else .hip, devices.ordinal) catch return 0;
-        defer c.deinit();
-        const info = c.info() catch return 0;
-        return std.hash.Wyhash.hash(0, &info.uuid);
     }
 
     pub fn read(k: u64, knobs: Knobs) ?Rec {
@@ -395,7 +386,7 @@ fn sassFits() bool {
         else => {},
     }
     const fits = blk: {
-        var compute = gompute.runtime.dynamic.Compute.init(null) catch break :blk false;
+        var compute = drv.compute(null) catch break :blk false;
         defer compute.deinit();
         break :blk (compute.computeCapability() catch break :blk false) == want;
     };
@@ -443,6 +434,114 @@ fn markedWarm(image: []const u8, knobs: Knobs) bool {
     var buf: [512]u8 = undefined;
     const path = markerPath(&buf, image, knobs) orelse return false;
     return std.c.access(path, 0) == 0;
+}
+
+/// The machine's GPU identity, read without the driver: the wrapping sum
+/// of `Wyhash(0, uuid)` over every card procfs lists (CUDA:
+/// `/proc/driver/nvidia/gpus/*/information`; HIP: the kfd topology nodes'
+/// `unique_id`). One CUDA card hashes to `Wyhash(0, uuid)` of the 16 bytes
+/// `cuDeviceGetUuid` reports, the key the driver read gave before, so
+/// records written then stay valid. 0 off Linux, without images or a card.
+/// ponytail: the set of cards, not the one a query lands on (it is placed
+/// after the price); unlike cards in one box share a record until the
+/// machine file keys rows per card.
+fn machineId() u64 {
+    if (comptime @import("builtin").os.tag != .linux) return 0;
+    const be = backend orelse return 0;
+    const root: [:0]const u8 = if (be == .cuda) "/proc/driver/nvidia/gpus" else "/sys/class/kfd/kfd/topology/nodes";
+    const dir = std.c.opendir(root) orelse return 0;
+    defer _ = std.c.closedir(dir);
+    var id: u64 = 0;
+    // Bounded: one entry per card plus `.` and `..` (and kfd's CPU nodes).
+    for (0..4 * devices.devices_max) |_| {
+        const ent = std.c.readdir(dir) orelse break;
+        const name = std.mem.sliceTo(&ent.name, 0);
+        if (name.len == 0 or name[0] == '.') continue;
+        var path_buf: [256]u8 = undefined;
+        const leaf = if (be == .cuda) "information" else "properties";
+        const path = std.mem.printSentinel(&path_buf, "{s}/{s}/{s}", .{ root, name, leaf }, 0) catch continue;
+        var text_buf: [4096]u8 = undefined;
+        const text = readSmall(path, &text_buf) orelse continue;
+        const uuid = (if (be == .cuda) nvidiaUuid(text) else kfdUuid(text)) orelse continue;
+        id +%= std.hash.Wyhash.hash(0, &uuid);
+    }
+    return id;
+}
+
+/// The 16 bytes of the `GPU UUID: GPU-xxxxxxxx-xxxx-...` line of an
+/// NVIDIA procfs `information` file, or null when it has none.
+fn nvidiaUuid(text: []const u8) ?[16]u8 {
+    const key = "GPU UUID:";
+    const at = std.mem.indexOf(u8, text, key) orelse return null;
+    var rest = std.mem.trimStart(u8, text[at + key.len ..], " \t");
+    if (!std.mem.startsWith(u8, rest, "GPU-")) return null;
+    rest = rest["GPU-".len..];
+    var out: [16]u8 = undefined;
+    var nibbles: usize = 0;
+    for (rest) |c| {
+        if (c == '-') continue;
+        if (nibbles == 32) break;
+        const v = std.fmt.charToDigit(c, 16) catch return null;
+        if (nibbles % 2 == 0) out[nibbles / 2] = v << 4 else out[nibbles / 2] |= v;
+        nibbles += 1;
+    }
+    if (nibbles != 32) return null;
+    return out;
+}
+
+/// A kfd node's nonzero `unique_id` as 16 bytes (little-endian, zero
+/// padded), or null: a CPU node, or no such line.
+fn kfdUuid(text: []const u8) ?[16]u8 {
+    var lines = std.mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "unique_id ")) continue;
+        const v = std.fmt.parseInt(u64, std.mem.trim(u8, line["unique_id ".len..], " \t"), 10) catch return null;
+        if (v == 0) return null;
+        var out: [16]u8 = @splat(0);
+        std.mem.writeInt(u64, out[0..8], v, .little);
+        return out;
+    }
+    return null;
+}
+
+/// `path`'s first `buf.len` bytes, or null when it cannot be read.
+fn readSmall(path: [:0]const u8, buf: []u8) ?[]const u8 {
+    const fd = std.c.open(path, .{ .ACCMODE = .RDONLY }, @as(c_uint, 0));
+    if (fd < 0) return null;
+    defer _ = std.c.close(fd);
+    const got = std.c.read(fd, buf.ptr, buf.len);
+    if (got <= 0) return null;
+    return buf[0..@intCast(got)];
+}
+
+test "nvidiaUuid: the procfs uuid line is the 16 bytes the driver reports" {
+    // Oracle: this RTX 4060 Laptop's `information` file, its uuid bytes
+    // transcribed by hand from the hex.
+    const text = "Model: \t\t NVIDIA GeForce RTX 4060 Laptop GPU\nIRQ:   \t\t 187\nGPU UUID: \t GPU-a5b262fa-fc3e-0653-9187-0d58e7372cbd\nVideo BIOS: \t 95.07.41.00.56\n";
+    const want = [16]u8{ 0xa5, 0xb2, 0x62, 0xfa, 0xfc, 0x3e, 0x06, 0x53, 0x91, 0x87, 0x0d, 0x58, 0xe7, 0x37, 0x2c, 0xbd };
+    try std.testing.expectEqualSlices(u8, &want, &(nvidiaUuid(text) orelse return error.TestUnexpectedResult));
+    try std.testing.expect(nvidiaUuid("Model: x\n") == null);
+    try std.testing.expect(nvidiaUuid("GPU UUID: GPU-a5b2\n") == null);
+    try std.testing.expect(nvidiaUuid("GPU UUID: GPU-zzb262fa-fc3e-0653-9187-0d58e7372cbd\n") == null);
+    const node = "cpu_cores_count 0\nunique_id 4096\n";
+    try std.testing.expectEqual(@as(u8, 0x10), (kfdUuid(node) orelse return error.TestUnexpectedResult)[1]);
+    try std.testing.expect(kfdUuid("unique_id 0\n") == null);
+}
+
+test "machineId: procfs gives the key the driver's own card uuids give" {
+    // Oracle: the driver (`cuDeviceGetUuid` per ordinal), which the key
+    // read before stage 1. Without images or a CUDA driver both sides are 0.
+    var want: u64 = 0;
+    if (comptime backend == .cuda) if (drv.deviceCount(.cuda)) |count| {
+        for (0..count) |o| {
+            var c = try drv.computeOn(.cuda, @intCast(o));
+            defer c.deinit();
+            want +%= std.hash.Wyhash.hash(0, &(try c.info()).uuid);
+        }
+    } else |_| {};
+    // ponytail: no AMD card here to check kfd ids against.
+    if (comptime backend == .hip) return;
+    try std.testing.expectEqual(want, machineId());
 }
 
 test "CostCache: a record reads back under its key and nowhere else" {

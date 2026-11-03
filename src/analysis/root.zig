@@ -6,7 +6,7 @@
 //! Contents:
 //! - `pub const session`, `ExecutionConfig`, `Knobs`, `validateBackend`, `batchWidth`
 //! - `pub const ThreadPool`, `Threads`, `WsPool`, `GpuDriver`, `gpu_available`
-//! - `pub const gpu_lanes`, `schemaOf`, `mosra`
+//! - `pub const gpu_lanes`, `driver_test_hooks`, `schemaOf`, `mosra`
 
 /// The query graph and its scheduler (`Session`).
 pub const session = @import("session.zig");
@@ -33,6 +33,9 @@ pub const gpu_available = @import("gpu/context.zig").available;
 /// The GPU transient lane backend (phase 4): `policy` decides
 /// `ExecutionConfig.gpu_lanes` once per Problem.
 pub const gpu_lanes = @import("gpu/lanes.zig");
+/// Test binaries only: `touches`, the GPU driver entries called so far
+/// (`gpu/driver.zig`); an empty struct in any other build.
+pub const driver_test_hooks = @import("gpu/driver.zig").test_hooks;
 /// HSPICE MOSRA level 1 aging over a stress transient.
 pub const mosra = @import("post/mosra.zig");
 /// The result shape of a query, without running it.

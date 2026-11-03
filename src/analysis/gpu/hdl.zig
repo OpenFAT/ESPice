@@ -11,6 +11,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const gompute = @import("gompute");
+const drv = @import("driver.zig");
 const hdl_gpu = @import("device").hdl_gpu;
 const devices = @import("devices.zig");
 
@@ -27,7 +28,7 @@ const name_max = 159;
 /// it, or with the driver's error. Caller owns the result (`deinit`).
 pub fn kernel(comptime be: gompute.Backend, payload_fn: *const anyopaque, name: []const u8) !gompute.RawByName(be) {
     assert(name.len > 0);
-    return gompute.rawKernelByName(be, name, devices.ordinal) catch |e| {
+    return drv.rawKernelByName(be, name, devices.ordinal) catch |e| {
         if (comptime be != .cuda or !runtime_on) return e;
         if (e != error.KernelNotFound) return e;
         return runtimeKernel(payload_fn, name) catch e;
@@ -39,7 +40,7 @@ pub fn kernel(comptime be: gompute.Backend, payload_fn: *const anyopaque, name: 
 /// live as long as the loaded library.
 pub fn runtimeImage(payload_fn: *const anyopaque) ?[:0]const u8 {
     if (comptime !runtime_on) return null;
-    var context = gompute.runtime.cuda.Context.init(devices.ordinal) catch return null;
+    var context = drv.cudaContext(devices.ordinal) catch return null;
     defer context.deinit();
     return hdl_gpu.ptx(payload_fn, context.computeCapability() catch return null);
 }
@@ -48,8 +49,7 @@ pub fn runtimeImage(payload_fn: *const anyopaque) ?[:0]const u8 {
 
 fn runtimeKernel(payload_fn: *const anyopaque, name: []const u8) !gompute.RawByName(.cuda) {
     if (name.len > name_max) return error.KernelNotFound;
-    const rt = gompute.runtime.cuda;
-    var context = try rt.Context.init(devices.ordinal);
+    var context = try drv.cudaContext(devices.ordinal);
     errdefer context.deinit();
     const image = hdl_gpu.ptx(payload_fn, try context.computeCapability()) orelse return error.KernelNotFound;
     // Cached per image by the runtime: one JIT per process.

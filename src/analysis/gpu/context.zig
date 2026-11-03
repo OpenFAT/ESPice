@@ -40,6 +40,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const gompute = @import("gompute");
+const drv = @import("driver.zig");
 const device_ir = @import("device").abi;
 const Knobs = @import("../Circuit.zig").Knobs;
 const devices = @import("devices.zig");
@@ -145,7 +146,7 @@ pub const Driver = struct {
     // ---- private ----
 
     fn warmUp(self: *Driver) void {
-        var compute = gompute.runtime.dynamic.Compute.init(if (backend.? == .cuda) .cuda else .hip) catch return;
+        var compute = drv.compute(if (backend.? == .cuda) .cuda else .hip) catch return;
         compute.deinit();
         self.up.store(true, .monotonic);
         // Every other device's context too: the device table opens each one
@@ -320,6 +321,9 @@ pub const GpuContext = struct {
 
     /// `auto` admitted this query on a price: `Audit` holds the device to it.
     audit: ?Audit = null,
+    /// The device this query's handles opened on (`devices.place`), chosen
+    /// once the price admitted the query; `deinit` releases it.
+    placed: devices.Placement,
     /// `Audit` found the device losing and moved the rest of the query to
     /// the host, state included: every entry point walks on the host,
     /// quietly, and `syncHostState` has nothing left to bring home.
@@ -402,6 +406,9 @@ pub const GpuContext = struct {
         }
         if (n_gpu == 0) return Error.CircuitNotEligible;
         const auto_price: ?ctx_cost.Price = if (explicit) null else try ctx_cost.admit(gpa, host, threads, evals, if (driver) |d| d.started() else false);
+        // Placed only once admitted: reading the device table starts the driver.
+        const placed = devices.place();
+        errdefer placed.release();
 
         const self = try gpa.create(Self);
         errdefer gpa.destroy(self);
@@ -579,6 +586,7 @@ pub const GpuContext = struct {
             .fuse = !knobs.gpu_nofuse,
             .lu_check = knobs.gpu_lu_check,
             .audit = if (auto_price) |p| .{ .cpu_us = p.cpu_us, .key = p.key, .knobs = knobs } else ctx_cost.CostCache.learn(host, threads, evals, knobs),
+            .placed = placed,
         };
         if (driver) |d| d.up.store(true, .monotonic);
         // A failure here unwinds through the errdefers above.
@@ -631,6 +639,7 @@ pub const GpuContext = struct {
     /// Frees every device and pinned buffer and `self`. Detach it first
     /// (`Circuit.detachGpu`, which takes the planes back). Device-side state
     /// is dropped; call `syncStatus` or `syncHostState` first to keep it.
+    /// Releases the device placement last, restoring the thread's ordinal.
     pub fn deinit(self: *Self) void {
         if (comptime backend == null) return;
         self.prof.print();
@@ -659,7 +668,9 @@ pub const GpuContext = struct {
         self.gpa.free(self.base_cells);
         self.gpa.free(self.batches_owned);
         self.gpa.free(self.cpu_owned);
+        const placed = self.placed;
         self.gpa.destroy(self);
+        placed.release();
     }
 
     /// The circuit's analysis state at eval time `t`, as the host batches
@@ -704,7 +715,7 @@ pub fn fallsBack(req: Request, explicit: bool, e: InitError) bool {
 pub fn detectedHardware() []const u8 {
     // wasm has no drivers to load (and gompute's loader lock needs sched_yield).
     if (comptime @import("builtin").cpu.arch.isWasm()) return "none";
-    var compute = gompute.runtime.dynamic.Compute.init(null) catch return "none";
+    var compute = drv.compute(null) catch return "none";
     defer compute.deinit();
     return switch (compute.backend) {
         .cpu => "none",

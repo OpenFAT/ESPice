@@ -18,6 +18,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const gompute = @import("gompute");
+const drv = @import("driver.zig");
 const lanes = @import("solver").gmres_lanes;
 const Gmres = @import("solver").gmres.Gmres;
 const block = @import("device").abi.gpu_lane_block_size;
@@ -52,11 +53,11 @@ pub fn Engine(comptime backend: gompute.Backend) type {
         /// Loads the kernels on device 0. Fails with the driver's error,
         /// `error.KernelNotFound` included. Free with `deinit`.
         pub fn init(allocator: std.mem.Allocator) !Self {
-            var start_kernel = try gompute.rawKernelByName(backend, "arp_gmres_start", 0);
+            var start_kernel = try drv.rawKernelByName(backend, "arp_gmres_start", 0);
             errdefer start_kernel.deinit();
-            var advance_kernel = try gompute.rawKernelByName(backend, "arp_gmres_advance", 0);
+            var advance_kernel = try drv.rawKernelByName(backend, "arp_gmres_advance", 0);
             errdefer advance_kernel.deinit();
-            var advance_only_kernel = try gompute.rawKernelByName(backend, "arp_gmres_advance_only", 0);
+            var advance_only_kernel = try drv.rawKernelByName(backend, "arp_gmres_advance_only", 0);
             errdefer advance_only_kernel.deinit();
             const stream = try start_kernel.createStream();
             return .{ .allocator = allocator, .start_kernel = start_kernel, .advance_kernel = advance_kernel, .advance_only_kernel = advance_only_kernel, .stream = stream };
