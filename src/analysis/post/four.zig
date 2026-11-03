@@ -1,13 +1,36 @@
 //! Fourier analysis (`.four`): the harmonic content of a transient's steady
 //! state. Takes the last fundamental period of the waveform, resamples it to
 //! a power of two, and reads magnitudes, phases and THD off the FFT.
+//! In: a run context and the `.four` options. Out: one real row per
+//! harmonic, the THD in the plot name.
 //! Cites ngspice fourier.c (CKTfour's sine phase reference).
-const std = @import("std");
-const root = @import("../types.zig");
-const fft_mod = @import("solver").fft;
-const tran = @import("../tran/tran.zig");
+//!
+//! Contents:
+//! - `pub const Harmonic = struct { mag, phase_deg }`
+//! - `pub const Options = core.query.Four`
+//! - `pub const Spectrum = struct`
+//! - `pub const Columns = struct { times, pos, neg }`
+//! - `pub const test_access`
+//! - `pub fn run(ctx: *const RunCtx, opts: Options) !Result`
+//! - `pub fn sourceColumns(ctx: *const RunCtx, pos: u32, neg: u32) ?Columns`
+//! - `pub fn analyze(waveform: *const Waveform, differential: bool, f_fund: f64, n_harmonics: usize, scratch: Allocator) !Spectrum`
+//! - `pub fn analyzeColumns(times: Column, values: Column, neg: ?Column, f_fund: f64, n_harmonics: usize, scratch: Allocator) !Spectrum`
+//! - `pub fn interpolateAt(times: Column, values: Column, t: f64, cursor: *usize) f64`
 
+const std = @import("std");
+const assert = std.debug.assert;
 const math = std.math;
+const fft_mod = @import("solver").fft;
+const root = @import("../types.zig");
+const tran = @import("../tran/tran.zig");
+const Column = tran.Column;
+// ngspice prints nine harmonics by default and a deck may ask for more
+// (`.four 1k v(out) 16`). The table is fixed-size because a Spectrum is
+// returned by value; a slice into scratch would dangle.
+const max_harmonics = Options.max_harmonics;
+
+/// Query options, defined in core/query.zig.
+pub const Options = @import("core").query.Four;
 
 /// One harmonic: sinusoid amplitude and phase in degrees (sine reference,
 /// as ngspice's).
@@ -15,14 +38,6 @@ pub const Harmonic = struct {
     mag: f64,
     phase_deg: f64,
 };
-
-/// Query options, defined in core/query.zig.
-pub const Options = @import("core").query.Four;
-
-/// ngspice prints nine harmonics by default and a deck may ask for more
-/// (`.four 1k v(out) 16`). The table is fixed-size because a Spectrum is
-/// returned by value; a slice into scratch would dangle.
-const max_harmonics = Options.max_harmonics;
 
 /// The harmonic content of one period, amplitudes in the probe's units.
 pub const Spectrum = struct {
@@ -36,61 +51,13 @@ pub const Spectrum = struct {
     thd_percent: f64,
 };
 
-const Column = tran.Column;
+/// A recording's time column, an output and, for `v(a,b)`, its reference.
+pub const Columns = struct { times: Column, pos: Column, neg: ?Column };
 
-/// Spectrum of the waveform's first probe, less its second when
-/// `differential`, over the last period of `waveform`, which must hold them. `n_harmonics` is
-/// clamped to 1..max_harmonics.
-/// Returns error.InsufficientData when the waveform is shorter than one
-/// period or the period holds fewer than two samples. `allocator` backs one
-/// 2·n_fft scratch block, freed before return.
-pub fn analyze(waveform: *const tran.Waveform, differential: bool, f_fund: f64, n_harmonics: usize, allocator: std.mem.Allocator) !Spectrum {
-    return analyzeColumns(waveform.column(0), waveform.column(1), if (differential) waveform.column(2) else null, f_fund, n_harmonics, allocator);
-}
-
-/// `analyze` over `values`, less `neg` when given, sampled at `times`.
-pub fn analyzeColumns(times: Column, values: Column, neg: ?Column, f_fund: f64, n_harmonics: usize, allocator: std.mem.Allocator) !Spectrum {
-    // Every series is a borrowed column of a recording, never copied.
-    if (times.len < 2) return error.InsufficientData;
-
-    const period = 1.0 / f_fund;
-    const t_end = times.at(times.len - 1);
-    const t_start = t_end - period;
-
-    if (t_start < times.at(0)) return error.InsufficientData;
-
-    const start_idx = times.lowerBound(t_start);
-
-    const raw_count = times.len - start_idx;
-    if (raw_count < 2) return error.InsufficientData;
-
-    const n_fft = fft_mod.nextPow2(raw_count);
-    const n_fft_f: f64 = @floatFromInt(n_fft);
-
-    const re = try allocator.alloc(f64, 2 * n_fft);
-    defer allocator.free(re);
-    const im = re[n_fft..];
-    @memset(im, 0);
-
-    // n_fft uniform points on [t_start, t_end). The targets increase, so one
-    // cursor walks the window forward: O(window + n_fft), no search per sample.
-    // `v(a,b)`: interpolation is linear, so the difference of the two
-    // resampled columns is the resampled difference.
-    const win_times = times.from(start_idx);
-    const win_vals = values.from(start_idx);
-    const neg_vals = if (neg) |c| c.from(start_idx) else win_vals;
-    var cursor: usize = 0;
-    var neg_cursor: usize = 0;
-    for (re[0..n_fft], 0..) |*r, k| {
-        const t_target = t_start + period * @as(f64, @floatFromInt(k)) / n_fft_f;
-        r.* = interpolateAt(win_times, win_vals, t_target, &cursor);
-        if (neg != null) r.* -= interpolateAt(win_times, neg_vals, t_target, &neg_cursor);
-    }
-
-    fft_mod.fft(re[0..n_fft], im);
-
-    return extractSpectrum(re, im, n_fft, n_harmonics);
-}
+/// Private implementation access for the analysis test suite.
+pub const test_access = if (@import("builtin").is_test) .{
+    .extractSpectrum = extractSpectrum,
+} else {};
 
 /// Contract entry: a transient from the operating point (opts.tran_opts, or
 /// five periods at 200 steps per period), or the rows `ctx.source` holds of
@@ -152,9 +119,6 @@ pub fn run(ctx: *const root.RunCtx, opts: Options) !root.Result {
     };
 }
 
-/// A recording's time column, an output and, for `v(a,b)`, its reference.
-pub const Columns = struct { times: Column, pos: Column, neg: ?Column };
-
 /// The time, `pos` and (unless `neg` is ground) `neg` columns of
 /// `ctx.source`, the rows of the `.tran` that ran this query's own
 /// transient (#231), borrowed; null to run that transient.
@@ -171,9 +135,91 @@ pub fn sourceColumns(ctx: *const root.RunCtx, pos: u32, neg: u32) ?Columns {
     };
 }
 
+/// Returns the spectrum of the waveform's first probe, less its second when
+/// `differential`, over the last period of `waveform`, which must hold them. `n_harmonics` is
+/// clamped to 1..max_harmonics.
+/// Returns error.InsufficientData when the waveform is shorter than one
+/// period or the period holds fewer than two samples. `scratch` backs one
+/// 2·n_fft scratch block, freed before return.
+pub fn analyze(waveform: *const tran.Waveform, differential: bool, f_fund: f64, n_harmonics: usize, scratch: std.mem.Allocator) !Spectrum {
+    return analyzeColumns(waveform.column(0), waveform.column(1), if (differential) waveform.column(2) else null, f_fund, n_harmonics, scratch);
+}
+
+/// `analyze` over `values`, less `neg` when given, sampled at `times`.
+pub fn analyzeColumns(times: Column, values: Column, neg: ?Column, f_fund: f64, n_harmonics: usize, scratch: std.mem.Allocator) !Spectrum {
+    // Every series is a borrowed column of a recording, never copied.
+    if (times.len < 2) return error.InsufficientData;
+
+    const period = 1.0 / f_fund;
+    const t_end = times.at(times.len - 1);
+    const t_start = t_end - period;
+
+    if (t_start < times.at(0)) return error.InsufficientData;
+
+    const start_idx = times.lowerBound(t_start);
+
+    const raw_count = times.len - start_idx;
+    if (raw_count < 2) return error.InsufficientData;
+
+    const n_fft = fft_mod.nextPow2(raw_count);
+    assert(n_fft >= raw_count);
+    const n_fft_f: f64 = @floatFromInt(n_fft);
+
+    const re = try scratch.alloc(f64, 2 * n_fft);
+    defer scratch.free(re);
+    const im = re[n_fft..];
+    @memset(im, 0);
+
+    // n_fft uniform points on [t_start, t_end). The targets increase, so one
+    // cursor walks the window forward: O(window + n_fft), no search per sample.
+    // `v(a,b)`: interpolation is linear, so the difference of the two
+    // resampled columns is the resampled difference.
+    const win_times = times.from(start_idx);
+    const win_vals = values.from(start_idx);
+    const neg_vals = if (neg) |c| c.from(start_idx) else win_vals;
+    var cursor: usize = 0;
+    var neg_cursor: usize = 0;
+    for (re[0..n_fft], 0..) |*r, k| {
+        const t_target = t_start + period * @as(f64, @floatFromInt(k)) / n_fft_f;
+        r.* = interpolateAt(win_times, win_vals, t_target, &cursor);
+        if (neg != null) r.* -= interpolateAt(win_times, neg_vals, t_target, &neg_cursor);
+    }
+
+    fft_mod.fft(re[0..n_fft], im);
+
+    return extractSpectrum(re, im, n_fft, n_harmonics);
+}
+
+/// Linear interpolation of `values` at `t` on sorted `times`, advancing
+/// `cursor` to the bracketing index instead of searching for it. Targets must
+/// come in non-decreasing order. tests/four.zig checks it element for element
+/// against a binary-search oracle.
+pub fn interpolateAt(times: Column, values: Column, t: f64, cursor: *usize) f64 {
+    if (times.len == 0) return 0;
+    if (t <= times.at(0)) return values.at(0);
+    if (t >= times.at(times.len - 1)) return values.at(values.len - 1);
+
+    // Lands on lo = max{i : times[i] <= t}, capped at len - 2, as the binary
+    // search does.
+    var lo = cursor.*;
+    assert(lo < times.len); // A cursor only ever lands inside the column.
+    while (lo + 2 < times.len and times.at(lo + 1) <= t) lo += 1;
+    cursor.* = lo;
+    const hi = lo + 1;
+
+    const dt = times.at(hi) - times.at(lo);
+    if (dt < 1e-30) return values.at(lo);
+    const alpha = (t - times.at(lo)) / dt;
+    return values.at(lo) * (1.0 - alpha) + values.at(hi) * alpha;
+}
+
+// ---- private ----
+
 /// Reads the spectrum off an `n_fft`-point FFT of exactly one period. A
 /// harmonic at or past Nyquist reads as zero.
 fn extractSpectrum(re: []const f64, im: []const f64, n_fft: usize, n_harmonics: usize) Spectrum {
+    assert(re.len >= n_fft);
+    assert(n_fft >= 2);
     const n_f: f64 = @floatFromInt(n_fft);
     const scale = 2.0 / n_f;
 
@@ -216,30 +262,3 @@ fn extractSpectrum(re: []const f64, im: []const f64, n_fft: usize, n_harmonics: 
 fn sinePhase(re: f64, im: f64) f64 {
     return math.radiansToDegrees(math.atan2(re, -im));
 }
-
-/// Linear interpolation of `values` at `t` on sorted `times`, advancing
-/// `cursor` to the bracketing index instead of searching for it. Targets must
-/// come in non-decreasing order. tests/four.zig checks it element for element
-/// against a binary-search oracle.
-pub fn interpolateAt(times: Column, values: Column, t: f64, cursor: *usize) f64 {
-    if (times.len == 0) return 0;
-    if (t <= times.at(0)) return values.at(0);
-    if (t >= times.at(times.len - 1)) return values.at(values.len - 1);
-
-    // Lands on lo = max{i : times[i] <= t}, capped at len - 2, as the binary
-    // search does.
-    var lo = cursor.*;
-    while (lo + 2 < times.len and times.at(lo + 1) <= t) lo += 1;
-    cursor.* = lo;
-    const hi = lo + 1;
-
-    const dt = times.at(hi) - times.at(lo);
-    if (dt < 1e-30) return values.at(lo);
-    const alpha = (t - times.at(lo)) / dt;
-    return values.at(lo) * (1.0 - alpha) + values.at(hi) * alpha;
-}
-
-/// Private implementation access for the analysis test suite.
-pub const test_access = if (@import("builtin").is_test) .{
-    .extractSpectrum = extractSpectrum,
-} else {};

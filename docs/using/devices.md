@@ -2,12 +2,12 @@
 
 Every device in ESPice, from the resistor to BSIM4, is a Verilog-A model.
 ESPice's own sources live in
-[`models/`](https://github.com/OpenFAT/EGSpice/tree/main/models). Third-party
+[`models/`](https://github.com/OpenFAT/ESPice/tree/main/models). Third-party
 compact models (PSP, JUNCAP2, BSIM-IMG, BSIM-CMG, BSIM-BULK, BSIM-SOI,
 L-UTSOI, HiSIM, HICUM, Mextram, ASM-HEMT, ASM-ESD, MVSG, DIODE_CMC, R2/R3_CMC,
 MOSVAR) are vendored there too, one file per model with each release's
 `` `include ``d files inlined, so a build needs no download;
-[`models/LICENSES.md`](https://github.com/OpenFAT/EGSpice/blob/main/models/LICENSES.md)
+[`models/LICENSES.md`](https://github.com/OpenFAT/ESPice/blob/main/models/LICENSES.md)
 names each model's release and licence.
 Everything is compiled into the simulator at build time, so a built-in model
 and a model you load yourself run through the same code.
@@ -100,7 +100,7 @@ refused too: the model has no polarity parameter.
 
 ESPice is Apache-2.0, but the model files keep the licences of the code
 they come from, indexed in
-[`models/LICENSES.md`](https://github.com/OpenFAT/EGSpice/blob/main/models/LICENSES.md).
+[`models/LICENSES.md`](https://github.com/OpenFAT/ESPice/blob/main/models/LICENSES.md).
 Most are BSD or royalty-free. One is not: `models/bsim4va.va`, the BSIM4
 behind `LEVEL=14` and `54`, is Cogenda's VA-BSIM48 under CC-BY-NC 4.0, so a
 commercial user must replace it with a commercially licensed BSIM4.

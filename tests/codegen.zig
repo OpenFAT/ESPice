@@ -38,6 +38,24 @@ export fn hand_dual_mul(a: *const [3]f64, b: *const [3]f64, out: *[3]f64) void {
     out.* = .{ v, d[0], d[1] };
 }
 
+// ---- device hook context: every hook body reaches its batch through
+// `DeviceBatch(D).of(ctx)`, a `@ptrCast(@alignCast)` of the type-erased
+// context. A real hook (`scatter_tapes`) through it against the same body
+// handed the batch pointer directly. ----
+
+const ResBatch = eval.DeviceBatch(@import("models").resistor);
+
+export fn gen_batch_of(ctx: *anyopaque, slots: *[]const u32, rows: *[]const u32) void {
+    const tapes = ResBatch.hooks.scatter_tapes(ctx);
+    slots.* = tapes.slots;
+    rows.* = tapes.rows;
+}
+
+export fn hand_batch_of(self: *const ResBatch, slots: *[]const u32, rows: *[]const u32) void {
+    slots.* = self.slots;
+    rows.* = self.rhs_idx;
+}
+
 // ---- solver engine dispatch (S7): `direct.Engine`'s exhaustive switch
 // against the three optionals it replaced, checked in their old order. ----
 

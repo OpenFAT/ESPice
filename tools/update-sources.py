@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Regenerates sources.json, the release binaries the flake's versioned
-packages install (`nix run '.#"0.3.0"'`, `nix run .#latest`), from the
+packages install (`nix run '.#"0.20.0"'`, `nix run .#latest`), from the
 GitHub releases. After VerA's tools/update-sources.py.
 
 Shape:
@@ -22,7 +22,7 @@ import re
 import sys
 import urllib.request
 
-REPO = "OpenFAT/EGSpice"
+REPO = "OpenFAT/ESPice"
 # Nix system -> the CPU-only release variant built for that system's baseline.
 SYSTEMS = {
     "x86_64-linux": "linux-x86_64-v1-cpu",

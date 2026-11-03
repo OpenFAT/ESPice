@@ -1,8 +1,10 @@
 //! End-to-end fixture runner: simulates every tests/conformance/tests/netlist deck in a child
 //! espice and checks the raw output against its embedded .expected.json
 //! oracle. An unsupported feature is a failure, never a skip. The one skip:
-//! under a GPU backend (`zig build test -- --backend cuda --jobs 1`), a deck with nothing GPU-eligible, which
-//! an explicit `--backend cuda|hip` refuses by design. A deck whose
+//! under an explicit `--backend cuda|hip`, a deck with nothing GPU-eligible,
+//! which that backend refuses by design; `auto`, the release GPU corpus
+//! (`zig build test -- --backend auto --jobs 1`), runs such a deck on the
+//! CPU and compares it like any other. A deck whose
 //! header carries `* KNOWN GAP:` reports XFAIL when it fails, which does not
 //! fail the run, and XPASS when it passes, which does: drop the marker. From
 //! the root:
@@ -93,7 +95,7 @@ const Runner = struct {
     next: std.atomic.Value(u32) = .init(0),
     outcomes: []Outcome,
 };
-/// The `--backend` every run gets; `--backend cuda` checks the GPU path
+/// The `--backend` every run gets; `auto` and `cuda` check the GPU path
 /// against the same expectations. Set once in `main`, before any worker.
 var backend_name: []const u8 = "cpu";
 /// `--perturb`: the factor on every expected column, measure and statistic.
@@ -370,8 +372,13 @@ fn runCase(a: Allocator, io: Io, app: []const u8, path: []const u8, expected: []
     const result = try simulate(a, io, executable, netlist, output, timeout_seconds, oracle.tokenizer);
     if (oracle.expect.status == .@"error") return checkRejection(oracle.expect.category.?, result);
     // An explicit GPU backend refuses a circuit with no GPU-eligible device
-    // (no CPU fallback); under a GPU backend that deck has nothing to compare.
-    if (!equal(backend_name, "cpu") and std.mem.indexOf(u8, result.stderr, "(CircuitNotEligible)") != null) return error.NotEligible;
+    // (no CPU fallback); under it that deck has nothing to compare. `auto`
+    // warns the same reason and runs the deck on the CPU.
+    if (explicitGpu() and std.mem.indexOf(u8, result.stderr, "(CircuitNotEligible)") != null) return error.NotEligible;
+    // A runtime model whose device kernels failed to build runs on the host
+    // under a GPU backend (src/device/hdl_gpu.zig): the deck never tested
+    // the GPU path it asked for. Under `auto` too: a failed kernel build is a bug either way.
+    if (!equal(backend_name, "cpu") and std.mem.indexOf(u8, result.stderr, "hdl: no device kernels for ") != null) return error.DeviceKernelsFailed;
     try requireSuccess(result);
     // A `-Dcertify` build reports its KCL record on stderr (src/analysis/certify.zig).
     var lines = std.mem.splitScalar(u8, result.stderr, '\n');
@@ -467,7 +474,9 @@ fn sameResults(a: Allocator, base: []const Plot, got: []const Plot, v: metamorph
 }
 
 /// Runs espice on `netlist` from its own directory, so relative includes
-/// resolve. `error.Timeout` after `timeout_seconds`.
+/// resolve. `error.Timeout` after `timeout_seconds`; `error.MemoryLeaked`
+/// when the run's allocator reported a leak, whatever it exited with: Zig's
+/// start code leaves the exit code alone on one, so only stderr shows it.
 fn simulate(a: Allocator, io: Io, app: []const u8, netlist: []const u8, output: []const u8, timeout_seconds: u32, tokenizer: ?[]const u8) !std.process.RunResult {
     // A total deadline also covers a child that closes its streams then hangs.
     const Event = union(enum) { process: std.process.RunError!std.process.RunResult, timeout: Io.Cancelable!void };
@@ -491,11 +500,20 @@ fn simulate(a: Allocator, io: Io, app: []const u8, netlist: []const u8, output: 
     };
     try select.concurrent(.process, std.process.run, .{ a, io, options });
     try select.concurrent(.timeout, Io.sleep, .{ io, Io.Duration.fromSeconds(timeout_seconds), Io.Clock.awake });
-    return switch (try select.await()) {
-        .process => |result| result,
-        .timeout => error.Timeout,
+    const result = switch (try select.await()) {
+        .process => |result| try result,
+        .timeout => return error.Timeout,
     };
+    if (std.mem.indexOf(u8, result.stderr, leak_report) != null) {
+        diagnostic("  leak\n{s}\n", .{result.stderr});
+        return error.MemoryLeaked;
+    }
+    return result;
 }
+
+/// What a Debug or ReleaseSafe espice's allocator prints per leaked block
+/// at exit (std.heap.SafeAllocator).
+const leak_report = "error(SafeAllocator): leaked";
 
 fn requireSuccess(result: std.process.RunResult) !void {
     if (result.term == .exited and result.term.exited == 0) return;
@@ -544,6 +562,11 @@ fn checkRejection(category: []const u8, result: std.process.RunResult) !void {
     }
     diagnostic("  wanted diagnostic category {s}, received:\n{s}\n", .{ category, result.stderr });
     return error.WrongDiagnostic;
+}
+
+/// `--backend cuda` or `hip`: no CPU fallback.
+fn explicitGpu() bool {
+    return !equal(backend_name, "cpu") and !equal(backend_name, "auto");
 }
 
 fn equal(a: []const u8, b: []const u8) bool {
@@ -1208,6 +1231,23 @@ test "deadline kills a simulator that closes output streams before hanging" {
     const a = arena.allocator();
     const app = try tmp.dir.realPathFileAlloc(io, "simulator", a);
     try std.testing.expectError(error.Timeout, simulate(a, io, app, "tests/conformance/tests/netlist/op/divider_default.sp", "/dev/null", 1, null));
+}
+
+// Oracle: a script that prints the allocator's leak line and exits 0 must
+// fail, and the same script without that line must pass.
+test "a run whose allocator reports a leak fails, whatever its exit code" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const io = std.testing.io;
+    try tmp.dir.writeFile(io, .{ .sub_path = "leaky", .data = "#!/bin/sh\necho 'error(SafeAllocator): leaked [addr: 1, len: 8 (0x8) align: 8] allocated at:' >&2\n", .flags = .{ .permissions = .fromMode(0o755) } });
+    try tmp.dir.writeFile(io, .{ .sub_path = "clean", .data = "#!/bin/sh\necho 'warning: unrelated' >&2\n", .flags = .{ .permissions = .fromMode(0o755) } });
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const deck = "tests/conformance/tests/netlist/op/divider_default.sp";
+    try std.testing.expectError(error.MemoryLeaked, simulate(a, io, try tmp.dir.realPathFileAlloc(io, "leaky", a), deck, "/dev/null", 10, null));
+    try requireSuccess(try simulate(a, io, try tmp.dir.realPathFileAlloc(io, "clean", a), deck, "/dev/null", 10, null));
 }
 
 // Oracle: a triangle wave whose period and swing are known by construction.

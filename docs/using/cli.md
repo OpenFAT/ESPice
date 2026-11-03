@@ -116,7 +116,9 @@ A flag that takes a value accepts it three ways: `--rawfile=out.raw`,
 : Where device models are evaluated: `cpu` (default), `auto`, `cuda` or
   `hip`. `auto` uses a GPU when one is present and the circuit is worth it,
   and falls back to the CPU otherwise. `cuda` and `hip` fail rather than
-  fall back. See [GPU backend](gpu.md).
+  fall back, and print a `note:` when a transmission line's history
+  (`LTRA`, `CPL`, `TXL`) makes the GPU far slower. See
+  [GPU backend](gpu.md).
 
 `--gpu`
 : The same as `--backend=auto`, except that a machine with no usable GPU
@@ -248,7 +250,7 @@ A flag that takes a value accepts it three ways: `--rawfile=out.raw`,
 : Accepted for ngspice compatibility. ESPice always runs in batch mode.
 
 `-v`, `--version`
-: Print `espice 0.3.0 (VerA 0.12.1 <commit>; backends: cpu, cuda)`: the
+: Print `espice 0.20.0 (VerA 0.23.0 <commit>; backends: cpu, cuda)`: the
   VerA version and commit the binary was built with, and the backends
   compiled in.
 
