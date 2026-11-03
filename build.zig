@@ -300,6 +300,14 @@ pub fn build(b: *Build) void {
     run_metamorphic.step.dependOn(&run_harness_tests.step);
     test_step.dependOn(&run_metamorphic.step);
 
+    // The edit loop's two halves of `install` and `test`: the exe alone skips
+    // libespice.a (a second whole-engine LLVM module), and the corpus alone
+    // skips the ~115 unit roots and the codegen and HIP probes.
+    b.step("exe", "Install the espice CLI alone, without libespice.a").dependOn(&b.addInstallArtifact(exe, .{}).step);
+    const corpus_step = b.step("corpus", "Run the SPICE corpus (correctness and metamorphic) alone; `-- --filter PREFIX`");
+    corpus_step.dependOn(&run_correctness.step);
+    corpus_step.dependOn(&run_metamorphic.step);
+
     {
         var P = M;
         P.target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux, .cpu_model = .{ .explicit = &std.Target.x86.cpu.x86_64_v3 } });
