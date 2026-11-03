@@ -302,7 +302,8 @@ module ltra(p1, n1, p2, n2);
 
     // ---- accepted history (held: see header) ----
     real ht[0:cap-1], hv1[0:cap-1], hv2[0:cap-1], hi1[0:cap-1], hi2[0:cap-1];
-    integer nh;
+    real hb[0:cap-1];                 // bend of the triple centred on each point, 1 <= k <= nh-2
+    integer nh, hlo, hm;
     real v10, v20, i10, i20;          // initVolt/initCur snapshot at t = 0
     real brk[0:nbrk-1];               // pending wavefront breakpoints (ring)
     integer brk_head;
@@ -452,9 +453,31 @@ module ltra(p1, n1, p2, n2);
                     h1relval = abs(h1dum1 * chopreltol);
 
                     // Fused walk newest -> oldest: coefficient and dot product together.
+                    // Points newer than t - T (i > aux) carry h1 only, so they get a
+                    // loop of their own: VerA if-converts an `if (i <= aux)` inside
+                    // one loop, which ran h2/h3's three exp on every point. Same
+                    // operations in the same order; doh2 and doh3 stay 1 here.
                     lolim2 = 0.0;
                     hilim2 = 0.0;
-                    for (i = j; i > 0 && (doh1 || doh2 || doh3); i = i - 1) begin
+                    for (i = j; i > aux; i = i - 1) begin
+                        lolim2 = lolim1;
+                        hilim2 = hilim1;
+                        lolim1 = hilim2;
+                        hilim1 = t - ht[i - 1];
+                        delta1 = ht[i] - ht[i - 1];
+                        if (doh1) begin
+                            h1dum2 = h1dum1;
+                            h1lov1 = h1hiv1;
+                            h1hiv1 = rlch1dash2(hilim1, beta);
+                            h1dum1 = (h1hiv1 - h1lov1) / delta1;
+                            coeff = h1dum1 - h1dum2;
+                            cv1 = cv1 + coeff * (hv1[i] - v10);
+                            cv2 = cv2 + coeff * (hv2[i] - v20);
+                            if (abs(coeff) <= h1relval) doh1 = 0;
+                        end
+                    end
+                    // aux <= j, so the first loop leaves i == aux.
+                    for (i = aux; i > 0 && (doh1 || doh2 || doh3); i = i - 1) begin
                         lolim2 = lolim1;
                         hilim2 = hilim1;
                         lolim1 = hilim2;
@@ -472,38 +495,36 @@ module ltra(p1, n1, p2, n2);
                             if (abs(coeff) <= h1relval) doh1 = 0;
                         end
 
-                        if (i <= aux) begin
-                            barg = 0.0;
-                            expterm = 0.0;
-                            if (doh2 || doh3) begin
-                                barg = (hilim1 > tt) ? alpha * sqrt(hilim1 * hilim1 - tt * tt) : 0.0;
-                                expterm = exp(barg - beta * hilim1);
-                            end
-                            if (doh2) begin
-                                h2lov2 = h2lov1;
-                                h2hiv2 = h2hiv1;
-                                h2dum2 = h2dum1;
-                                h2lov1 = h2hiv2;
-                                h2hiv1 = (alpha == 0.0 || hilim1 < tt) ? 0.0 : alphasqt * expterm * bessi1xoverxe(barg);
-                                h2dum1 = twiceintlin(lolim1, hilim1, lolim1, h2lov1, h2hiv1, lolim1, hilim1) / delta1;
-                                // ngspice-compatible: at i == aux the (lolim2, hilim2)
-                                // interval and the (h2lov2, h2hiv2) values span
-                                // different segments (its disabled i == auxindex fix).
-                                coeff = h2dum1 - h2dum2 + intlin(lolim2, hilim2, h2lov2, h2hiv2, lolim2, hilim2);
-                                ci2 = ci2 + coeff * (hi2[i] - i20);
-                                ci1 = ci1 + coeff * (hi1[i] - i10);
-                                if (abs(coeff) <= h2relval) doh2 = 0;
-                            end
-                            if (doh3) begin
-                                h3dum2 = h3dum1;
-                                h3lov1 = h3hiv1;
-                                h3hiv1 = (hilim1 <= tt || beta == 0.0) ? 0.0 : expterm * bessi0e(barg) - expbetat;
-                                h3dum1 = intlin(lolim1, hilim1, h3lov1, h3hiv1, lolim1, hilim1) / delta1;
-                                coeff = h3dum1 - h3dum2;
-                                cw2 = cw2 + coeff * (hv2[i] - v20);
-                                cw1 = cw1 + coeff * (hv1[i] - v10);
-                                if (abs(coeff) <= h3relval) doh3 = 0;
-                            end
+                        barg = 0.0;
+                        expterm = 0.0;
+                        if (doh2 || doh3) begin
+                            barg = (hilim1 > tt) ? alpha * sqrt(hilim1 * hilim1 - tt * tt) : 0.0;
+                            expterm = exp(barg - beta * hilim1);
+                        end
+                        if (doh2) begin
+                            h2lov2 = h2lov1;
+                            h2hiv2 = h2hiv1;
+                            h2dum2 = h2dum1;
+                            h2lov1 = h2hiv2;
+                            h2hiv1 = (alpha == 0.0 || hilim1 < tt) ? 0.0 : alphasqt * expterm * bessi1xoverxe(barg);
+                            h2dum1 = twiceintlin(lolim1, hilim1, lolim1, h2lov1, h2hiv1, lolim1, hilim1) / delta1;
+                            // ngspice-compatible: at i == aux the (lolim2, hilim2)
+                            // interval and the (h2lov2, h2hiv2) values span
+                            // different segments (its disabled i == auxindex fix).
+                            coeff = h2dum1 - h2dum2 + intlin(lolim2, hilim2, h2lov2, h2hiv2, lolim2, hilim2);
+                            ci2 = ci2 + coeff * (hi2[i] - i20);
+                            ci1 = ci1 + coeff * (hi1[i] - i10);
+                            if (abs(coeff) <= h2relval) doh2 = 0;
+                        end
+                        if (doh3) begin
+                            h3dum2 = h3dum1;
+                            h3lov1 = h3hiv1;
+                            h3hiv1 = (hilim1 <= tt || beta == 0.0) ? 0.0 : expterm * bessi0e(barg) - expbetat;
+                            h3dum1 = intlin(lolim1, hilim1, h3lov1, h3hiv1, lolim1, hilim1) / delta1;
+                            coeff = h3dum1 - h3dum2;
+                            cw2 = cw2 + coeff * (hv2[i] - v20);
+                            cw1 = cw1 + coeff * (hv1[i] - v10);
+                            if (abs(coeff) <= h3relval) doh3 = 0;
                         end
                     end
 
@@ -606,6 +627,33 @@ module ltra(p1, n1, p2, n2);
                     in2 = in2 + d2;
                 end
             end
+
+            // Which point a full history drops at this timepoint (LTRAtrunc):
+            // the first interior point whose four signals are all collinear
+            // with their neighbours; failing that, the oldest when the delayed
+            // read no longer reaches it, else the least bent point, so the
+            // window t - td stays sampled. It reads t and the accepted history
+            // only, so it runs once per timepoint here, not in every Newton
+            // evaluation, and reads each point's bend from hb, which the
+            // bookkeeping below keeps current. ponytail: lossy past cap
+            // (ngspice grows); VerA has no growable held storage.
+            drop = 1;
+            if (nh == cap && t > ht[nh - 1]) begin
+                found = 0;
+                bmin = 1e300;
+                for (k = 1; k + 1 < nh && !found; k = k + 1) begin
+                    bk = hb[k];
+                    if (bk < 1.0) begin
+                        drop = k;
+                        found = 1;
+                    end else if (bk < bmin) begin
+                        bmin = bk;
+                        kbest = k;
+                    end
+                end
+                if (!found && t - ht[4] <= td)
+                    drop = kbest;
+            end
         end
 
         v1 = V(br1);
@@ -641,43 +689,32 @@ module ltra(p1, n1, p2, n2);
         if (nh == 0) begin
             v10 = v1; v20 = v2; i10 = ib1; i20 = ib2;
         end
+        hlo = -1;   // first triple a dropped point changed, -1 for none
         if (nh > 0 && t <= ht[nh - 1]) begin
             // Same-time recommit overwrites the tail.
             hv1[nh - 1] = v1; hv2[nh - 1] = v2; hi1[nh - 1] = ib1; hi2[nh - 1] = ib2;
         end else begin
             if (nh == cap) begin
-                // Full: drop the first interior point whose four signals
-                // are all collinear with their neighbours. Failing that, the
-                // oldest when the delayed read no longer reaches it, else the
-                // least bent point, so the window t - td stays sampled.
-                // ponytail: lossy past cap (ngspice grows); VerA has no
-                // growable held storage.
-                drop = 1;
-                found = 0;
-                bmin = 1e300;
-                for (k = 1; k + 1 < nh && !found; k = k + 1) begin
-                    bk = max(max(bend(ht[k - 1], hv1[k - 1], ht[k], hv1[k], ht[k + 1], hv1[k + 1], compactrel, compactabs),
-                                  bend(ht[k - 1], hv2[k - 1], ht[k], hv2[k], ht[k + 1], hv2[k + 1], compactrel, compactabs)),
-                             max(bend(ht[k - 1], hi1[k - 1], ht[k], hi1[k], ht[k + 1], hi1[k + 1], compactrel, compactabs),
-                                 bend(ht[k - 1], hi2[k - 1], ht[k], hi2[k], ht[k + 1], hi2[k + 1], compactrel, compactabs)));
-                    if (bk < 1.0) begin
-                        drop = k;
-                        found = 1;
-                    end else if (bk < bmin) begin
-                        bmin = bk;
-                        kbest = k;
-                    end
-                end
-                if (!found && t - ht[4] <= td)
-                    drop = kbest;
+                // Full: drop the point the timepoint block chose.
                 for (k = drop; k < cap - 1; k = k + 1) begin
                     ht[k] = ht[k + 1]; hv1[k] = hv1[k + 1]; hv2[k] = hv2[k + 1];
-                    hi1[k] = hi1[k + 1]; hi2[k] = hi2[k + 1];
+                    hi1[k] = hi1[k + 1]; hi2[k] = hi2[k + 1]; hb[k] = hb[k + 1];
                 end
                 nh = nh - 1;
+                hlo = drop - 1;
             end
             ht[nh] = t; hv1[nh] = v1; hv2[nh] = v2; hi1[nh] = ib1; hi2[nh] = ib2;
             nh = nh + 1;
+        end
+        // Refresh the bends whose triple changed: the two around a dropped
+        // point, and the one centred next to the tail (appended or rewritten).
+        for (hm = 0; hm < 3; hm = hm + 1) begin
+            k = (hm < 2) ? hlo + hm : nh - 2;
+            if (k >= 1 && k + 1 < nh)
+                hb[k] = max(max(bend(ht[k - 1], hv1[k - 1], ht[k], hv1[k], ht[k + 1], hv1[k + 1], compactrel, compactabs),
+                                bend(ht[k - 1], hv2[k - 1], ht[k], hv2[k], ht[k + 1], hv2[k + 1], compactrel, compactabs)),
+                            max(bend(ht[k - 1], hi1[k - 1], ht[k], hi1[k], ht[k + 1], hi1[k + 1], compactrel, compactabs),
+                                bend(ht[k - 1], hi2[k - 1], ht[k], hi2[k], ht[k + 1], hi2[k + 1], compactrel, compactabs)));
         end
 
         // Wavefront breakpoint: when the launched wave (v + Z0 i) changes
