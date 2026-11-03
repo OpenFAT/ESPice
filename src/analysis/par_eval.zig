@@ -12,11 +12,17 @@
 //! serially, whatever the lane count or the chunk a lane happened to claim.
 //!
 //! Claiming is dynamic, so a slow lane (an E-core beside P-cores) takes fewer
-//! chunks instead of holding up the pass. The previous design gave each lane
-//! a whole-plane slab and a static instance range: sums regrouped with the
-//! lane count (up to 24554 ulp), the slabs cost a plane copy per lane, and
-//! the reduce walked every lane's slot window, which a shared rail stretches
-//! to the whole plane (#138; dev/analysis/refactoring.md, "ParEval").
+//! chunks instead of holding up the pass. The barriers count finished items,
+//! never lanes: lane 0 waits only for items another lane has claimed, so a
+//! worker the scheduler has not run yet (every core busy) costs the pass
+//! nothing; it finds the items taken and goes back to waiting. Waiting on
+//! every lane instead let one descheduled worker stall each pass for a time
+//! slice: a 4-diode transient at 8 threads, four decks on four cores, ran
+//! past 900 s. The previous design gave each lane a whole-plane slab and a
+//! static instance range: sums regrouped with the lane count (up to 24554
+//! ulp), the slabs cost a plane copy per lane, and the reduce walked every
+//! lane's slot window, which a shared rail stretches to the whole plane
+//! (#138; dev/analysis/refactoring.md, "ParEval").
 //! The serial walks are `host_walks.zig`, re-exported here.
 //! In: batches, planes and an iterate. Out: the stamped planes, bitwise the
 //! serial stamp.
@@ -72,10 +78,10 @@ pub const ParEval = struct {
     slots: Gather,
     rows: Gather,
 
-    /// Stamp chunks, claimed in order through `next_task`.
+    /// Stamp chunks, claimed in order through `claim`.
     tasks: []EvalTask,
     /// Reduce blocks over the cells `[0, nnz + n)`, slots then rows: block j
-    /// is `[cuts[j], cuts[j + 1])`, claimed through `next_block`.
+    /// is `[cuts[j], cuts[j + 1])`, claimed through `claim` after the chunks.
     cuts: []u32,
 
     nnz: u32,
@@ -88,12 +94,13 @@ pub const ParEval = struct {
     /// apart from the read-only `job_*` arguments and from each other, so a
     /// claim or barrier increment invalidates only that counter's line (#172).
     wake: Wake,
-    next_task: Counter,
-    next_block: Counter,
-    /// Lanes, lane 0 included, finished stamping the current pass.
-    stamped: Counter,
-    /// Workers finished with the current pass, reduce included.
-    done: Counter,
+    /// The current pass's next item (`Claim`): a stamp pass's stamp chunks
+    /// `[0, tasks.len)` then its reduce blocks, a walk's chunks.
+    claim: Claim,
+    /// Stamp chunks (or walk chunks) finished in the current pass.
+    finished: Counter,
+    /// Reduce blocks finished in the current pass.
+    reduced: Counter,
     /// The current pass's arguments, published before `epoch` is bumped.
     job_batches: []const Batch,
     job_planes: Planes,
@@ -120,6 +127,16 @@ pub const ParEval = struct {
         v: std.atomic.Value(u32) align(std.atomic.cache_line),
     };
 
+    /// `pass << 33 | walk << 32 | next item`. A lane claims an item by
+    /// compare-and-swap on the whole word, so a lane that read an earlier
+    /// pass's word claims nothing in a later one, and it learns the item
+    /// count from the word alone before it reads a `job_*` field. A claimed
+    /// item holds its pass open (lane 0 waits for it), so the job it reads
+    /// cannot change under it.
+    const Claim = struct {
+        v: std.atomic.Value(u64) align(std.atomic.cache_line),
+    };
+
     /// The pass doorbell, on its own line. `epoch` is bumped once per pass;
     /// workers spin on it, then park on it. `sleepers` counts workers parked
     /// (or about to park) on `epoch`: `run` pays for the wake syscall only
@@ -133,6 +150,7 @@ pub const ParEval = struct {
 
     comptime {
         assert(@sizeOf(Counter) == std.atomic.cache_line);
+        assert(@sizeOf(Claim) == std.atomic.cache_line);
         assert(@sizeOf(Wake) == std.atomic.cache_line);
     }
 
@@ -232,10 +250,10 @@ pub const ParEval = struct {
             .threads = threads,
             .started = false,
             .wake = .{ .epoch = .init(0), .sleepers = .init(0), .quit = .init(false) },
-            .next_task = .{ .v = .init(0) },
-            .next_block = .{ .v = .init(0) },
-            .stamped = .{ .v = .init(0) },
-            .done = .{ .v = .init(0) },
+            // Pass 0 with every item taken: nothing to claim before `run`.
+            .claim = .{ .v = .init(std.math.maxInt(u32)) },
+            .finished = .{ .v = .init(0) },
+            .reduced = .{ .v = .init(0) },
             .job_batches = batches,
             .job_planes = undefined,
             .job_base = .{},
@@ -286,13 +304,10 @@ pub const ParEval = struct {
         self.job_t = t;
         self.job_mode = mode;
         self.job_kind = .stamp;
-        self.next_task.v.store(0, .monotonic);
-        self.next_block.v.store(0, .monotonic);
-        self.stamped.v.store(0, .monotonic);
-        self.done.v.store(0, .monotonic);
-        self.ring();
-        self.pass();
-        waitCount(&self.done.v, self.n_lanes - 1);
+        self.open(false);
+        self.drain();
+        waitCount(&self.finished.v, @intCast(self.tasks.len));
+        waitCount(&self.reduced.v, @intCast(self.cuts.len - 1));
         // The trash cells take no stamps here; give them their initial value.
         switch (mode) {
             .charge => planes.q_vec[self.n] = 0,
@@ -333,11 +348,56 @@ pub const ParEval = struct {
 
     fn walk(self: *ParEval, kind: Kind) void {
         self.job_kind = kind;
-        self.next_task.v.store(0, .monotonic);
-        self.done.v.store(0, .monotonic);
+        self.open(true);
+        self.drain();
+        waitCount(&self.finished.v, @intCast(self.tasks.len));
+    }
+
+    /// Publishes the pass whose `job_*` fields lane 0 just wrote: zeroes the
+    /// barriers, then releases the claim word with the next pass number,
+    /// which orders both and the job before any lane's claim. Then rings.
+    fn open(self: *ParEval, walk_pass: bool) void {
+        const prev = self.claim.v.load(.monotonic);
+        self.finished.v.store(0, .monotonic);
+        self.reduced.v.store(0, .monotonic);
+        self.claim.v.store(((prev >> 33) +% 1) << 33 | @as(u64, @intFromBool(walk_pass)) << 32, .release);
         self.ring();
-        self.walkPass();
-        waitCount(&self.done.v, self.n_lanes - 1);
+    }
+
+    /// Claims and runs the current pass's items until none are left. Lane 0
+    /// and every worker run it; it returns at once when the pass is over.
+    fn drain(self: *ParEval) void {
+        const n_tasks: u32 = @intCast(self.tasks.len);
+        const n_blocks: u32 = @intCast(self.cuts.len - 1);
+        var cur = self.claim.v.load(.acquire);
+        // At most one success per item; a failed swap means another lane
+        // took the item or a new pass began.
+        while (true) {
+            const walk_pass = (cur >> 32) & 1 != 0;
+            const i: u32 = @truncate(cur);
+            const n_items = if (walk_pass) n_tasks else n_tasks + n_blocks;
+            if (i >= n_items) return;
+            if (self.claim.v.cmpxchgWeak(cur, cur + 1, .acquire, .acquire)) |seen| {
+                cur = seen;
+                continue;
+            }
+            if (walk_pass) {
+                self.walkTask(self.tasks[i]);
+                _ = self.finished.v.fetchAdd(1, .release);
+            } else if (i < n_tasks) {
+                self.stampTask(self.tasks[i]);
+                _ = self.finished.v.fetchAdd(1, .release);
+            } else {
+                // Every stamp of this pass lands before any cell sums.
+                waitCount(&self.finished.v, n_tasks);
+                const j = i - n_tasks;
+                switch (self.job_mode) {
+                    inline else => |m| self.reduceBlock(self.cuts[j], self.cuts[j + 1], m),
+                }
+                _ = self.reduced.v.fetchAdd(1, .release);
+            }
+            cur = self.claim.v.load(.acquire);
+        }
     }
 
     /// Starts the workers on first use, then bumps `epoch` so they run the
@@ -354,35 +414,28 @@ pub const ParEval = struct {
         }
     }
 
-    /// One lane's share of a limit or update pass.
-    fn walkPass(self: *ParEval) void {
-        var limited = false;
-        var reject: ?f64 = null;
-        while (true) {
-            const i = self.next_task.v.fetchAdd(1, .monotonic);
-            if (i >= self.tasks.len) break;
-            const task = self.tasks[i];
-            const b = self.job_batches[task.batch];
-            switch (self.job_kind) {
-                .limit => if (b.hooks.limit_range) |f| {
-                    if (f(b.ctx, self.job_x_mut, self.job_x_old, task.first, task.last)) limited = true;
-                } else if (task.first == 0) if (b.hooks.apply_limits) |f| {
-                    if (f(b.ctx, self.job_x_mut, self.job_x_old)) limited = true;
-                },
-                .update => {
-                    const tr = if (b.hooks.update_range) |f|
-                        f(b.ctx, self.job_x, task.first, task.last)
-                    else if (task.first == 0) if (b.hooks.update_state) |f| f(b.ctx, self.job_x) else null else null;
-                    if (tr) |t| reject = if (reject) |cur| @min(cur, t) else t;
-                },
-                .stamp => unreachable,
-            }
-        }
-        if (limited) self.any_limited.store(true, .monotonic);
-        if (reject) |t| {
-            while (!self.reject_lock.tryLock()) std.atomic.spinLoopHint();
-            defer self.reject_lock.unlock();
-            self.min_reject = if (self.min_reject) |cur| @min(cur, t) else t;
+    /// One chunk of a limit or update pass. Its result lands before the
+    /// caller's `finished` increment releases it to lane 0.
+    fn walkTask(self: *ParEval, task: EvalTask) void {
+        const b = self.job_batches[task.batch];
+        switch (self.job_kind) {
+            .limit => {
+                const limited = if (b.hooks.limit_range) |f|
+                    f(b.ctx, self.job_x_mut, self.job_x_old, task.first, task.last)
+                else if (task.first == 0) if (b.hooks.apply_limits) |f| f(b.ctx, self.job_x_mut, self.job_x_old) else false else false;
+                if (limited) self.any_limited.store(true, .monotonic);
+            },
+            .update => {
+                const tr = if (b.hooks.update_range) |f|
+                    f(b.ctx, self.job_x, task.first, task.last)
+                else if (task.first == 0) if (b.hooks.update_state) |f| f(b.ctx, self.job_x) else null else null;
+                if (tr) |t| {
+                    while (!self.reject_lock.tryLock()) std.atomic.spinLoopHint();
+                    defer self.reject_lock.unlock();
+                    self.min_reject = if (self.min_reject) |cur| @min(cur, t) else t;
+                }
+            },
+            .stamp => unreachable,
         }
     }
 
@@ -421,42 +474,22 @@ pub const ParEval = struct {
             }
             last = e;
             if (self.wake.quit.load(.acquire)) return;
-            if (self.job_kind == .stamp) self.pass() else self.walkPass();
-            _ = self.done.v.fetchAdd(1, .release);
+            self.drain();
         }
     }
 
-    /// One lane's share of a pass: claim stamp chunks until none are left,
-    /// wait for every lane to finish stamping, then claim reduce blocks.
-    fn pass(self: *ParEval) void {
-        const mode = self.job_mode;
-        while (true) {
-            const i = self.next_task.v.fetchAdd(1, .monotonic);
-            if (i >= self.tasks.len) break;
-            const task = self.tasks[i];
-            const b = self.job_batches[task.batch];
-            const sb = self.slot_base[task.batch];
-            const rb = self.row_base[task.batch];
-            const pl: Planes = .{
-                .g_vals = self.g_stage[sb..],
-                .c_vals = if (self.has_charge) self.c_stage[sb..] else &.{},
-                .rhs = self.rhs_stage[rb..],
-                .q_vec = if (self.has_charge) self.q_stage[rb..] else &.{},
-            };
-            b.hooks.stage(b.ctx, &pl, task.first, task.last, self.job_x, self.job_t, mode);
-        }
-        _ = self.stamped.v.fetchAdd(1, .acq_rel);
-        waitCount(&self.stamped.v, self.n_lanes);
-        const n_blocks = self.cuts.len - 1;
-        while (true) {
-            const j = self.next_block.v.fetchAdd(1, .monotonic);
-            if (j >= n_blocks) break;
-            const lo = self.cuts[j];
-            const hi = self.cuts[j + 1];
-            switch (mode) {
-                inline else => |m| self.reduceBlock(lo, hi, m),
-            }
-        }
+    /// Stages one chunk's stamps at its batch's positions.
+    fn stampTask(self: *ParEval, task: EvalTask) void {
+        const b = self.job_batches[task.batch];
+        const sb = self.slot_base[task.batch];
+        const rb = self.row_base[task.batch];
+        const pl: Planes = .{
+            .g_vals = self.g_stage[sb..],
+            .c_vals = if (self.has_charge) self.c_stage[sb..] else &.{},
+            .rhs = self.rhs_stage[rb..],
+            .q_vec = if (self.has_charge) self.q_stage[rb..] else &.{},
+        };
+        b.hooks.stage(b.ctx, &pl, task.first, task.last, self.job_x, self.job_t, self.job_mode);
     }
 
     /// Reduces cells `[lo, hi)` of the combined slot-then-row index.
@@ -628,7 +661,9 @@ fn cutBlocks(gpa: std.mem.Allocator, slot_seg: []const u32, row_seg: []const u32
 /// about 2x slower than one on a P-core, and four P-core lanes beat four
 /// mixed ones by 1.35-1.38x (dev/devices/gpu-evaluation.md, "Eight host
 /// threads"). The lane counts the thread pool hands out stay within the
-/// P-core threads, so pinned lanes do not pile onto each other.
+/// P-core threads, so pinned lanes do not pile onto each other. Only the
+/// P-cores the thread may already run on: replacing the mask moved the
+/// workers of a run under `taskset -c 0-3` onto cores 0-15.
 fn pinToPerformanceCores() void {
     if (comptime builtin.os.tag != .linux) return;
     const linux = std.os.linux;
@@ -640,7 +675,6 @@ fn pinToPerformanceCores() void {
     const n = linux.read(fd, &buf, buf.len);
     if (linux.errno(n) != .SUCCESS) return;
     var set: linux.cpu_set_t = @splat(0);
-    var any = false;
     var ranges = std.mem.tokenizeAny(u8, buf[0..n], ",\n ");
     while (ranges.next()) |r| {
         var ends = std.mem.splitScalar(u8, r, '-');
@@ -648,9 +682,12 @@ fn pinToPerformanceCores() void {
         const hi = if (ends.next()) |h| std.fmt.parseInt(usize, h, 10) catch return else lo;
         if (hi < lo or hi >= set.len * @bitSizeOf(usize)) return;
         for (lo..hi + 1) |c| set[c / @bitSizeOf(usize)] |= @as(usize, 1) << @intCast(c % @bitSizeOf(usize));
-        any = true;
     }
-    if (any) linux.sched_setaffinity(0, &set) catch {};
+    var allowed: linux.cpu_set_t = undefined;
+    if (linux.errno(linux.sched_getaffinity(0, @sizeOf(linux.cpu_set_t), &allowed)) != .SUCCESS) return;
+    for (&set, allowed) |*cpus, a| cpus.* &= a;
+    // No allowed P-core (none listed, or a mask of E-cores): stay put.
+    if (std.mem.indexOfNone(usize, &set, &.{0}) != null) linux.sched_setaffinity(0, &set) catch {};
 }
 
 /// Spins, then yields, until `counter` reaches `target`. `pause` frees

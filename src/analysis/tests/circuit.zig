@@ -233,6 +233,106 @@ test "threaded stamps equal serial" {
     }
 }
 
+test "a threaded pass finishes on lane 0 alone when no worker is ever scheduled" {
+    // Every core busy can leave a pass's workers unscheduled throughout. The
+    // barriers count finished items, not lanes, so lane 0 runs them all.
+    // Waiting on every lane hung here, and stalled each pass of
+    // stress/vacask_graetz at 8 threads on 4 cores past 900 s.
+    var lib = try Library.init(t.allocator);
+    defer lib.deinit();
+    var prepared = try ladder(&lib, 6);
+    defer prepared.deinit();
+    var ckt = try types.Circuit.instantiate(&prepared, t.allocator);
+    defer ckt.deinit();
+    ckt.setSimState(.{ .kind = .dc });
+    try ckt.computeBaseline();
+    const x = try ramp(t.allocator, ckt.n);
+    defer t.allocator.free(x);
+    ckt.evalNewton(x, 0);
+    const serial = try t.allocator.dupe(f64, ckt.rhs[0..ckt.n]);
+    defer t.allocator.free(serial);
+
+    var par = try ParEval.init(t.allocator, t.io, ckt.batches, ckt.nnz, ckt.n, ckt.has_charge, 4);
+    defer par.deinit();
+    // `ring` spawns nothing, so no worker ever runs; `deinit` joins none.
+    par.started = true;
+    defer par.started = false;
+    ckt.par_eval = &par;
+    defer ckt.par_eval = null;
+    const x_new = try t.allocator.dupe(f64, x);
+    defer t.allocator.free(x_new);
+    for (0..3) |_| {
+        ckt.evalNewton(x, 0);
+        try t.expectEqualSlices(u64, @ptrCast(serial), @ptrCast(ckt.rhs[0..ckt.n]));
+        _ = ckt.applyLimits(x_new, x);
+        ckt.clearLimits();
+        _ = ckt.updateStates(x);
+    }
+}
+
+test "a bypass replay on an instance with tied terminals: serial equals the lanes, and a fresh eval" {
+    // A depletion MOS with gate, source and bulk on one node: mos1 writes
+    // no gate row, so the gate shares the source's global row. Recording
+    // tagged the source's residual with the gate's empty Jacobian row, and
+    // the serial replay dropped the first-order move the staged replay made
+    // (tran/device_mos6_inverter differed between 1 and 2 threads).
+    var lib = try Library.init(t.allocator);
+    defer lib.deinit();
+    var b = try Builder.init(t.allocator, &lib);
+    const a = try b.addNode();
+    const d = try b.addNode();
+    try b.addDevice(models.vsource, "", &.{ .dc = 5 }, &.{}, .{ a, types.GROUND });
+    try b.addDevice(models.resistor, "", &.{ .r = 1e3 }, &.{}, .{ d, types.GROUND });
+    try b.addDevice(models.mos1, "", &.{ .vto = -1 }, &.{}, .{ d, a, a, a });
+    var prepared = try b.compile();
+    defer prepared.deinit();
+    var ckt = try types.Circuit.instantiate(&prepared, t.allocator);
+    defer ckt.deinit();
+    ckt.setSimState(.{ .kind = .dc });
+    try ckt.computeBaseline();
+    const x0 = try t.allocator.alloc(f64, ckt.n);
+    defer t.allocator.free(x0);
+    @memset(x0, 0);
+    x0[a] = 5;
+    x0[d] = 4.5;
+    // Within the replay tolerances: 1e-4 V against reltol * 4.5 V.
+    const x1 = try t.allocator.dupe(f64, x0);
+    defer t.allocator.free(x1);
+    x1[d] += 1e-4;
+    const tol: @import("device").abi.BypassTol = .{ .reltol = 1e-3, .vntol = 1e-6, .abstol = 1e-12 };
+    const n = ckt.n;
+
+    // The oracle: a fresh evaluation at x1, which a first-order replay
+    // matches to second order.
+    ckt.beginSolve();
+    ckt.advanceIteration(x0);
+    ckt.evalNewton(x1, 0);
+    const fresh = try t.allocator.dupe(f64, ckt.rhs[0..n]);
+    defer t.allocator.free(fresh);
+    ckt.evalNewton(x0, 0);
+    const moved = try t.allocator.dupe(f64, ckt.rhs[0..n]);
+    defer t.allocator.free(moved);
+
+    ckt.setBypass(tol);
+    defer ckt.setBypass(null);
+    ckt.evalNewton(x0, 0);
+    ckt.evalNewton(x1, 0);
+    const serial = try t.allocator.dupe(f64, ckt.rhs[0..n]);
+    defer t.allocator.free(serial);
+    for (fresh, moved, serial) |f, m, r| try t.expect(@abs(r - f) <= 1e-3 * @abs(f - m) + 1e-15);
+
+    for ([_]u32{ 1, 2, 3 }) |lanes| {
+        var par = try ParEval.init(t.allocator, t.io, ckt.batches, ckt.nnz, n, ckt.has_charge, lanes);
+        defer par.deinit();
+        ckt.par_eval = &par;
+        defer ckt.par_eval = null;
+        // The staged planes are other cells: the first pass records afresh.
+        ckt.evalNewton(x0, 0);
+        ckt.evalNewton(x1, 0);
+        try t.expectEqualSlices(u64, @ptrCast(serial), @ptrCast(ckt.rhs[0..n]));
+    }
+}
+
 test "linearize reuses the planes only for the same x_op until a writer runs" {
     var lib = try Library.init(t.allocator);
     defer lib.deinit();

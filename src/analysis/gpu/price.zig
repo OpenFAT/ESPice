@@ -9,6 +9,16 @@
 //! wins on the device only past ~`slowdown` instances: one waveform-history
 //! line loses there, a batch of a thousand wins.
 //!
+//! TODO: this price is weak. It treats every device thread as compute-bound,
+//! so it misses memory-bound batches: under VerA 0.23 the 1000-line TXL deck
+//! (248 KB of history per instance, ~14 GB/s uncoalesced on an RTX 4060) runs
+//! 3.45 s on the GPU against 2.42 s on the CPU, and `auto` still picks the GPU.
+//! `hist_ns_per_byte` was calibrated on VerA 0.20 (0.3); VerA 0.23 measures
+//! 0.04-0.34. Needs a device-bandwidth term, a recalibration per VerA layout,
+//! and a placement table measured on a quiet machine (the timing oracle ran
+//! at load 2-47). `auto`'s whole-query choice also depends on a timing probe
+//! and a learned per-card cache, so its placement is not deterministic.
+//!
 //! Contents:
 //! - `pub const Row = struct`
 //! - `pub const Cost = struct`

@@ -9,7 +9,7 @@
 //! Contents:
 //! - `pub const RecordWrite = struct`
 //! - `pub const rec_res`, `rec_jac`, `rec_q`, `rec_qjac`
-//! - `pub fn RecordSink(comptime Inner: type) type`
+//! - `pub fn RecordSink(comptime D: type, comptime Inner: type) type`
 //! - `pub fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool, comptime staged: bool) type`
 //! - `pub fn LocalSink(comptime D: type) type`
 //! - sink members: `skip_g`, `skip_c`, `on_device`, `skip_tape`, `stores`,
@@ -42,17 +42,23 @@ pub const rec_q = 3;
 
 pub const rec_qjac = 4;
 
-/// A host `Sink` that also records every write into `out`, in order: the
-/// latency bypass (`DeviceBatch.evalBypass`) replays them.
-pub fn RecordSink(comptime Inner: type) type {
+/// A host `Sink` over D that also records every write into `out`, in order:
+/// the latency bypass (`DeviceBatch.evalBypass`) replays them.
+pub fn RecordSink(comptime D: type, comptime Inner: type) type {
+    const jac_row = layout.writtenRows(D, "jac_rows");
     return struct {
         inner: *const Inner,
         out: []RecordWrite,
         id: u32,
         n: usize = 0,
         overflow: bool = false,
-        // evalRange writes residual rows in ascending local order, so the
-        // next row at or after the last one is the writer.
+        // evalRange writes the `jac_rows` residual rows in ascending local
+        // order, so the next written row at or after the last one is the
+        // writer. A row it never writes can share the global row of one it
+        // does (a MOS with gate, source and bulk on one node): matching it
+        // tagged the source's residual with the gate's empty Jacobian row,
+        // so the serial replay skipped the first-order move the staged one
+        // made, and 1 and N threads differed (device_mos6_inverter).
         res_ru: u32 = 0,
 
         pub const skip_g = Inner.skip_g;
@@ -71,7 +77,7 @@ pub fn RecordSink(comptime Inner: type) type {
             m.n += 1;
         }
         fn rowOf(s: *const Rs, next: *u32, row: u32) u32 {
-            while (s.inner.rhsRow(s.id, next.*) != row) next.* += 1;
+            while (!jac_row[next.*] or s.inner.rhsRow(s.id, next.*) != row) next.* += 1;
             next.* += 1;
             return next.* - 1;
         }
