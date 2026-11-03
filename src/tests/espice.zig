@@ -2723,6 +2723,8 @@ test "Options.point.tangent_step with live parameters: the deck's own transient 
 const Counting = struct {
     child: std.mem.Allocator,
     live: std.atomic.Value(isize) = .init(0),
+    /// Every `alloc` call through it.
+    allocs: std.atomic.Value(usize) = .init(0),
 
     fn allocator(self: *Counting) std.mem.Allocator {
         return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
@@ -2732,6 +2734,7 @@ const Counting = struct {
         const self: *Counting = @ptrCast(@alignCast(ctx));
         const p = self.child.rawAlloc(n, alignment, ret) orelse return null;
         _ = self.live.fetchAdd(@intCast(n), .monotonic);
+        _ = self.allocs.fetchAdd(1, .monotonic);
         return p;
     }
 
@@ -2792,6 +2795,43 @@ test "release_points: a Problem run batch after batch keeps a few KB per release
     const mem = p.queryMemory();
     try t.expect(mem.peak > 0 and mem.live <= mem.peak and mem.live <= @as(usize, @intCast(live[live.len - 1])));
     try t.expectError(error.ResultUnavailable, p.point_measures(@fromBackingInt(@backingInt(p.session.outputs.items[p.session.outputs.items.len - 1])), &.{"tpd"}, values[0..1], why[0..1]));
+}
+
+test "run_all: a Problem appended to and run batch after batch allocates as often and holds as much in batch 40 as in batch 20" {
+    var counting: Counting = .{ .child = t.allocator };
+    // One thread: the count is deterministic, unlike the wall time it replaces.
+    const p = try api.Problem.init(counting.allocator(), t.io, .{ .source = .{ .bytes = .{ .data = abort_deck, .origin = "batches.sp" } }, .live_params = &.{"rv"} });
+    defer p.deinit();
+    var rows: [50]f64 = undefined;
+    for (&rows, 0..) |*r, k| r.* = 1e3 * (1 + 0.01 * @as(f64, @floatFromInt(k)));
+    var values: [rows.len]f64 = undefined;
+    var why: [rows.len]api.Problem.Reason = undefined;
+    var calls: [40]usize = undefined;
+    var live: [calls.len]isize = undefined;
+    for (&calls, &live) |*n, *l| {
+        const before = counting.allocs.load(.monotonic);
+        const first = try p.append_points(&rows, rows.len, .{ .measures_only = true, .early_stop = true });
+        try p.run_all();
+        try p.point_measures(first, &.{"tpd"}, &values, &why);
+        try p.release_points(first, rows.len);
+        n.* = counting.allocs.load(.monotonic) - before;
+        l.* = counting.live.load(.monotonic);
+    }
+    var early: usize = 0;
+    var late: usize = 0;
+    for (calls[10..20]) |n| early += n;
+    for (calls[30..40]) |n| late += n;
+    const grown = live[39] - live[19];
+    std.debug.print("batches: {d} allocations (11-20) vs {d} (31-40); {d} B live after 20, {d} B after 40\n", .{ early, late, live[19], live[39] });
+    // The same points every batch: 3508 calls each (Debug, 2026-11-01),
+    // one or two more in a batch where a session table grows. A batch that
+    // redoes earlier batches' work allocates in proportion to them.
+    try t.expect(late <= early + 10);
+    // Retention, not slack: `release_points` keeps each query's row until
+    // `deinit` (its ponytail note), 569 B per point over these 20 batches
+    // with a table doubling (Debug, 2026-11-01). A point that keeps its
+    // circuit or waveform holds tens of KB.
+    try t.expect(grown < 20 * rows.len * 1024);
 }
 
 const lane_deck = "tests/conformance/tests/netlist/variants/data_lane_stimulus.sp";

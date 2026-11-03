@@ -7,6 +7,17 @@
 //! and Der Kiureghian, Struct. Safety 17(2), 1995). The caller owns
 //! evaluation, as with `lm.zig`: `points` yields the points to simulate and
 //! `feed` takes the spec's margin g at each, g ≥ 0 where the spec passes.
+//!
+//! Contents:
+//! - `pub const step: f64`
+//! - `pub const Options = struct`
+//! - `pub const Status = enum(u8)`
+//! - `pub const Form = struct`
+//! - `Form.init(arena: std.mem.Allocator, d: u32, opts: Options) !Form`
+//! - `Form.points(s: *const Form) []const f64`
+//! - `Form.batched(s: *const Form) bool`, `Form.converged(s: *const Form) bool`
+//! - `Form.feed(s: *Form, margins: []const f64) void`
+
 const std = @import("std");
 const numerics = @import("numerics.zig");
 const assert = std.debug.assert;
@@ -14,11 +25,6 @@ const dot = numerics.dot;
 
 /// The forward-difference step of the gradient, in sigmas.
 pub const step = 0.1;
-/// Halvings of the line-search step before the search gives up.
-const max_halvings = 8;
-/// Armijo's sufficient-decrease fraction. Not 1/2: on a linear margin the
-/// full step lands exactly on m(z) + slope/2, a tie rounding would decide.
-const armijo = 0.1;
 
 /// `.wcd`'s `MAXITER=` and `TOL=`.
 pub const Options = struct {
@@ -69,8 +75,6 @@ pub const Form = struct {
     /// sign·‖z‖ once a gradient round's margin is finite: the signed
     /// distance of a point that was simulated, never a predicted one.
     beta: ?f64 = null,
-
-    const Phase = enum(u8) { gradient, line };
 
     /// Starts at the origin, every draw at its nominal. Asserts at least one
     /// coordinate, one round and a positive tolerance. Fails only when
@@ -123,6 +127,10 @@ pub const Form = struct {
             .line => s.line(margins[0]),
         }
     }
+
+    // ---- private ----
+
+    const Phase = enum(u8) { gradient, line };
 
     /// A gradient round: the stop tests at `z`, else the Rackwitz-Fiessler
     /// direction and the line search's first point.
@@ -203,17 +211,11 @@ pub const Form = struct {
     }
 };
 
-/// Runs `s` to its end against `f`, a test oracle with `eval(z) f64`.
-/// Terminates: MAXITER caps the gradient rounds, `max_halvings` each line.
-fn solve(s: *Form, f: anytype) void {
-    var g: [8]f64 = undefined;
-    while (s.points().len != 0) {
-        const pts = s.points();
-        const count = pts.len / s.d;
-        for (0..count) |p| g[p] = f.eval(pts[p * s.d ..][0..s.d]);
-        s.feed(g[0..count]);
-    }
-}
+/// Halvings of the line-search step before the search gives up.
+const max_halvings = 8;
+/// Armijo's sufficient-decrease fraction. Not 1/2: on a linear margin the
+/// full step lands exactly on m(z) + slope/2, a tie rounding would decide.
+const armijo = 0.1;
 
 /// g = l - 3 z1 - 4 z2: linear, ‖a‖ = 5.
 const Linear = struct {
@@ -231,6 +233,20 @@ const Parabola = struct {
         return self.b - z[0] - 0.5 * self.kappa * z[1] * z[1];
     }
 };
+
+// ---- private ----
+
+/// Runs `s` to its end against `f`, a test oracle with `eval(z) f64`.
+/// Terminates: MAXITER caps the gradient rounds, `max_halvings` each line.
+fn solve(s: *Form, f: anytype) void {
+    var g: [8]f64 = undefined;
+    while (s.points().len != 0) {
+        const pts = s.points();
+        const count = pts.len / s.d;
+        for (0..count) |p| g[p] = f.eval(pts[p * s.d ..][0..s.d]);
+        s.feed(g[0..count]);
+    }
+}
 
 test "a margin linear in the coordinates gives the closed-form beta in two gradient rounds, signed by the nominal side" {
     // Oracle: the closed form. g = l - aᵀz fails past the plane aᵀz = l,

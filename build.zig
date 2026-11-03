@@ -44,6 +44,7 @@ pub fn build(b: *Build) void {
     };
 
     const models = discoverModels(b);
+    const contract_files = contractFiles(b, vera.builder);
     const gen = b.allocator.alloc(Build.LazyPath, models.len) catch @panic("OOM");
     for (models, gen) |m, *out| {
         const run = b.addRunArtifact(vera_exe);
@@ -53,6 +54,7 @@ pub fn build(b: *Build) void {
             if (escape_models.has(m.name)) run.addArg("--allow=W0149");
             run.addArgs(&.{ "--zig", b.graph.zig_exe, "--contract" });
             run.addFileArg(vera.path("lib/contract.zig"));
+            for (contract_files) |f| run.addFileInput(f);
         }
         if (m.include) |inc| {
             run.addArg("-I");
@@ -124,7 +126,7 @@ pub fn build(b: *Build) void {
     roots.append(b.allocator, .{ .name = "lu", .root = b.path("src/solver/lu_device.zig") }) catch @panic("OOM");
     // The lane root runs `.meas` passes on the device (06 6.8) from the file
     // measure.zig shares with it.
-    const lane_scan = b.allocator.dupe(Import, &.{.{ .name = "measure_scan", .module = b.createModule(.{ .root_source_file = b.path("src/output/scan.zig"), .strip = true }) }}) catch @panic("OOM");
+    const lane_scan = b.allocator.dupe(Import, &.{.{ .name = "measure_scan", .module = b.createModule(.{ .root_source_file = b.path("src/output/measure/passes.zig"), .strip = true }) }}) catch @panic("OOM");
     if (gpu_lanes) roots.append(b.allocator, .{ .name = "lane", .root = b.path("src/solver/lane_device.zig"), .imports = &laneKernelImports, .imports_ctx = @ptrCast(lane_scan.ptr) }) catch @panic("OOM");
     gompute_build.emitKernels(b, gompute, exe, .{
         .kernel_roots = roots.items,
@@ -225,6 +227,10 @@ pub fn build(b: *Build) void {
     limiter_gen.addArgs(&.{ "--emit-zig", "--allow=W0650", "-o" });
     const limiter_source = limiter_gen.addOutputFileArg2("va_limit_state.zig", .{});
     limiter_gen.addFileArg(b.path("tests/conformance/tests/netlist/hdl/veriloga_limit.assets/va_limit_state.va"));
+    const crawl_gen = b.addRunArtifact(vera_exe);
+    crawl_gen.addArgs(&.{ "--emit-zig", "--allow=W0650", "-o" });
+    const crawl_source = crawl_gen.addOutputFileArg2("va_gmin_crawl.zig", .{});
+    crawl_gen.addFileArg(b.path("src/analysis/tests/integration.assets/va_gmin_crawl.va"));
 
     // A separate object on purpose: error ordinals differ between compilations.
     const error_object_mod = M.make(b.path("src/device/tests/device_errors_object.zig"), &.{
@@ -251,6 +257,7 @@ pub fn build(b: *Build) void {
         t.run(g.analysis, &.{
             .{ .name = "builder", .module = g.builder },
             .{ .name = "limiter_device", .module = M.make(limiter_source, &.{contract}) },
+            .{ .name = "crawl_device", .module = M.make(crawl_source, &.{contract}) },
             contract,
             .{ .name = "models", .module = g.models },
             .{ .name = "device_eval", .module = g.eval },
@@ -302,6 +309,7 @@ pub fn build(b: *Build) void {
         const core: Import = .{ .name = "core", .module = pg.core };
         const probe = b.addObject(.{ .name = "codegen-probe", .root_module = P.make(b.path("tests/codegen.zig"), &.{
             .{ .name = "device_eval", .module = pg.eval },
+            .{ .name = "models", .module = pg.models },
             .{ .name = "solver", .module = pg.solver },
             .{ .name = "integrator", .module = P.make(b.path("src/analysis/tran/integrator.zig"), &.{core}) },
             core,
@@ -309,7 +317,7 @@ pub fn build(b: *Build) void {
         const residue = b.addSystemCommand(&.{"python3"});
         residue.addFileArg(b.path("tools/asm_probe.py"));
         residue.addFileArg(probe.getEmittedAsm());
-        residue.addArgs(&.{ "gen_dual_mul=hand_dual_mul", "gen_engine_solve=hand_engine_solve", "gen_hook_trap_assemble=hand_hook_trap_assemble", "gen_hook_step_assemble=hand_hook_step_assemble", "gen_hook_diag_at=hand_hook_diag_at", "gen_num_dot=hand_num_dot", "gen_num_sum=hand_num_sum", "gen_num_norminf=hand_num_norminf", "gen_lanes_splat=hand_lanes_splat", "gen_lanes_any=hand_lanes_any", "gen_lanes_all=hand_lanes_all", "gen_lanes_select=hand_lanes_select", "gen_lanes_cmp=hand_lanes_cmp", "gen_lanes_either=hand_lanes_either", "gen_lanes_lane=hand_lanes_lane", "gen_lanes_each=hand_lanes_each", "gen_newton=hand_newton", "gen_update_and_norm=hand_update_and_norm" });
+        residue.addArgs(&.{ "gen_dual_mul=hand_dual_mul", "gen_batch_of=hand_batch_of", "gen_engine_solve=hand_engine_solve", "gen_hook_trap_assemble=hand_hook_trap_assemble", "gen_hook_step_assemble=hand_hook_step_assemble", "gen_hook_diag_at=hand_hook_diag_at", "gen_num_dot=hand_num_dot", "gen_num_sum=hand_num_sum", "gen_num_norminf=hand_num_norminf", "gen_lanes_splat=hand_lanes_splat", "gen_lanes_any=hand_lanes_any", "gen_lanes_all=hand_lanes_all", "gen_lanes_select=hand_lanes_select", "gen_lanes_cmp=hand_lanes_cmp", "gen_lanes_either=hand_lanes_either", "gen_lanes_lane=hand_lanes_lane", "gen_lanes_each=hand_lanes_each", "gen_newton=hand_newton", "gen_update_and_norm=hand_update_and_norm" });
         test_step.dependOn(&residue.step);
     }
 
@@ -370,12 +378,10 @@ const Graph = struct {
 /// The simulator's module graph for one target. `analysis` still needs `gompute_kernels`.
 fn graph(c: Cfg, vera: *Build.Dependency, gompute: *Module, models: []const Model, gen: []const Build.LazyPath, bo: *Module) Graph {
     const b = c.b;
-    // Device code: always stripped (DWARF on generated models crashed NVPTX).
-    var dev = c;
-    // On the host they follow -Ddebug-info: the exe's LLVM module imports the
+    // Host device code follows -Ddebug-info: the exe's LLVM module imports the
     // models, and a stripped model inlined into an unstripped caller segfaults
-    // Zig 0.18.0-dev.349 while emitting DWARF.
-    dev.strip = c.strip or c.gpu_kernels;
+    // Zig 0.18.0-dev.349 while emitting DWARF. The kernel twins (`kmake`) stay
+    // stripped (DWARF on generated models crashed NVPTX).
     const contract: Import = .{ .name = "contract", .module = vera.module("contract") };
     const gomp: Import = .{ .name = "gompute", .module = gompute };
     // emitKernels mutates the public Gompute module to import all GPU blobs.
@@ -394,7 +400,7 @@ fn graph(c: Cfg, vera: *Build.Dependency, gompute: *Module, models: []const Mode
     const abi: Import = .{ .name = "device_abi", .module = c.make(b.path("src/device/abi.zig"), &.{ contract, core }) };
     // Device objects see only core's ids leaf (GROUND, DeviceType): an edit elsewhere in core
     // must not recompile every model. abi's own tests still get the full core.
-    const abi_dev = dev.make(b.path("src/device/abi.zig"), &.{ contract, .{ .name = "core", .module = dev.make(b.path("src/core/ids.zig"), &.{}) } });
+    const abi_dev = c.make(b.path("src/device/abi.zig"), &.{ contract, .{ .name = "core", .module = c.make(b.path("src/core/ids.zig"), &.{}) } });
     // Zig 0.18's std.Io.Threaded does not compile for wasm32-wasi with libc
     // (Environ and PATH_MAX); without it, it takes the WASI syscall path.
     const libc = !c.target.result.cpu.arch.isWasm();
@@ -415,7 +421,7 @@ fn graph(c: Cfg, vera: *Build.Dependency, gompute: *Module, models: []const Mode
     for (models, gen, dev_mods, kernel_models, objs) |m, src, *dm, *kone, *obj| {
         const line = b.fmt("pub const {s} = @import(\"{s}\");\n", .{ m.name, m.name });
         agg.appendSlice(b.allocator, line) catch @panic("OOM");
-        dm.* = dev.make(src, &.{contract});
+        dm.* = c.make(src, &.{contract});
         // The device kernels compile at .fast, where VerA's Debug-only Model
         // field (`su_ok`) does not exist; `gpu_kernels` makes the host's
         // device object drop it too, so a Model row has one size on both sides.
@@ -430,13 +436,13 @@ fn graph(c: Cfg, vera: *Build.Dependency, gompute: *Module, models: []const Mode
             if (c.gpu_kernels or c.optimize != .debug) "pub const gpu_kernels = true;\n" else "",
             if (ltra) "pub const ltra_ac = @import(\"ltra_ac\");\n" else "",
         }));
-        const one = dev.make(one_src, &.{.{ .name = m.name, .module = dm.* }});
+        const one = c.make(one_src, &.{.{ .name = m.name, .module = dm.* }});
         kone.* = kmake(b, one_src, &.{.{ .name = m.name, .module = kmake(b, src, &.{k_contract}) }});
         if (ltra) {
-            one.addImport("ltra_ac", dev.make(b.path("models/ltra_ac.zig"), &.{}));
+            one.addImport("ltra_ac", c.make(b.path("models/ltra_ac.zig"), &.{}));
             kone.*.addImport("ltra_ac", kmake(b, b.path("models/ltra_ac.zig"), &.{}));
         }
-        const host = dev.make(b.path("src/device/eval.zig"), &.{ contract, .{ .name = "models", .module = one }, .{ .name = "device_abi", .module = abi_dev }, object_gomp });
+        const host = c.make(b.path("src/device/eval.zig"), &.{ contract, .{ .name = "models", .module = one }, .{ .name = "device_abi", .module = abi_dev }, object_gomp });
         host.link_libc = libc;
         // The callconv(.auto) vtable gains a hidden *StackTrace when tracing is on.
         host.error_tracing = c.optimize == .debug;
@@ -450,6 +456,7 @@ fn graph(c: Cfg, vera: *Build.Dependency, gompute: *Module, models: []const Mode
         abi,
         core,
         .{ .name = "fastvaf", .module = vera.module("vera") },
+        .{ .name = "zigbuild", .module = vera.module("zigbuild") },
         .{ .name = "vera_sim", .module = vera.module("sim") },
         .{ .name = "vera_digital", .module = vera.module("digital") },
         build_options,
@@ -457,7 +464,7 @@ fn graph(c: Cfg, vera: *Build.Dependency, gompute: *Module, models: []const Mode
     device.module.link_libc = libc;
     const solver = c.make(b.path("src/solver/root.zig"), &.{ core, build_options });
     // `.meas` evaluation: output prints it, a transient watches its cards resolve.
-    const measure: Import = .{ .name = "measure", .module = c.make(b.path("src/output/measure.zig"), &.{core}) };
+    const measure: Import = .{ .name = "measure", .module = c.make(b.path("src/output/measure/root.zig"), &.{core}) };
     const analysis = c.make(b.path("src/analysis/root.zig"), &.{ .{ .name = "solver", .module = solver }, core, device, gomp, build_options, measure });
     analysis.link_libc = libc;
     const netlist: Import = .{ .name = "netlist", .module = c.make(b.path("src/frontend/netlist.zig"), &.{core}) };
@@ -720,6 +727,22 @@ fn discoverModels(b: *Build) []const Model {
     for (out.items[1..], out.items[0 .. out.items.len - 1]) |cur, prev| {
         if (std.mem.eql(u8, cur.name, prev.name))
             std.debug.panic("models/{s} and models/{s} share the stem '{s}'", .{ prev.file, cur.file, cur.name });
+    }
+    return out.items;
+}
+
+/// Every file under VerA's `lib/contract/`, which `lib/contract.zig` imports:
+/// a model's regeneration reads them all, so each is an input of its run.
+fn contractFiles(b: *Build, vera: *Build) []const Build.LazyPath {
+    const io = b.graph.io;
+    var out: std.ArrayList(Build.LazyPath) = .empty;
+    var dir = vera.root.openDir(io, "lib/contract", .{ .iterate = true }) catch @panic("VerA lib/contract/ missing");
+    defer dir.close(io);
+    var walker = dir.walk(b.allocator) catch @panic("OOM");
+    defer walker.deinit();
+    while (walker.next(io) catch @panic("VerA lib/contract/ walk failed")) |e| {
+        if (e.kind != .file) continue;
+        out.append(b.allocator, vera.path(b.fmt("lib/contract/{s}", .{e.path}))) catch @panic("OOM");
     }
     return out.items;
 }
