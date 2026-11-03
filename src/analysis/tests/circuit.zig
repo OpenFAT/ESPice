@@ -231,6 +231,40 @@ test "threaded stamps equal serial" {
             try t.expectEqualSlices(f64, full.q, ckt.q_vec[0..n]);
         }
     }
+
+    // Workers that never arrive (parked, descheduled) hold up no pass: the
+    // calling lane runs every chunk and block itself, bit for bit serial.
+    // `started` without threads stands in for 7 workers that never wake.
+    const x_lim = try t.allocator.alloc(f64, n);
+    defer t.allocator.free(x_lim);
+    @memcpy(x_lim, x);
+    for (x_lim) |*v| v.* *= 3;
+    const serial_lim = try t.allocator.dupe(f64, x_lim);
+    defer t.allocator.free(serial_lim);
+    const serial_limited = ckt.applyLimits(serial_lim, x);
+    // Limiting leaves state the next eval reads; the planes above had none.
+    ckt.clearLimits();
+    var par = try ParEval.init(t.allocator, t.io, ckt.batches, nnz, n, ckt.has_charge, 8);
+    defer par.deinit();
+    par.started = true;
+    defer par.started = false;
+    ckt.par_eval = &par;
+    defer ckt.par_eval = null;
+    for (0..2) |_| {
+        ckt.eval(x, 0);
+        try take.expectSame(full, &ckt);
+        ckt.evalNewton(x, 0);
+        try take.expectSame(newton, &ckt);
+        ckt.evalQ(x, 0);
+        try t.expectEqualSlices(f64, full.q, ckt.q_vec[0..n]);
+        _ = ckt.updateStates(x);
+        try t.expectEqualSlices(f64, full.q, ckt.q_vec[0..n]);
+        const lim = try t.allocator.dupe(f64, x_lim);
+        defer t.allocator.free(lim);
+        try t.expectEqual(serial_limited, ckt.applyLimits(lim, x));
+        try t.expectEqualSlices(f64, serial_lim, lim);
+        ckt.clearLimits();
+    }
 }
 
 test "linearize reuses the planes only for the same x_op until a writer runs" {

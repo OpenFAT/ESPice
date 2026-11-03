@@ -165,9 +165,18 @@ const borrow_min_nnz: u32 = 50_000;
 
 /// Lanes for a query of `ckt`: 1 below both gates.
 fn wantLanes(ckt: *const types.Circuit) u32 {
+    return if (evalPays(ckt) or ckt.nnz >= borrow_min_nnz) ThreadPool.per_query else 1;
+}
+
+/// Whether `ckt`'s device weight reaches `borrow_min_weight`, from which a
+/// ParEval stamp pays. Below it borrowed lanes serve only the multicore LU:
+/// on stress/scaling_rc_ladder_100k (200k linear instances, past the nnz
+/// gate) a ParEval took the run from 1.69 s to 1.87 s and 1.7 to 7.3 s of
+/// CPU, since its reduce walks every cell the serial baseline copy skips.
+fn evalPays(ckt: *const types.Circuit) bool {
     var weight: u64 = 0;
     for (ckt.batches) |b| weight += @as(u64, b.count) * @import("par_eval.zig").instanceWeight(b);
-    return if (weight >= borrow_min_weight or ckt.nnz >= borrow_min_nnz) ThreadPool.per_query else 1;
+    return weight >= borrow_min_weight;
 }
 
 /// Lanes per batch: the CPU's f64 vector width (4 on AVX2, 8 on AVX-512).
@@ -879,19 +888,22 @@ pub const Executor = struct {
         // Borrowed lanes serve the device stamp and the multicore refactor;
         // both are bitwise their one-thread forms, so only speed moves.
         var lanes = self.config.device_threads;
+        // An explicit ESPICE_THREADS stamps on its lanes whatever the weight.
+        var eval_lanes = lanes;
         var borrowed: u32 = 0;
         if (self.config.thread_pool) |pool| if (self.circuit.ws == null) {
             const want = wantLanes(&self.circuit);
             borrowed = pool.take(want - 1);
             lanes = 1 + borrowed;
+            eval_lanes = if (evalPays(&self.circuit)) lanes else 1;
             var execution = self.circuit.solver_execution;
             execution.lu_threads = @intCast(@min(lanes, 16));
             self.circuit.configure(execution, self.circuit.knobs);
         };
         defer if (self.config.thread_pool) |pool| pool.give(borrowed);
         var par: ?ParEval = null;
-        if (lanes > 1) {
-            par = try ParEval.init(self.allocator, self.io, self.circuit.batches, self.circuit.nnz, self.circuit.n, self.circuit.has_charge, lanes);
+        if (eval_lanes > 1) {
+            par = try ParEval.init(self.allocator, self.io, self.circuit.batches, self.circuit.nnz, self.circuit.n, self.circuit.has_charge, eval_lanes);
             self.circuit.par_eval = &par.?;
         }
         defer {
