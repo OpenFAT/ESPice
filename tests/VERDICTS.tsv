@@ -922,6 +922,7 @@ PASS	conformance/tests/netlist/tran/tstart_tmax_ngspice.sp
 PASS	conformance/tests/netlist/tran/txl_tran_long_run_past_2048.sp
 PASS	conformance/tests/netlist/tran/txl_tran_matched_step.sp
 PASS	conformance/tests/netlist/tran/txl_tran_mismatched_load.sp
+PASS	conformance/tests/netlist/tran/txl_wide_batch_1000.sp
 PASS	conformance/tests/netlist/tran/uic_t0_row.sp
 PASS	conformance/tests/netlist/tran/zero_abstol_vntol.sp
 PASS	conformance/tests/netlist/tran/zero_vntol_chgtol.sp
