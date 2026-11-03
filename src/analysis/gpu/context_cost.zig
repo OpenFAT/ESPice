@@ -20,6 +20,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const gompute = @import("gompute");
+const drv = @import("driver.zig");
 const artifacts = @import("gompute_kernels");
 const device_ir = @import("device").abi;
 const Knobs = @import("../Circuit.zig").Knobs;
@@ -395,7 +396,7 @@ fn sassFits() bool {
         else => {},
     }
     const fits = blk: {
-        var compute = gompute.runtime.dynamic.Compute.init(null) catch break :blk false;
+        var compute = drv.compute(null) catch break :blk false;
         defer compute.deinit();
         break :blk (compute.computeCapability() catch break :blk false) == want;
     };

@@ -30,6 +30,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const gompute = @import("gompute");
+const drv = @import("driver.zig");
 const device_ir = @import("device").abi;
 const root = @import("../types.zig");
 const devices = @import("devices.zig");
@@ -185,7 +186,7 @@ pub const Kernels = struct {
             if (i < done) @field(k, f).deinit();
         };
         inline for (@typeInfo(Kernels).@"struct".field_names) |f| {
-            @field(k, f) = gompute.rawKernelByName(backend.?, "arp_lane_" ++ f, devices.ordinal) catch |e| return if (e == error.KernelNotFound) Error.NoLaneImage else e;
+            @field(k, f) = drv.rawKernelByName(backend.?, "arp_lane_" ++ f, devices.ordinal) catch |e| return if (e == error.KernelNotFound) Error.NoLaneImage else e;
             done += 1;
         }
         assert(done == @typeInfo(Kernels).@"struct".field_names.len);
@@ -364,7 +365,7 @@ pub fn laneName(buf: []u8, eval_kernel: []const u8, what: []const u8) ?[:0]const
 /// null (older HIP, no driver). Starts the driver.
 pub fn multiprocessorCount() ?u32 {
     if (comptime @import("builtin").cpu.arch.isWasm()) return null;
-    var compute = gompute.runtime.dynamic.Compute.init(null) catch return null;
+    var compute = drv.compute(null) catch return null;
     defer compute.deinit();
     return compute.multiprocessorCount() catch null;
 }
@@ -373,7 +374,7 @@ pub fn multiprocessorCount() ?u32 {
 /// driver.
 pub fn fp64Ratio() ?u32 {
     if (comptime @import("builtin").cpu.arch.isWasm()) return null;
-    var compute = gompute.runtime.dynamic.Compute.init(null) catch return null;
+    var compute = drv.compute(null) catch return null;
     defer compute.deinit();
     return compute.fp64Ratio() catch null;
 }

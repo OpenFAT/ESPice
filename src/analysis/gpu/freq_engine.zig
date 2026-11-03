@@ -15,6 +15,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const gompute = @import("gompute");
+const drv = @import("driver.zig");
 const solver = @import("solver");
 const freq = @import("freq.zig");
 
@@ -48,17 +49,17 @@ pub fn Engine(comptime backend: gompute.Backend) type {
         buffers: [@typeInfo(Id).@"enum".field_names.len]Storage = @splat(.{}),
 
         pub fn init() !Self {
-            var fill = try gompute.rawKernelByName(backend, "arp_freq_fill", 0);
+            var fill = try drv.rawKernelByName(backend, "arp_freq_fill", 0);
             errdefer fill.deinit();
-            var refactor = try gompute.rawKernelByName(backend, "arp_lane_refactor", 0);
+            var refactor = try drv.rawKernelByName(backend, "arp_lane_refactor", 0);
             errdefer refactor.deinit();
-            var solve = try gompute.rawKernelByName(backend, "arp_freq_solve", 0);
+            var solve = try drv.rawKernelByName(backend, "arp_freq_solve", 0);
             errdefer solve.deinit();
-            var cfill = try gompute.rawKernelByName(backend, "arp_freq_cfill", 0);
+            var cfill = try drv.rawKernelByName(backend, "arp_freq_cfill", 0);
             errdefer cfill.deinit();
-            var crefactor = try gompute.rawKernelByName(backend, "arp_freq_crefactor", 0);
+            var crefactor = try drv.rawKernelByName(backend, "arp_freq_crefactor", 0);
             errdefer crefactor.deinit();
-            var csolve = try gompute.rawKernelByName(backend, "arp_freq_csolve", 0);
+            var csolve = try drv.rawKernelByName(backend, "arp_freq_csolve", 0);
             errdefer csolve.deinit();
             const stream = try fill.createStream();
             return .{ .fill = fill, .refactor = refactor, .solve = solve, .cfill = cfill, .crefactor = crefactor, .csolve = csolve, .stream = stream };

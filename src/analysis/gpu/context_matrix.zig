@@ -16,6 +16,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const gompute = @import("gompute");
+const drv = @import("driver.zig");
 const device_ir = @import("device").abi;
 const direct = @import("solver").direct;
 const walk = @import("../par_eval.zig");
@@ -185,9 +186,9 @@ fn gcInit(self: *GpuContext, diag: []const u32, nnz: u32) bool {
 fn gcAlloc(self: *GpuContext, diag: []const u32, nnz: u32) !Gc {
     const be = backend.?;
     std.debug.assert(diag.len == self.n);
-    var combine = try gompute.rawKernelByName(be, "arp_gc_combine", self.batches[0].kernel.context.ordinal);
+    var combine = try drv.rawKernelByName(be, "arp_gc_combine", self.batches[0].kernel.context.ordinal);
     errdefer combine.deinit();
-    var gather = try gompute.rawKernelByName(be, "arp_gc_gather", self.batches[0].kernel.context.ordinal);
+    var gather = try drv.rawKernelByName(be, "arp_gc_gather", self.batches[0].kernel.context.ordinal);
     errdefer gather.deinit();
     const k0 = &self.batches[0].kernel;
     const nk: usize = @max(diag.len, 1);

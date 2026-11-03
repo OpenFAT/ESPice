@@ -14,6 +14,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const gompute = @import("gompute");
+const drv = @import("driver.zig");
 const solver = @import("solver");
 const Knobs = @import("../Circuit.zig").Knobs;
 const devices = @import("devices.zig");
@@ -114,17 +115,17 @@ pub const GpuLu = struct {
         const be = backend.?;
         // On this thread's device (`devices.place`), as the query's eval.
         const ord = devices.ordinal;
-        var k_ref = try gompute.rawKernelByName(be, "arp_lu_refactor", ord);
+        var k_ref = try drv.rawKernelByName(be, "arp_lu_refactor", ord);
         errdefer k_ref.deinit();
-        var k_ref16 = try gompute.rawKernelByName(be, "arp_lu_refactor16", ord);
+        var k_ref16 = try drv.rawKernelByName(be, "arp_lu_refactor16", ord);
         errdefer k_ref16.deinit();
-        var k_lh = try gompute.rawKernelByName(be, "arp_lu_lhead", ord);
+        var k_lh = try drv.rawKernelByName(be, "arp_lu_lhead", ord);
         errdefer k_lh.deinit();
-        var k_uh = try gompute.rawKernelByName(be, "arp_lu_uhead", ord);
+        var k_uh = try drv.rawKernelByName(be, "arp_lu_uhead", ord);
         errdefer k_uh.deinit();
-        var k_lp = try gompute.rawKernelByName(be, "arp_lu_lpanel", ord);
+        var k_lp = try drv.rawKernelByName(be, "arp_lu_lpanel", ord);
         errdefer k_lp.deinit();
-        var k_up = try gompute.rawKernelByName(be, "arp_lu_upanel", ord);
+        var k_up = try drv.rawKernelByName(be, "arp_lu_upanel", ord);
         errdefer k_up.deinit();
         const pin_a = try pinnedF64(&k_ref, nnz);
         errdefer freePinnedF64(&k_ref, pin_a);
@@ -466,9 +467,9 @@ pub const GpuLu = struct {
             return r;
         }
         const be = backend.?;
-        var combine = try gompute.rawKernelByName(be, "arp_gc_combine", self.k_ref.context.ordinal);
+        var combine = try drv.rawKernelByName(be, "arp_gc_combine", self.k_ref.context.ordinal);
         errdefer combine.deinit();
-        var scatter = try gompute.rawKernelByName(be, "arp_gc_scatter", self.k_ref.context.ordinal);
+        var scatter = try drv.rawKernelByName(be, "arp_gc_scatter", self.k_ref.context.ordinal);
         errdefer scatter.deinit();
         const pin_ov = try pinnedF64(&self.k_ref, nk);
         errdefer freePinnedF64(&self.k_ref, pin_ov);

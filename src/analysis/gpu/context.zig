@@ -40,6 +40,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const gompute = @import("gompute");
+const drv = @import("driver.zig");
 const device_ir = @import("device").abi;
 const Knobs = @import("../Circuit.zig").Knobs;
 const devices = @import("devices.zig");
@@ -145,7 +146,7 @@ pub const Driver = struct {
     // ---- private ----
 
     fn warmUp(self: *Driver) void {
-        var compute = gompute.runtime.dynamic.Compute.init(if (backend.? == .cuda) .cuda else .hip) catch return;
+        var compute = drv.compute(if (backend.? == .cuda) .cuda else .hip) catch return;
         compute.deinit();
         self.up.store(true, .monotonic);
         // Every other device's context too: the device table opens each one
@@ -704,7 +705,7 @@ pub fn fallsBack(req: Request, explicit: bool, e: InitError) bool {
 pub fn detectedHardware() []const u8 {
     // wasm has no drivers to load (and gompute's loader lock needs sched_yield).
     if (comptime @import("builtin").cpu.arch.isWasm()) return "none";
-    var compute = gompute.runtime.dynamic.Compute.init(null) catch return "none";
+    var compute = drv.compute(null) catch return "none";
     defer compute.deinit();
     return switch (compute.backend) {
         .cpu => "none",

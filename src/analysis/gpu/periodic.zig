@@ -17,6 +17,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const gompute = @import("gompute");
+const drv = @import("driver.zig");
 const artifacts = @import("gompute_kernels");
 const solver = @import("solver");
 
@@ -140,7 +141,7 @@ pub fn Engine(comptime backend: gompute.Backend) type {
             var loaded: usize = 0;
             errdefer for (kernels[0..loaded]) |*k| k.deinit();
             inline for (kernel_names) |name| {
-                kernels[loaded] = try gompute.rawKernelByName(backend, "arp_periodic_" ++ name, 0);
+                kernels[loaded] = try drv.rawKernelByName(backend, "arp_periodic_" ++ name, 0);
                 loaded += 1;
             }
             var stream = try kernels[0].createStream();
