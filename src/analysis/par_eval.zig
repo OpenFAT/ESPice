@@ -28,14 +28,6 @@
 //!   (re-exports of `host_walks.zig`)
 //! - `pub const ParEval = struct` (`Base`, `init`, `deinit`, `run`, `limit`, `update`)
 //! - `pub fn instanceWeight(b: Batch) u64`
-//!
-//! A pass waits for its tickets, never for its lanes. Each chunk and reduce
-//! block is a ticket of one tagged counter; the reduce starts once every
-//! chunk is done, and the pass ends once every block is. A worker that is
-//! parked or descheduled when a pass opens sits it out, and the calling
-//! lane runs what nobody claimed. Waiting for every lane to arrive held
-//! each pass to the latest wake: 64% of `pass`'s samples sat in that spin
-//! on scaling_parallel_inverters_2000.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -80,10 +72,10 @@ pub const ParEval = struct {
     slots: Gather,
     rows: Gather,
 
-    /// Stamp and walk chunks, claimed in order through `claim`.
+    /// Stamp chunks, claimed in order through `next_task`.
     tasks: []EvalTask,
     /// Reduce blocks over the cells `[0, nnz + n)`, slots then rows: block j
-    /// is `[cuts[j], cuts[j + 1])`, claimed through `claim` after every chunk.
+    /// is `[cuts[j], cuts[j + 1])`, claimed through `next_block`.
     cuts: []u32,
 
     nnz: u32,
@@ -96,22 +88,13 @@ pub const ParEval = struct {
     /// apart from the read-only `job_*` arguments and from each other, so a
     /// claim or barrier increment invalidates only that counter's line (#172).
     wake: Wake,
-    /// The current pass's tickets: its tag in the high half, the tickets
-    /// left in the low half, counting down through the chunks and then the
-    /// reduce blocks. A lane claims by compare-and-swap against the tag it
-    /// read, so a lane that wakes after its pass ended claims nothing, and
-    /// a pass waits for its tickets, never for a lane to show up.
-    claim: Claim,
-    /// Chunks (stamp or walk) and reduce blocks finished this pass.
-    chunks_done: Counter,
-    blocks_done: Counter,
-    /// The current pass's chunk and block counts. Like every `job_*` field,
-    /// a worker reads it only while it holds one of the pass's tickets: the
-    /// pass cannot end, so the caller cannot publish the next, until that
-    /// ticket is done.
-    job_chunks: u32 = 0,
-    job_blocks: u32 = 0,
-    /// The current pass's arguments, published before `claim`.
+    next_task: Counter,
+    next_block: Counter,
+    /// Lanes, lane 0 included, finished stamping the current pass.
+    stamped: Counter,
+    /// Workers finished with the current pass, reduce included.
+    done: Counter,
+    /// The current pass's arguments, published before `epoch` is bumped.
     job_batches: []const Batch,
     job_planes: Planes,
     job_base: Base,
@@ -137,11 +120,6 @@ pub const ParEval = struct {
         v: std.atomic.Value(u32) align(std.atomic.cache_line),
     };
 
-    /// `claim`'s word, alone on its line like a `Counter`.
-    const Claim = struct {
-        v: std.atomic.Value(u64) align(std.atomic.cache_line),
-    };
-
     /// The pass doorbell, on its own line. `epoch` is bumped once per pass;
     /// workers spin on it, then park on it. `sleepers` counts workers parked
     /// (or about to park) on `epoch`: `run` pays for the wake syscall only
@@ -155,7 +133,6 @@ pub const ParEval = struct {
 
     comptime {
         assert(@sizeOf(Counter) == std.atomic.cache_line);
-        assert(@sizeOf(Claim) == std.atomic.cache_line);
         assert(@sizeOf(Wake) == std.atomic.cache_line);
     }
 
@@ -255,9 +232,10 @@ pub const ParEval = struct {
             .threads = threads,
             .started = false,
             .wake = .{ .epoch = .init(0), .sleepers = .init(0), .quit = .init(false) },
-            .claim = .{ .v = .init(0) },
-            .chunks_done = .{ .v = .init(0) },
-            .blocks_done = .{ .v = .init(0) },
+            .next_task = .{ .v = .init(0) },
+            .next_block = .{ .v = .init(0) },
+            .stamped = .{ .v = .init(0) },
+            .done = .{ .v = .init(0) },
             .job_batches = batches,
             .job_planes = undefined,
             .job_base = .{},
@@ -292,8 +270,7 @@ pub const ParEval = struct {
 
     /// Sets every cell of the planes `mode` writes to its value in `base`
     /// (`.newton` only; zero otherwise) plus every batch's stamps at `x`, and
-    /// waits until every chunk and block is done; a worker that has not
-    /// woken by then sits the pass out. `planes` need no clearing first. Spawns the
+    /// waits for all lanes. `planes` need no clearing first. Spawns the
     /// workers on first use; a failed spawn panics. `.charge` on a circuit
     /// without charge is a no-op: there is no q plane. Asserts that
     /// `batches` has as many batches as `init` saw and that `base` is empty
@@ -309,11 +286,13 @@ pub const ParEval = struct {
         self.job_t = t;
         self.job_mode = mode;
         self.job_kind = .stamp;
-        self.publish(@intCast(self.cuts.len - 1));
-        self.work();
-        // Chunks too: a pass with no cells has chunks and no blocks.
-        waitCount(&self.chunks_done.v, self.job_chunks);
-        waitCount(&self.blocks_done.v, self.job_blocks);
+        self.next_task.v.store(0, .monotonic);
+        self.next_block.v.store(0, .monotonic);
+        self.stamped.v.store(0, .monotonic);
+        self.done.v.store(0, .monotonic);
+        self.ring();
+        self.pass();
+        waitCount(&self.done.v, self.n_lanes - 1);
         // The trash cells take no stamps here; give them their initial value.
         switch (mode) {
             .charge => planes.q_vec[self.n] = 0,
@@ -354,26 +333,11 @@ pub const ParEval = struct {
 
     fn walk(self: *ParEval, kind: Kind) void {
         self.job_kind = kind;
-        self.publish(0);
-        self.work();
-        waitCount(&self.chunks_done.v, self.job_chunks);
-    }
-
-    /// Opens the next pass: every chunk, then `blocks` reduce blocks, under
-    /// a fresh tag, then rings the workers. Every ticket of the last pass is
-    /// done, so no lane still writes the counters this clears.
-    fn publish(self: *ParEval, blocks: u32) void {
-        const chunks: u32 = @intCast(self.tasks.len);
-        assert(@as(u64, chunks) + blocks <= std.math.maxInt(u32));
-        assert(self.chunks_done.v.load(.monotonic) == self.job_chunks);
-        self.chunks_done.v.store(0, .monotonic);
-        self.blocks_done.v.store(0, .monotonic);
-        self.job_chunks = chunks;
-        self.job_blocks = blocks;
-        // Only this lane writes the tag half, so the load reads its own store.
-        const tag: u32 = @truncate((self.claim.v.load(.monotonic) >> 32) +% 1);
-        self.claim.v.store(@as(u64, tag) << 32 | (chunks + blocks), .release);
+        self.next_task.v.store(0, .monotonic);
+        self.done.v.store(0, .monotonic);
         self.ring();
+        self.walkPass();
+        waitCount(&self.done.v, self.n_lanes - 1);
     }
 
     /// Starts the workers on first use, then bumps `epoch` so they run the
@@ -390,75 +354,35 @@ pub const ParEval = struct {
         }
     }
 
-    /// Claims and runs the current pass's tickets until none are left:
-    /// chunks first, then reduce blocks, each block only once every chunk
-    /// is done. Any lane runs it, the caller's included.
-    fn work(self: *ParEval) void {
-        const tag: u32 = @truncate(self.claim.v.load(.acquire) >> 32);
-        while (self.claimTicket(tag)) |ticket| {
-            // Read under the ticket (see `job_chunks`).
-            const blocks = self.job_blocks;
-            if (ticket >= blocks) {
-                // Tickets count down, so chunk 0 goes first.
-                self.runChunk(self.job_chunks - 1 - (ticket - blocks));
-                _ = self.chunks_done.v.fetchAdd(1, .release);
-            } else {
-                waitCount(&self.chunks_done.v, self.job_chunks);
-                const j = blocks - 1 - ticket;
-                switch (self.job_mode) {
-                    inline else => |m| self.reduceBlock(self.cuts[j], self.cuts[j + 1], m),
-                }
-                _ = self.blocks_done.v.fetchAdd(1, .release);
+    /// One lane's share of a limit or update pass.
+    fn walkPass(self: *ParEval) void {
+        var limited = false;
+        var reject: ?f64 = null;
+        while (true) {
+            const i = self.next_task.v.fetchAdd(1, .monotonic);
+            if (i >= self.tasks.len) break;
+            const task = self.tasks[i];
+            const b = self.job_batches[task.batch];
+            switch (self.job_kind) {
+                .limit => if (b.hooks.limit_range) |f| {
+                    if (f(b.ctx, self.job_x_mut, self.job_x_old, task.first, task.last)) limited = true;
+                } else if (task.first == 0) if (b.hooks.apply_limits) |f| {
+                    if (f(b.ctx, self.job_x_mut, self.job_x_old)) limited = true;
+                },
+                .update => {
+                    const tr = if (b.hooks.update_range) |f|
+                        f(b.ctx, self.job_x, task.first, task.last)
+                    else if (task.first == 0) if (b.hooks.update_state) |f| f(b.ctx, self.job_x) else null else null;
+                    if (tr) |t| reject = if (reject) |cur| @min(cur, t) else t;
+                },
+                .stamp => unreachable,
             }
         }
-    }
-
-    /// Takes one ticket of the pass tagged `tag`, or null once its tickets
-    /// are gone or a newer pass opened. Each failed swap means another lane
-    /// took a ticket or a pass opened, so the loop ends within the pass's
-    /// ticket count plus one retry per lane.
-    fn claimTicket(self: *ParEval, tag: u32) ?u32 {
-        var w = self.claim.v.load(.monotonic);
-        while (true) {
-            if (@as(u32, @truncate(w >> 32)) != tag) return null;
-            const left: u32 = @truncate(w);
-            if (left == 0) return null;
-            w = self.claim.v.cmpxchgWeak(w, w - 1, .acquire, .monotonic) orelse return left - 1;
-        }
-    }
-
-    /// Stamp chunk `i`, or limits or updates its instances.
-    fn runChunk(self: *ParEval, i: u32) void {
-        const task = self.tasks[i];
-        const b = self.job_batches[task.batch];
-        switch (self.job_kind) {
-            .stamp => {
-                const sb = self.slot_base[task.batch];
-                const rb = self.row_base[task.batch];
-                const pl: Planes = .{
-                    .g_vals = self.g_stage[sb..],
-                    .c_vals = if (self.has_charge) self.c_stage[sb..] else &.{},
-                    .rhs = self.rhs_stage[rb..],
-                    .q_vec = if (self.has_charge) self.q_stage[rb..] else &.{},
-                };
-                b.hooks.stage(b.ctx, &pl, task.first, task.last, self.job_x, self.job_t, self.job_mode);
-            },
-            .limit => {
-                const limited = if (b.hooks.limit_range) |f|
-                    f(b.ctx, self.job_x_mut, self.job_x_old, task.first, task.last)
-                else if (task.first == 0) if (b.hooks.apply_limits) |f| f(b.ctx, self.job_x_mut, self.job_x_old) else false else false;
-                if (limited) self.any_limited.store(true, .monotonic);
-            },
-            .update => {
-                const tr = if (b.hooks.update_range) |f|
-                    f(b.ctx, self.job_x, task.first, task.last)
-                else if (task.first == 0) if (b.hooks.update_state) |f| f(b.ctx, self.job_x) else null else null;
-                if (tr) |t| {
-                    while (!self.reject_lock.tryLock()) std.atomic.spinLoopHint();
-                    defer self.reject_lock.unlock();
-                    self.min_reject = if (self.min_reject) |cur| @min(cur, t) else t;
-                }
-            },
+        if (limited) self.any_limited.store(true, .monotonic);
+        if (reject) |t| {
+            while (!self.reject_lock.tryLock()) std.atomic.spinLoopHint();
+            defer self.reject_lock.unlock();
+            self.min_reject = if (self.min_reject) |cur| @min(cur, t) else t;
         }
     }
 
@@ -497,8 +421,41 @@ pub const ParEval = struct {
             }
             last = e;
             if (self.wake.quit.load(.acquire)) return;
-            // A pass that ended before this lane woke leaves it no ticket.
-            self.work();
+            if (self.job_kind == .stamp) self.pass() else self.walkPass();
+            _ = self.done.v.fetchAdd(1, .release);
+        }
+    }
+
+    /// One lane's share of a pass: claim stamp chunks until none are left,
+    /// wait for every lane to finish stamping, then claim reduce blocks.
+    fn pass(self: *ParEval) void {
+        const mode = self.job_mode;
+        while (true) {
+            const i = self.next_task.v.fetchAdd(1, .monotonic);
+            if (i >= self.tasks.len) break;
+            const task = self.tasks[i];
+            const b = self.job_batches[task.batch];
+            const sb = self.slot_base[task.batch];
+            const rb = self.row_base[task.batch];
+            const pl: Planes = .{
+                .g_vals = self.g_stage[sb..],
+                .c_vals = if (self.has_charge) self.c_stage[sb..] else &.{},
+                .rhs = self.rhs_stage[rb..],
+                .q_vec = if (self.has_charge) self.q_stage[rb..] else &.{},
+            };
+            b.hooks.stage(b.ctx, &pl, task.first, task.last, self.job_x, self.job_t, mode);
+        }
+        _ = self.stamped.v.fetchAdd(1, .acq_rel);
+        waitCount(&self.stamped.v, self.n_lanes);
+        const n_blocks = self.cuts.len - 1;
+        while (true) {
+            const j = self.next_block.v.fetchAdd(1, .monotonic);
+            if (j >= n_blocks) break;
+            const lo = self.cuts[j];
+            const hi = self.cuts[j + 1];
+            switch (mode) {
+                inline else => |m| self.reduceBlock(lo, hi, m),
+            }
         }
     }
 
@@ -531,7 +488,7 @@ const EvalTask = struct {
 };
 
 comptime {
-    // Claimed one per ticket; all three fields are read together.
+    // Claimed one per `fetchAdd`; all three fields are read together.
     assert(@sizeOf(EvalTask) == 12);
 }
 
