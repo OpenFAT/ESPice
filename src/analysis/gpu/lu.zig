@@ -53,21 +53,29 @@ pub const GpuLu = struct {
     gpa: std.mem.Allocator,
     n: u32,
     nnz: u32,
-    k_ref: Raw,
-    k_ref16: Raw,
-    k_lh: Raw,
-    k_uh: Raw,
-    k_lp: Raw,
-    k_up: Raw,
-    stream: Stream,
-    pin_a: []f64,
-    pin_rhs: []f64,
-    pin_dx: []f64,
-    pin_fail: []u8,
-    d_a: Buffer,
-    d_rhs: Buffer,
-    d_y: Buffer,
-    d_dx: Buffer,
+    /// The kernels and per-iteration buffers below are loaded (`bringUp`,
+    /// on the first admitted pivot epoch); until then they are undefined
+    /// and this context has not touched the driver.
+    up: bool = false,
+    /// No device eval placed this query (`Executor.prepareGpuLu`):
+    /// `bringUp` places it (`devices.place`) and `deinit` releases `placed`.
+    place: bool = false,
+    placed: ?devices.Placement = null,
+    k_ref: Raw = undefined,
+    k_ref16: Raw = undefined,
+    k_lh: Raw = undefined,
+    k_uh: Raw = undefined,
+    k_lp: Raw = undefined,
+    k_up: Raw = undefined,
+    stream: Stream = undefined,
+    pin_a: []f64 = undefined,
+    pin_rhs: []f64 = undefined,
+    pin_dx: []f64 = undefined,
+    pin_fail: []u8 = undefined,
+    d_a: Buffer = undefined,
+    d_rhs: Buffer = undefined,
+    d_y: Buffer = undefined,
+    d_dx: Buffer = undefined,
 
     /// `SparseLu.pattern_epoch` the tables below were built from; 0 = none.
     epoch: u32 = 0,
@@ -105,16 +113,34 @@ pub const GpuLu = struct {
 
     const Res = struct { combine: Raw, scatter: Raw, pin_ov: []f64, d_ov: Buffer };
 
-    /// Loads the five kernels and allocates the per-iteration buffers for an
-    /// n-unknown, nnz-entry pattern. Fails with `error.NoGpuArtifacts` in a
-    /// build without kernel images, or with the driver's error. Every solver
-    /// it later serves must be n by n with nnz entries. Caller owns the
-    /// result; free with `deinit`.
+    /// A device LU for an n-unknown, nnz-entry pattern that has loaded
+    /// nothing yet: its kernels and buffers load on the first pivot epoch
+    /// `admits` (`bringUp`), so a query whose epochs all stay on the host
+    /// never starts the driver. Fails with `error.NoGpuArtifacts` in a build
+    /// without kernel images. Every solver it later serves must be n by n
+    /// with nnz entries. Caller owns the result; free with `deinit`.
     pub fn init(gpa: std.mem.Allocator, n: u32, nnz: u32, knobs: Knobs) !*Self {
         if (comptime backend == null) return error.NoGpuArtifacts;
+        const self = try gpa.create(Self);
+        self.* = .{ .gpa = gpa, .n = n, .nnz = nnz, .knobs = knobs };
+        assert(!self.up);
+        return self;
+    }
+
+    /// Loads the five kernels and allocates the per-iteration buffers, on
+    /// this thread's device: the query's eval placed it, or (`place`) this
+    /// call does. Fails with the driver's error, leaving nothing loaded.
+    fn bringUp(self: *Self) !void {
+        assert(!self.up);
         const be = backend.?;
-        // On this thread's device (`devices.place`), as the query's eval.
+        if (self.place) self.placed = devices.place();
+        errdefer if (self.placed) |p| {
+            p.release();
+            self.placed = null;
+        };
         const ord = devices.ordinal;
+        const n = self.n;
+        const nnz = self.nnz;
         var k_ref = try drv.rawKernelByName(be, "arp_lu_refactor", ord);
         errdefer k_ref.deinit();
         var k_ref16 = try drv.rawKernelByName(be, "arp_lu_refactor16", ord);
@@ -143,34 +169,26 @@ pub const GpuLu = struct {
         errdefer d_y.free();
         var d_dx = try k_ref.alloc(@max(n, 1) * 8);
         errdefer d_dx.free();
-        var stream = try k_ref.createStream();
-        errdefer stream.deinit();
-        const self = try gpa.create(Self);
-        self.* = .{
-            .gpa = gpa,
-            .n = n,
-            .nnz = nnz,
-            .k_ref = k_ref,
-            .k_ref16 = k_ref16,
-            .k_lh = k_lh,
-            .k_uh = k_uh,
-            .k_lp = k_lp,
-            .k_up = k_up,
-            .stream = stream,
-            .pin_a = pin_a,
-            .pin_rhs = pin_rhs,
-            .pin_dx = pin_dx,
-            .pin_fail = pin_fail,
-            .d_a = d_a,
-            .d_rhs = d_rhs,
-            .d_y = d_y,
-            .d_dx = d_dx,
-            .knobs = knobs,
-        };
+        const stream = try k_ref.createStream();
+        self.k_ref = k_ref;
+        self.k_ref16 = k_ref16;
+        self.k_lh = k_lh;
+        self.k_uh = k_uh;
+        self.k_lp = k_lp;
+        self.k_up = k_up;
+        self.stream = stream;
+        self.pin_a = pin_a;
+        self.pin_rhs = pin_rhs;
+        self.pin_dx = pin_dx;
+        self.pin_fail = pin_fail;
+        self.d_a = d_a;
+        self.d_rhs = d_rhs;
+        self.d_y = d_y;
+        self.d_dx = d_dx;
+        self.up = true;
         if (instrument) {
-            if (knobs.gpu_lu_bench) |limit| self.bench = Bench.init(gpa, &self.k_ref, limit, knobs.gpu_lu_threads) catch null;
+            if (self.knobs.gpu_lu_bench) |limit| self.bench = Bench.init(self.gpa, &self.k_ref, limit, self.knobs.gpu_lu_threads) catch null;
         }
-        return self;
     }
 
     /// `bench`, or a comptime null without `-Dlu-instrument`, so no `Bench`
@@ -194,14 +212,19 @@ pub const GpuLu = struct {
     }
 
     /// Prints the `ESPICE_GPU_STATS`/check/bench summary, then frees every
-    /// device and pinned buffer and `self`. Detach it first
-    /// (set `Circuit.lu` to null).
+    /// device and pinned buffer and `self`, and releases the placement
+    /// `bringUp` took. Detach it first (set `Circuit.lu` to null).
     pub fn deinit(self: *Self) void {
         if (comptime backend == null) return;
         if (self.knobs.gpu_stats != .off or self.knobs.gpu_lu_check or self.benchOf() != null) std.debug.print(
             "gpu-lu: calls={d} resident={d} refactors={d} peels={d} epochs={d} load_ms={d} F={d} check_mismatches={d}{s}\n",
             .{ self.st.calls, self.st.resident, self.st.refactors, self.st.peels, self.st.epochs, self.st.load_ns / std.time.ns_per_ms, self.flops, self.st.mismatches, if (self.knobs.gpu_lu_check) "" else " (unchecked)" },
         );
+        if (!self.up) {
+            assert(self.epoch == 0 or self.declined);
+            assert(self.placed == null);
+            return self.gpa.destroy(self);
+        }
         if (self.benchOf()) |b| b.deinit(self);
         // The solver outlives this context; its copy must not stay stale.
         self.flushVcopy() catch {};
@@ -218,7 +241,9 @@ pub const GpuLu = struct {
         for ([_]*Buffer{ &self.d_a, &self.d_rhs, &self.d_y, &self.d_dx }) |b| b.free();
         self.stream.deinit();
         for ([_]*Raw{ &self.k_uh, &self.k_lp, &self.k_up, &self.k_lh, &self.k_ref16, &self.k_ref }) |kern| kern.deinit();
+        const placed = self.placed;
         self.gpa.destroy(self);
+        if (placed) |p| p.release();
     }
 
     fn dropTables(self: *Self) void {
@@ -532,6 +557,13 @@ pub const GpuLu = struct {
         self.flops = flops;
         // The buffers and every copy are sized by `self.n`.
         if (lu.n != self.n or !admits(flops, lu.n, self.forced)) return;
+        // The first admitted epoch starts the driver; one that will not
+        // start leaves the host LU the rest of the query.
+        if (!self.up) self.bringUp() catch |e| {
+            if (self.forced) std.debug.print("warning: device LU unavailable ({s})\n", .{@errorName(e)});
+            self.poisoned = true;
+            return;
+        };
         self.upload(slv) catch |e| switch (e) {
             // The device LU is an accelerator: the host LU keeps the epoch.
             error.OutOfMemory, error.AllocFailed => return,

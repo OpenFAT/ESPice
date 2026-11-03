@@ -321,6 +321,9 @@ pub const GpuContext = struct {
 
     /// `auto` admitted this query on a price: `Audit` holds the device to it.
     audit: ?Audit = null,
+    /// The device this query's handles opened on (`devices.place`), chosen
+    /// once the price admitted the query; `deinit` releases it.
+    placed: devices.Placement,
     /// `Audit` found the device losing and moved the rest of the query to
     /// the host, state included: every entry point walks on the host,
     /// quietly, and `syncHostState` has nothing left to bring home.
@@ -403,6 +406,9 @@ pub const GpuContext = struct {
         }
         if (n_gpu == 0) return Error.CircuitNotEligible;
         const auto_price: ?ctx_cost.Price = if (explicit) null else try ctx_cost.admit(gpa, host, threads, evals, if (driver) |d| d.started() else false);
+        // Placed only once admitted: reading the device table starts the driver.
+        const placed = devices.place();
+        errdefer placed.release();
 
         const self = try gpa.create(Self);
         errdefer gpa.destroy(self);
@@ -580,6 +586,7 @@ pub const GpuContext = struct {
             .fuse = !knobs.gpu_nofuse,
             .lu_check = knobs.gpu_lu_check,
             .audit = if (auto_price) |p| .{ .cpu_us = p.cpu_us, .key = p.key, .knobs = knobs } else ctx_cost.CostCache.learn(host, threads, evals, knobs),
+            .placed = placed,
         };
         if (driver) |d| d.up.store(true, .monotonic);
         // A failure here unwinds through the errdefers above.
@@ -632,6 +639,7 @@ pub const GpuContext = struct {
     /// Frees every device and pinned buffer and `self`. Detach it first
     /// (`Circuit.detachGpu`, which takes the planes back). Device-side state
     /// is dropped; call `syncStatus` or `syncHostState` first to keep it.
+    /// Releases the device placement last, restoring the thread's ordinal.
     pub fn deinit(self: *Self) void {
         if (comptime backend == null) return;
         self.prof.print();
@@ -660,7 +668,9 @@ pub const GpuContext = struct {
         self.gpa.free(self.base_cells);
         self.gpa.free(self.batches_owned);
         self.gpa.free(self.cpu_owned);
+        const placed = self.placed;
         self.gpa.destroy(self);
+        placed.release();
     }
 
     /// The circuit's analysis state at eval time `t`, as the host batches
