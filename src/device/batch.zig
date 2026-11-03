@@ -352,6 +352,9 @@ pub fn DeviceBatch(comptime D: type) type {
                 .ctx = self,
                 .eval = eval,
                 .eval_newton = evalNewton,
+                // `setSimState` stores and nothing more unless the bypass
+                // reviews its hit rate there.
+                .sim_offset = comptime if (Bp.bypassable) Batch.sim_none else @offsetOf(Self, "sim"),
                 .count = self.count,
                 .n_u = n_u,
                 .has_charge = has_q,

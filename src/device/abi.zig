@@ -21,7 +21,7 @@
 //! - `pub const NoiseGenKind = enum`, `pub const NoiseGen = struct`
 //! - `pub const Planes = struct`, `pub const StampMode = enum(u8)`
 //! - `pub const ScatterTapes = struct`, `pub const LocalEval = struct`, `pub const ChargeIdentity = struct`
-//! - `pub const DerivativeCounts = struct`, `pub const Batch = struct`
+//! - `pub const DerivativeCounts = struct`, `pub const Batch = struct` (`publishSim`)
 //! - `pub const StatusHit = struct`, `pub const DeviceStatus = enum(u8)`
 //! - `pub const Hooks = struct`, `pub const Proto = struct`
 //! - `pub const PatternView = struct` (`findSlot`)
@@ -276,6 +276,13 @@ pub const Batch = struct {
     ctx: *anyopaque,
     eval: *const fn (*anyopaque, *const Planes, first: u32, last: u32, []const f64, f64) void,
     eval_newton: *const fn (*anyopaque, *const Planes, first: u32, last: u32, []const f64, f64) void,
+    /// The byte offset in `ctx` of the batch's stored analysis state, when
+    /// its `Hooks.set_sim_state` would only store the state: `publishSim`
+    /// then writes it there, with no call. `sim_none` when the hook does
+    /// more (a bypassable type reviews its hit rate at every publish), so
+    /// every publish takes the hook. An offset, not a pointer: the row stays
+    /// in its cache line.
+    sim_offset: u16 = sim_none,
     count: u32,
     n_u: u32,
     has_charge: bool,
@@ -290,6 +297,29 @@ pub const Batch = struct {
     /// (`Circuit.refuseDigital`). The frontend copies it from
     /// `Library.digital` at the freeze.
     digital: bool = false,
+
+    /// `sim_offset` of a batch whose every publish calls the hook.
+    pub const sim_none = std.math.maxInt(u16);
+
+    /// Hands the batch `sim`, the state every later device call receives:
+    /// a plain store at `sim_offset` when there is one, else
+    /// `Hooks.set_sim_state`. The store keeps the batch's `analog_initial`,
+    /// which only the batch clears (once its §5.2.1 results are held); the
+    /// hook clears it the same way, so the two leave the same state.
+    /// Cheap enough for every Newton iterate. Asserts that `sim` has
+    /// `analog_initial` set (only the batch clears it) and an `iteration`
+    /// of at least 1 (§9.15 counts from 1).
+    pub fn publishSim(self: Batch, sim: SimState) void {
+        assert(sim.analog_initial);
+        assert(sim.iteration >= 1);
+        if (self.sim_offset == sim_none) return self.hooks.set_sim_state(self.ctx, sim);
+        // SAFETY: `sim_offset` is the batch's own `@offsetOf` its `SimState`
+        // field (`DeviceBatch.binding`), inside the object `ctx` points at.
+        const cell: *SimState = @ptrCast(@alignCast(@as([*]u8, @ptrCast(self.ctx)) + self.sim_offset));
+        const analog_initial = cell.analog_initial;
+        cell.* = sim;
+        cell.analog_initial = analog_initial;
+    }
 };
 
 /// Where `Hooks.status` found a latched status: the instance index within
@@ -403,8 +433,9 @@ pub const Hooks = struct {
     set_homotopy: ?*const fn (*anyopaque, gmin: f64, source_scale: f64) void = null,
     /// Stores the analysis state (`$abstime`, timestep, `analysis()`,
     /// initial/final step, Newton iteration) that every later device call
-    /// of this batch receives. One store per batch, so it is cheap enough
-    /// to call per Newton iteration.
+    /// of this batch receives, `analog_initial` false once the batch holds
+    /// its §5.2.1 results. A host publishes through `Batch.publishSim`,
+    /// which skips the call when `Batch.sim` is set.
     set_sim_state: *const fn (*anyopaque, SimState) void,
     /// The model's smallest static delay (`D.delays`).
     min_delay: ?*const fn (*anyopaque) f64 = null,
@@ -783,7 +814,9 @@ pub const GpuPayload = struct {
 //     names its frozen instance (#237).
 // 39: `GpuPayload.held_initial`/`committed_initial`, the host batch's
 //     `analog initial` latch, which resident GPU batches advance.
-pub const abi_version: u32 = 39;
+// 40: `Batch.sim_offset`, the stored `SimState` a host writes without calling
+//     `set_sim_state` (`Batch.publishSim`).
+pub const abi_version: u32 = 40;
 
 /// A device type's construction entry points, exported by each device object
 /// and by runtime-loaded `.so` devices. Every blob pointer it takes must be
@@ -847,7 +880,7 @@ comptime {
     // plane slices may ride along on that path.
     assert(@sizeOf(Planes) == 4 * @sizeOf([]f64));
     // Every Newton iteration walks the circuit's `[]Batch` and calls `eval`
-    // through each; one cache line per batch (59 bytes of fields on a
+    // through each; one cache line per batch (61 bytes of fields on a
     // 64-bit target, 64 with padding) keeps that walk one line per type.
     assert(@sizeOf(Batch) <= 64);
     // The two `halves` bits are distinct.
