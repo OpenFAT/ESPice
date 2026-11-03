@@ -1594,6 +1594,10 @@ test "a bypass replay stamps the plain evaluation's linearization at its recordi
     try checkBypassReplay(false);
 }
 
+test "a bypass replay moves the source row of a gate tied to its source" {
+    try checkBypassReplay(true);
+}
+
 /// Records one mos1 instance at x0 and replays it at a nearby x1. Oracle:
 /// the plain evaluation (which never bypasses) at x0 gives f0 and the
 /// assembled Jacobian G0; the replay must stamp G0 itself and f0 + G0 (x1 -
@@ -1645,9 +1649,14 @@ fn checkBypassReplay(tied: bool) !void {
     // Per unknown in `U` order (d g s b di si, then the two series
     // currents), its value and its move; a collapsed alias takes its root's.
     // Within both bypass tests: |dx| under reltol |x| + vntol (abstol for a
-    // current), |G0 dx| under reltol |f0| + abstol.
+    // current), |G0 dx| under reltol |f0| + abstol. Tied: the di and si
+    // rows sum the series resistor's 1e-3 A and the drain's 7.5e-5 A, so
+    // |f0| is ~9e-4, and each resistor's voltage moves 5e-7 (5e-8 A).
     const at = [n]f64{ 1.0, 1.2, 0.1, -0.2, 0.99, 0.11, 1e-5, -1e-5 };
-    const step = [n]f64{ 3e-6, 2e-6, -1e-6, 1e-6, 2e-6, -2e-6, 1e-10, -1e-10 };
+    const step = if (tied)
+        [n]f64{ 3e-6, 2e-6, -1e-6, 1e-6, 2.5e-6, -1.5e-6, 1e-10, -1e-10 }
+    else
+        [n]f64{ 3e-6, 2e-6, -1e-6, 1e-6, 2e-6, -2e-6, 1e-10, -1e-10 };
     var x0: [m]f64 = @splat(0);
     var x1: [m]f64 = @splat(0);
     for (nodes, collapse, at, step) |node, alias, v, dv| if (alias == null) {

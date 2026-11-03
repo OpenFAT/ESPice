@@ -8,7 +8,7 @@
 //!
 //! Contents:
 //! - `pub const RecordCap = struct`
-//! - `pub fn RecordSink(comptime Inner: type, comptime cap: RecordCap) type`
+//! - `pub fn RecordSink(comptime Inner: type, comptime cap: RecordCap, comptime written: []const bool) type`
 //! - `pub fn Sink(comptime D: type, comptime device: bool, comptime skip_const: bool, comptime staged: bool) type`
 //! - `pub fn LocalSink(comptime D: type) type`
 //! - sink members: `skip_g`, `skip_c`, `on_device`, `skip_tape`, `stores`,
@@ -38,8 +38,9 @@ pub const RecordCap = struct { res: usize, jac: usize, qjac: usize };
 /// keep their order, and the segments write different planes, so each plane
 /// cell sums as it did. Charges and the LTE tape are not kept: a replay
 /// re-reads them. A Jacobian value is kept as `val + 0.0`, the bits the
-/// replay used to add.
-pub fn RecordSink(comptime Inner: type, comptime cap: RecordCap) type {
+/// replay used to add. `written`: the local rows `evalRange` writes a
+/// residual for (`layout.writtenRows(D, "jac_rows")`).
+pub fn RecordSink(comptime Inner: type, comptime cap: RecordCap, comptime written: []const bool) type {
     return struct {
         inner: *const Inner,
         id: u32,
@@ -56,7 +57,8 @@ pub fn RecordSink(comptime Inner: type, comptime cap: RecordCap) type {
         n_qjac: usize = 0,
         overflow: bool = false,
         // evalRange writes residual rows in ascending local order, so the
-        // next row at or after the last one is the writer.
+        // next written row at or after the last one is the writer. An
+        // unwritten row can share its node (a gate tied to its source).
         res_ru: u32 = 0,
 
         pub const skip_g = Inner.skip_g;
@@ -66,8 +68,9 @@ pub fn RecordSink(comptime Inner: type, comptime cap: RecordCap) type {
         const Rs = @This();
 
         fn rowOf(s: *const Rs, next: *u32, row: u32) u32 {
-            while (s.inner.rhsRow(s.id, next.*) != row) next.* += 1;
+            while (!written[next.*] or s.inner.rhsRow(s.id, next.*) != row) next.* += 1;
             next.* += 1;
+            std.debug.assert(next.* <= written.len);
             return next.* - 1;
         }
         pub inline fn x(s: *const Rs, gi: u32) f64 {

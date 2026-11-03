@@ -102,6 +102,7 @@ pub fn Bypass(comptime D: type) type {
         };
         const cells_len = rec_cap.res + rec_cap.jac + rec_cap.qjac;
         const rows_len = rec_cap.res + rec_cap.jac;
+        const res_rows = layout.writtenRows(D, "jac_rows");
 
         comptime {
             // Local rows and columns ride in u8, a segment length in u16.
@@ -204,7 +205,7 @@ pub fn Bypass(comptime D: type) type {
                 misses += 1;
                 // Full evaluation, recorded, keyed on the bytes it read.
                 @memcpy(inst_rec, inst_now);
-                var rec: RecordSink(SinkT, rec_cap) = .{
+                var rec: RecordSink(SinkT, rec_cap, &res_rows) = .{
                     .inner = sink,
                     .id = id,
                     .cells = bp.cells[@as(usize, id) * cells_len ..][0..cells_len],
