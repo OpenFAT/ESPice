@@ -622,7 +622,8 @@ module `CPL_MODULE(p1, r1, p2, r2);
     real vprev_i[0:n-1], vprev_o[0:n-1], dv_i[0:n-1], dv_o[0:n-1], dc1[0:n-1], dc2[0:n-1];
     real stg_v1[0:n-1], stg_v2[0:n-1], stg_i1[0:n-1], stg_i2[0:n-1];   // the staged accepted point
     real ht[0:cap-1], hvi[0:n-1][0:cap-1], hvo[0:n-1][0:cap-1], hii[0:n-1][0:cap-1], hio[0:n-1][0:cap-1];
-    integer nh, drop, staged, rebuild, kbest;
+    real hb[0:cap-1];   // loss of dropping each point, 1 <= k <= nh - 2
+    integer nh, drop, staged, rebuild, kbest, hlo, hm;
     real bk, bmin;
     real tacc;   // label of the staged point, integer ps
 
@@ -859,6 +860,7 @@ module `CPL_MODULE(p1, r1, p2, r2);
 
                     // Prune behind the largest mode delay, then append.
                     cutoff = tacc - max_taul;
+                    hlo = -1;   // first loss a dropped interior point changed, -1 for none
                     drop = 0;
                     while (drop + 1 < nh && ht[drop + 1] < cutoff) drop = drop + 1;
                     if (nh == cap && drop == 0) begin
@@ -866,15 +868,11 @@ module `CPL_MODULE(p1, r1, p2, r2);
                         // linear interpolation loses least, currents weighed
                         // at a nominal 50 ohm. ponytail: lossy past cap
                         // (ngspice grows); VerA has no growable held storage.
+                        // Each point's loss is cached in hb, kept current below.
                         bmin = 1e300;
                         kbest = 1;
                         for (k = 1; k + 1 < nh; k = k + 1) begin
-                            bk = 0.0;
-                            for (m = 0; m < n; m = m + 1)
-                                bk = max(bk, max(lerpdev(ht[k - 1], hvi[m][k - 1], ht[k], hvi[m][k], ht[k + 1], hvi[m][k + 1]),
-                                                 lerpdev(ht[k - 1], hvo[m][k - 1], ht[k], hvo[m][k], ht[k + 1], hvo[m][k + 1]))
-                                    + 50.0 * max(lerpdev(ht[k - 1], hii[m][k - 1], ht[k], hii[m][k], ht[k + 1], hii[m][k + 1]),
-                                                 lerpdev(ht[k - 1], hio[m][k - 1], ht[k], hio[m][k], ht[k + 1], hio[m][k + 1])));
+                            bk = hb[k];
                             if (bk < bmin) begin
                                 bmin = bk;
                                 kbest = k;
@@ -882,15 +880,18 @@ module `CPL_MODULE(p1, r1, p2, r2);
                         end
                         for (k = kbest; k + 1 < nh; k = k + 1) begin
                             ht[k] = ht[k + 1];
+                            hb[k] = hb[k + 1];
                             for (m = 0; m < n; m = m + 1) begin
                                 hvi[m][k] = hvi[m][k + 1]; hvo[m][k] = hvo[m][k + 1];
                                 hii[m][k] = hii[m][k + 1]; hio[m][k] = hio[m][k + 1];
                             end
                         end
                         nh = nh - 1;
+                        hlo = kbest - 1;
                     end else if (drop > 64 || nh == cap) begin
                         for (k = 0; k + drop < nh; k = k + 1) begin
                             ht[k] = ht[k + drop];
+                            hb[k] = hb[k + drop];
                             for (m = 0; m < n; m = m + 1) begin
                                 hvi[m][k] = hvi[m][k + drop]; hvo[m][k] = hvo[m][k + drop];
                                 hii[m][k] = hii[m][k + drop]; hio[m][k] = hio[m][k + drop];
@@ -906,6 +907,20 @@ module `CPL_MODULE(p1, r1, p2, r2);
                         hio[k][nh] = stg_i2[k];
                     end
                     nh = nh + 1;
+                    // Refresh the losses whose triple changed: the two around a
+                    // dropped interior point, and the one next to the new tail.
+                    for (hm = 0; hm < 3; hm = hm + 1) begin
+                        k = (hm < 2) ? hlo + hm : nh - 2;
+                        if (k >= 1 && k + 1 < nh) begin
+                            bk = 0.0;
+                            for (m = 0; m < n; m = m + 1)
+                                bk = max(bk, max(lerpdev(ht[k - 1], hvi[m][k - 1], ht[k], hvi[m][k], ht[k + 1], hvi[m][k + 1]),
+                                                 lerpdev(ht[k - 1], hvo[m][k - 1], ht[k], hvo[m][k], ht[k + 1], hvo[m][k + 1]))
+                                    + 50.0 * max(lerpdev(ht[k - 1], hii[m][k - 1], ht[k], hii[m][k], ht[k + 1], hii[m][k + 1]),
+                                                 lerpdev(ht[k - 1], hio[m][k - 1], ht[k], hio[m][k], ht[k + 1], hio[m][k + 1])));
+                            hb[k] = bk;
+                        end
+                    end
                 end
             end
             rebuild = analysis("tran") && !analysis("static") && ok && nh > 0 && h > 0.0;

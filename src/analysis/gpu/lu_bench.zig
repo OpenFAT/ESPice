@@ -29,7 +29,7 @@ const nowNs = @import("context.zig").nowNs;
 /// against the device kernels by event timing. Prints medians at teardown,
 /// or after N samples for `ESPICE_GPU_LU_BENCH=N` (then stops sampling).
 pub const Bench = struct {
-    /// Events around the refactor, the L solve and the U solve (`GpuLu.enqueueCall`).
+    /// Events around the refactor, the L solve and the U solve (`GpuLu.launchCall`).
     ev: [4]Event,
     threads: u32,
     limit: usize = 0,

@@ -83,10 +83,6 @@ pub const GpuLu = struct {
     flops: u64 = 0,
     /// Done-stamp value of the next launch; grows by one per call.
     stamp: u32 = 0,
-    /// The current epoch's call (`launchCall`) captured once, without and
-    /// with the refactor (02 2.7): the sync buffer cleared and stamp 1, so
-    /// one graph replays every call. Dropped with the tables.
-    graphs: [2]?GraphExec = .{ null, null },
     /// `direct.Solver.gen` whose factors the device holds, if any.
     dev_gen: ?u32 = null,
     /// A driver call failed: the rest of the query solves on the host.
@@ -221,10 +217,6 @@ pub const GpuLu = struct {
     }
 
     fn dropTables(self: *Self) void {
-        if (comptime backend != null) for (&self.graphs) |*g| if (g.*) |*exec| {
-            exec.deinit();
-            g.* = null;
-        };
         if (self.epoch != 0 and !self.declined) {
             self.d_idx.free();
             self.d_val.free();
@@ -304,54 +296,12 @@ pub const GpuLu = struct {
     }
 
     /// The refactor (when `refactor`) from `d_a` and both solves from
-    /// `d_rhs`, then dx and the fail word down and the wait. Replays the
-    /// epoch's captured graph where the driver has graphs (not under
-    /// `ESPICE_GPU_NOGRAPHS` or the bench, whose events sit between the
-    /// launches): the same launches, so the same bits.
+    /// `d_rhs`, then dx and the fail word down and the wait. Direct
+    /// launches: a captured graph per epoch (#219) measured no gain.
     fn launchCall(self: *Self, refactor: bool) !void {
-        if (self.benchOf() == null and !self.knobs.gpu_nographs and self.k_ref.hasGraphs()) {
-            const g = &self.graphs[@intFromBool(refactor)];
-            if (g.* == null) g.* = try self.captureCall(refactor);
-            try g.*.?.launch(&self.stream);
-            // The graph left stamp 1 in the done words; a later direct call
-            // must stamp past it.
-            self.stamp = 1;
-            return self.stream.synchronize();
-        }
-        try self.enqueueCall(refactor, self.stamp);
-        try self.stream.synchronize();
-    }
-
-    /// `launchCall`'s graph, captured on a scratch stream: the whole sync
-    /// buffer cleared, so stamp 1 is fresh on every replay, then
-    /// `enqueueCall`.
-    fn captureCall(self: *Self, refactor: bool) !GraphExec {
-        var capture_stream = try self.k_ref.createStreamNonBlocking();
-        defer capture_stream.deinit();
-        std.mem.swap(Stream, &self.stream, &capture_stream);
-        defer std.mem.swap(Stream, &self.stream, &capture_stream);
-        try self.stream.beginCapture(.thread_local);
-        var capturing = true;
-        defer if (capturing) {
-            // An invalidated capture still ends before its stream goes.
-            if (self.stream.endCapture()) |abandoned| {
-                var graph = abandoned;
-                graph.deinit();
-            } else |_| {}
-        };
-        try self.d_sync.fillAsync(0, @as(usize, self.tab.syncLen()) * 4, &self.stream);
-        try self.enqueueCall(refactor, 1);
-        const ended = self.stream.endCapture();
-        capturing = false;
-        var graph = try ended;
-        defer graph.deinit();
-        return graph.instantiate();
-    }
-
-    fn enqueueCall(self: *Self, refactor: bool, stamp_in: u32) !void {
         const n = self.n;
         var tab = self.tab;
-        var stamp = stamp_in;
+        var stamp = self.stamp;
         const k_ref = if (tab.dmap16 != 0) &self.k_ref16 else &self.k_ref;
         if (refactor) try k_ref.launchOn(&self.stream, .{ .x = n }, .{ .x = K.refactor_block }, 0, &.{
             gompute.interface.arg(&tab), self.d_idx.argPtr(), self.d_val.argPtr(), self.d_a.argPtr(), self.d_sync.argPtr(), gompute.interface.arg(&stamp),
@@ -374,6 +324,7 @@ pub const GpuLu = struct {
         if (self.benchOf()) |b| try b.ev[3].record(&self.stream);
         try self.d_dx.downloadAtAsync(self.pin_dx.ptr, 0, n * 8, &self.stream);
         try self.d_sync.downloadAtAsync(self.pin_fail.ptr, 4, 4, &self.stream);
+        try self.stream.synchronize();
     }
 
     /// Whether the device holds the resident tables `solveResident` needs
@@ -653,7 +604,6 @@ pub const GpuLu = struct {
 const Raw = if (backend) |be| gompute.RawByName(be) else void;
 const Buffer = if (backend != null) Raw.Buffer else void;
 const Stream = if (backend != null) Raw.Stream else void;
-const GraphExec = if (backend != null) Raw.GraphExec else void;
 
 /// `lu_device.zig`'s `gc_block`.
 const gc_block: u32 = 256;

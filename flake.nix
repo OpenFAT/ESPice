@@ -121,7 +121,7 @@
             cp -r "$TMPDIR/zgc/p" "$out"
           '';
           outputHashMode = "recursive";
-          outputHash = "sha256-0xTxuzM+MrMyXFzwbB65XsPOoepj/8qZLoidVetVqzA=";
+          outputHash = "sha256-7LmNaPR4saH1PfSFLQU2cgZltfLCGlj+chCDcZVArMI=";
         };
 
         gpuPkgs = lib.optionals pkgs.stdenv.isLinux (

@@ -213,7 +213,8 @@ module txl(p1, n1, p2, n2);
     real cnv1_i[0:2], cnv1_o[0:2], cnv2_i[0:2], cnv2_o[0:2], cnv3_i[0:5], cnv3_o[0:5];
     real vprev_i, vprev_o, dv_i, dv_o, dc1, dc2, sv1, sv2, si1, si2;
     real ht[0:cap-1], hvi[0:cap-1], hvo[0:cap-1], hii[0:cap-1], hio[0:cap-1];
-    integer nh, drop, j, staged, kbest;
+    real hb[0:cap-1];   // loss of dropping each point, 1 <= k <= nh - 2
+    integer nh, drop, j, staged, kbest, hlo, hm;
     real bk, bmin;
 
     // ---- per-evaluation rebuild (right_consts_txl) ----
@@ -419,6 +420,7 @@ module txl(p1, n1, p2, n2);
                     // Prune the dead front: all delayed reads anchor at tail - tau,
                     // keep one bracket point before it; full buffer drops the oldest.
                     cutoff = tacc - taul;
+                    hlo = -1;   // first loss a dropped interior point changed, -1 for none
                     drop = 0;
                     while (drop + 1 < nh && ht[drop + 1] < cutoff) drop = drop + 1;
                     if (nh == cap && drop == 0) begin
@@ -426,13 +428,11 @@ module txl(p1, n1, p2, n2);
                         // linear interpolation loses least (current as I*Z0).
                         // ponytail: lossy past cap (ngspice grows); VerA has
                         // no growable held storage.
+                        // Each point's loss is cached in hb, kept current below.
                         bmin = 1e300;
                         kbest = 1;
                         for (k = 1; k + 1 < nh; k = k + 1) begin
-                            bk = max(lerpdev(ht[k - 1], hvi[k - 1], ht[k], hvi[k], ht[k + 1], hvi[k + 1]),
-                                     lerpdev(ht[k - 1], hvo[k - 1], ht[k], hvo[k], ht[k + 1], hvo[k + 1]))
-                               + max(lerpdev(ht[k - 1], hii[k - 1], ht[k], hii[k], ht[k + 1], hii[k + 1]),
-                                     lerpdev(ht[k - 1], hio[k - 1], ht[k], hio[k], ht[k + 1], hio[k + 1])) / sqtcdl;
+                            bk = hb[k];
                             if (bk < bmin) begin
                                 bmin = bk;
                                 kbest = k;
@@ -440,18 +440,29 @@ module txl(p1, n1, p2, n2);
                         end
                         for (k = kbest; k + 1 < nh; k = k + 1) begin
                             ht[k] = ht[k + 1]; hvi[k] = hvi[k + 1]; hvo[k] = hvo[k + 1];
-                            hii[k] = hii[k + 1]; hio[k] = hio[k + 1];
+                            hii[k] = hii[k + 1]; hio[k] = hio[k + 1]; hb[k] = hb[k + 1];
                         end
                         nh = nh - 1;
+                        hlo = kbest - 1;
                     end else if (drop > 64 || nh == cap) begin
                         for (k = 0; k + drop < nh; k = k + 1) begin
                             ht[k] = ht[k + drop]; hvi[k] = hvi[k + drop]; hvo[k] = hvo[k + drop];
-                            hii[k] = hii[k + drop]; hio[k] = hio[k + drop];
+                            hii[k] = hii[k + drop]; hio[k] = hio[k + drop]; hb[k] = hb[k + drop];
                         end
                         nh = nh - drop;
                     end
                     ht[nh] = tacc; hvi[nh] = sv1; hvo[nh] = sv2; hii[nh] = si1; hio[nh] = si2;
                     nh = nh + 1;
+                    // Refresh the losses whose triple changed: the two around a
+                    // dropped interior point, and the one next to the new tail.
+                    for (hm = 0; hm < 3; hm = hm + 1) begin
+                        k = (hm < 2) ? hlo + hm : nh - 2;
+                        if (k >= 1 && k + 1 < nh)
+                            hb[k] = max(lerpdev(ht[k - 1], hvi[k - 1], ht[k], hvi[k], ht[k + 1], hvi[k + 1]),
+                                        lerpdev(ht[k - 1], hvo[k - 1], ht[k], hvo[k], ht[k + 1], hvo[k + 1]))
+                                  + max(lerpdev(ht[k - 1], hii[k - 1], ht[k], hii[k], ht[k + 1], hii[k + 1]),
+                                        lerpdev(ht[k - 1], hio[k - 1], ht[k], hio[k], ht[k + 1], hio[k + 1])) / sqtcdl;
+                    end
                 end
             end
             rebuild = analysis("tran") && !analysis("static") && ok && nh > 0 && h > 0.0;

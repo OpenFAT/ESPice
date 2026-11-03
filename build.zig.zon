@@ -9,8 +9,8 @@
             .hash = "vera-0.23.0-fzAu7BznSAHTovhsbqKB1WQBFu66b65RDnBfVhQi4EF9",
         },
         .gompute = .{
-            .url = "git+https://github.com/OmarSiwy/Gompute#15ab58137b094db1a82a74f67b0b0cba1c57d7af",
-            .hash = "gompute-1.5.0-YJVc1qjKCAC0sRRUEgn07hJbNHviJzrSf2fHE7XnWN7g",
+            .url = "git+https://github.com/OmarSiwy/Gompute#70b722dbccfc1c2e294ac5e4245344667f0dcb7d",
+            .hash = "gompute-2.0.0-YJVc1oQ-BwB2JI0_gqttr3Mox-1fvn4D3rL5bdaDZbfB",
         },
     },
     .paths = .{
