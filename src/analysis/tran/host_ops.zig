@@ -99,8 +99,8 @@ pub const HostOps = struct {
         integrator.advanceCurrent(a.method, s.i_prev, q_hist[0], q_hist[1], if (a.gear_hi) s.g_row else q_hist[2], a.c);
         if (s.n_qt > 0)
             integrator.advanceCurrent(a.method, s.qt_i_prev, qt_hist[0], qt_hist[1], if (a.gear_hi) s.qt_g else qt_hist[2], a.c);
-        std.mem.rotate([]f64, q_hist, s.n_hist - 1);
-        if (s.n_qt > 0) std.mem.rotate([]f64, qt_hist, s.n_hist - 1);
+        shiftRing(q_hist);
+        if (s.n_qt > 0) shiftRing(qt_hist);
     }
     /// commitStates and the commit, at the rotated `cur`.
     pub inline fn commit(_: HostOps, s: *Sim) void {
@@ -181,4 +181,34 @@ pub fn traceLte(s: *Sim, a: *const Attempt, nr: converger.Result, lte: integrato
         "tran-lte-operands: ip={e:.17} i_new={e:.17} current_tol={e:.17} charge_tol={e:.17} tol={e:.17} dd={e:.17} lte_coefficient={e:.17} unrooted_bound={e:.17} ag0={e:.17} ag1={e:.17} ag2={e:.17} trtol={e:.17}\n",
         .{ hit.i_prev, hit.i_new, hit.current_tol, hit.charge_tol, hit.tolerance, hit.difference, hit.coefficient, hit.unrooted_bound, a.c.ag0, a.c.ag1, a.c.ag2, lte.trtol },
     );
+}
+
+// ---- private ----
+
+/// Moves every history slot one older, [cur, prev, ...] -> [stale, cur,
+/// prev, ...]: the oldest slot comes round as the scratch slot 0. The
+/// permutation of `std.mem.rotate(h, h.len - 1)` (the GPU lanes and emir
+/// still move their rings that way), without its three reversals: they
+/// cost 3.6% of vacask_rc's instructions.
+fn shiftRing(h: [][]f64) void {
+    assert(h.len > 0);
+    const stale = h[h.len - 1];
+    std.mem.copyBackwards([]f64, h[1..], h[0 .. h.len - 1]);
+    h[0] = stale;
+}
+
+test "shiftRing is std.mem.rotate by len - 1 at every ring length" {
+    var block: [10]f64 = undefined;
+    for (1..10) |len| {
+        var a: [9][]f64 = undefined;
+        var b: [9][]f64 = undefined;
+        for (a[0..len], b[0..len], 0..) |*x, *y, k| {
+            x.* = block[k..][0..1];
+            y.* = x.*;
+        }
+        shiftRing(a[0..len]);
+        std.mem.rotate([]f64, b[0..len], len - 1);
+        for (a[0..len], b[0..len]) |x, y| try std.testing.expectEqual(y.ptr, x.ptr);
+        if (len > 1) try std.testing.expect(a[0].ptr != a[1].ptr);
+    }
 }

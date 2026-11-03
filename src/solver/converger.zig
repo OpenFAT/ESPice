@@ -411,8 +411,7 @@ pub fn residualGate(opts: Options, diag: anytype, xi: @TypeOf(diag)) @TypeOf(dia
 /// stamps alone would need no cap.
 pub fn plausibleLimit(sys: anytype, x: anytype, f: anytype, vals: anytype) @TypeOf(x[0]) {
     const L = lanes.Of(@TypeOf(x[0]));
-    var g: L.V = L.splat(1);
-    for (sys.diag_slots[0..sys.n]) |slot| g = @max(g, @abs(vals[slot]));
+    const g = diagMax(L.V, vals, sys.diag_slots[0..sys.n]);
     const scale = @min(@max(normInf(L.V, x), normInf(L.V, f) * g), L.splat(1e18));
     // Negated, so a NaN start keeps the floor.
     return L.select(L.not(L.cmp(.gt, L.splat(1e3) * scale, L.splat(x_plausible))), L.splat(x_plausible), L.splat(1e3) * scale);
@@ -508,6 +507,25 @@ fn normInf(comptime V: type, x: []const V) V {
     const I = @Vector(lanes.Of(V).width, u64);
     var m: I = @splat(0);
     for (x) |xi| m = @max(m, @as(I, @bitCast(@abs(xi))));
+    return @bitCast(m);
+}
+
+/// max(1, |vals[slot]|) over `slots`, per lane, skipping NaN entries as
+/// the float `@max` it replaces did: the max of the bit patterns, which
+/// order nonnegative doubles as their values do, with a NaN read as 0. i64,
+/// not u64: the sign bit is clear, and AVX2 has a signed 64-bit compare
+/// only. The integer max carries a one-instruction chain where the
+/// NaN-aware float max carried three (max, unordered compare, blend), and
+/// was 18% of vacask_graetz's `run`.
+fn diagMax(comptime V: type, vals: []const V, slots: []const u32) V {
+    const I = if (V == f64) i64 else @Vector(lanes.Of(V).width, i64);
+    var m: I = @bitCast(lanes.Of(V).splat(1));
+    for (slots) |slot| {
+        const a = @abs(vals[slot]);
+        const bits: I = @bitCast(a);
+        const kept = if (V == f64) (if (a == a) bits else 0) else @select(i64, a == a, bits, @as(I, @splat(0)));
+        m = @max(m, kept);
+    }
     return @bitCast(m);
 }
 
@@ -683,4 +701,31 @@ test "plausible and residualMisses match a scalar oracle at every length, NaN an
         try std.testing.expectEqual(want_plausible, plausible(x[0..n], 5));
         try std.testing.expectEqual(want_misses, residualMisses(opts, res[0..n], x[0..n], &vals, slots[0..n]));
     };
+}
+
+test "diagMax equals the float @max fold it replaced, NaN, inf, signed zero and subnormals included, at W = 1 and 4" {
+    var prng = std.Random.DefaultPrng.init(0xD1A6);
+    const r = prng.random();
+    const specials = [_]f64{ std.math.nan(f64), -std.math.nan(f64), std.math.inf(f64), -std.math.inf(f64), 0, -0.0, 0x1p-1074, -0x1p-1060, 1, -1, 1e300 };
+    var vals: [64]f64 = undefined;
+    var slots: [40]u32 = undefined;
+    for (0..2000) |_| {
+        for (&vals) |*v| v.* = switch (r.uintLessThan(u8, 4)) {
+            0 => specials[r.uintLessThan(usize, specials.len)],
+            1 => (r.float(f64) - 0.5) * 4, // around the floor of 1
+            else => (r.float(f64) - 0.5) * std.math.pow(f64, 10, @floatFromInt(r.intRangeAtMost(i32, -300, 300))),
+        };
+        const n = r.uintLessThan(usize, slots.len + 1);
+        for (slots[0..n]) |*s| s.* = r.uintLessThan(u32, vals.len);
+        // The oracle: the fold `plausibleLimit` ran before.
+        var want: f64 = 1;
+        for (slots[0..n]) |s| want = @max(want, @abs(vals[s]));
+        try std.testing.expectEqual(@as(u64, @bitCast(want)), @as(u64, @bitCast(diagMax(f64, &vals, slots[0..n]))));
+        // Lane l of a W = 4 fold reads vals rotated by l.
+        var lane_vals: [64]@Vector(4, f64) = undefined;
+        for (&lane_vals, 0..) |*v, i| v.* = .{ vals[i], vals[(i + 1) % 64], vals[(i + 2) % 64], vals[(i + 3) % 64] };
+        var want4: @Vector(4, f64) = @splat(1);
+        for (slots[0..n]) |s| want4 = @max(want4, @abs(lane_vals[s]));
+        try std.testing.expectEqual(@as(@Vector(4, u64), @bitCast(want4)), @as(@Vector(4, u64), @bitCast(diagMax(@Vector(4, f64), &lane_vals, slots[0..n]))));
+    }
 }

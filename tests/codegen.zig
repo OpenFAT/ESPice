@@ -504,8 +504,14 @@ const old_newton = struct {
     const x_plausible = 1e9;
 
     fn plausibleLimit(sys: anytype, x: []const f64, f: []const f64, vals: []const f64) f64 {
-        var g: f64 = 1;
-        for (sys.diag_slots[0..sys.n]) |slot| g = @max(g, @abs(vals[slot]));
+        // The diagonal's max as `converger.diagMax` folds it since
+        // vacask_graetz's profile: on |v|'s bits, NaN read as 0.
+        var g_bits: i64 = @bitCast(@as(f64, 1));
+        for (sys.diag_slots[0..sys.n]) |slot| {
+            const a = @abs(vals[slot]);
+            g_bits = @max(g_bits, if (a == a) @as(i64, @bitCast(a)) else 0);
+        }
+        const g: f64 = @bitCast(g_bits);
         const scale = @min(@max(num.normInf(x), num.normInf(f) * g), 1e18);
         // Negated, so a NaN start keeps the floor.
         return if (!(1e3 * scale > x_plausible)) x_plausible else 1e3 * scale;

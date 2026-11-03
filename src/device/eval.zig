@@ -130,7 +130,6 @@ comptime {
             if (!@hasDecl(D, "Model")) continue;
             if (gompute.is_device) exportKernels(D, decl_name) else exportVtable(D, decl_name);
         }
-        gompute.exportKernels(.{});
     }
 }
 

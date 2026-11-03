@@ -135,6 +135,7 @@ pub fn init(
         .tangents = tangents,
         .stream = stream,
         .ws = ws,
+        .nr_opts = newtonOptions(options),
         .n = n,
         .has_charge = has_charge,
         .x_try = x_try,
