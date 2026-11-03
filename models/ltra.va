@@ -452,9 +452,31 @@ module ltra(p1, n1, p2, n2);
                     h1relval = abs(h1dum1 * chopreltol);
 
                     // Fused walk newest -> oldest: coefficient and dot product together.
+                    // Points newer than t - T (i > aux) carry h1 only, so they get a
+                    // loop of their own: VerA if-converts an `if (i <= aux)` inside
+                    // one loop, which ran h2/h3's three exp on every point. Same
+                    // operations in the same order; doh2 and doh3 stay 1 here.
                     lolim2 = 0.0;
                     hilim2 = 0.0;
-                    for (i = j; i > 0 && (doh1 || doh2 || doh3); i = i - 1) begin
+                    for (i = j; i > aux; i = i - 1) begin
+                        lolim2 = lolim1;
+                        hilim2 = hilim1;
+                        lolim1 = hilim2;
+                        hilim1 = t - ht[i - 1];
+                        delta1 = ht[i] - ht[i - 1];
+                        if (doh1) begin
+                            h1dum2 = h1dum1;
+                            h1lov1 = h1hiv1;
+                            h1hiv1 = rlch1dash2(hilim1, beta);
+                            h1dum1 = (h1hiv1 - h1lov1) / delta1;
+                            coeff = h1dum1 - h1dum2;
+                            cv1 = cv1 + coeff * (hv1[i] - v10);
+                            cv2 = cv2 + coeff * (hv2[i] - v20);
+                            if (abs(coeff) <= h1relval) doh1 = 0;
+                        end
+                    end
+                    // aux <= j, so the first loop leaves i == aux.
+                    for (i = aux; i > 0 && (doh1 || doh2 || doh3); i = i - 1) begin
                         lolim2 = lolim1;
                         hilim2 = hilim1;
                         lolim1 = hilim2;
@@ -472,38 +494,36 @@ module ltra(p1, n1, p2, n2);
                             if (abs(coeff) <= h1relval) doh1 = 0;
                         end
 
-                        if (i <= aux) begin
-                            barg = 0.0;
-                            expterm = 0.0;
-                            if (doh2 || doh3) begin
-                                barg = (hilim1 > tt) ? alpha * sqrt(hilim1 * hilim1 - tt * tt) : 0.0;
-                                expterm = exp(barg - beta * hilim1);
-                            end
-                            if (doh2) begin
-                                h2lov2 = h2lov1;
-                                h2hiv2 = h2hiv1;
-                                h2dum2 = h2dum1;
-                                h2lov1 = h2hiv2;
-                                h2hiv1 = (alpha == 0.0 || hilim1 < tt) ? 0.0 : alphasqt * expterm * bessi1xoverxe(barg);
-                                h2dum1 = twiceintlin(lolim1, hilim1, lolim1, h2lov1, h2hiv1, lolim1, hilim1) / delta1;
-                                // ngspice-compatible: at i == aux the (lolim2, hilim2)
-                                // interval and the (h2lov2, h2hiv2) values span
-                                // different segments (its disabled i == auxindex fix).
-                                coeff = h2dum1 - h2dum2 + intlin(lolim2, hilim2, h2lov2, h2hiv2, lolim2, hilim2);
-                                ci2 = ci2 + coeff * (hi2[i] - i20);
-                                ci1 = ci1 + coeff * (hi1[i] - i10);
-                                if (abs(coeff) <= h2relval) doh2 = 0;
-                            end
-                            if (doh3) begin
-                                h3dum2 = h3dum1;
-                                h3lov1 = h3hiv1;
-                                h3hiv1 = (hilim1 <= tt || beta == 0.0) ? 0.0 : expterm * bessi0e(barg) - expbetat;
-                                h3dum1 = intlin(lolim1, hilim1, h3lov1, h3hiv1, lolim1, hilim1) / delta1;
-                                coeff = h3dum1 - h3dum2;
-                                cw2 = cw2 + coeff * (hv2[i] - v20);
-                                cw1 = cw1 + coeff * (hv1[i] - v10);
-                                if (abs(coeff) <= h3relval) doh3 = 0;
-                            end
+                        barg = 0.0;
+                        expterm = 0.0;
+                        if (doh2 || doh3) begin
+                            barg = (hilim1 > tt) ? alpha * sqrt(hilim1 * hilim1 - tt * tt) : 0.0;
+                            expterm = exp(barg - beta * hilim1);
+                        end
+                        if (doh2) begin
+                            h2lov2 = h2lov1;
+                            h2hiv2 = h2hiv1;
+                            h2dum2 = h2dum1;
+                            h2lov1 = h2hiv2;
+                            h2hiv1 = (alpha == 0.0 || hilim1 < tt) ? 0.0 : alphasqt * expterm * bessi1xoverxe(barg);
+                            h2dum1 = twiceintlin(lolim1, hilim1, lolim1, h2lov1, h2hiv1, lolim1, hilim1) / delta1;
+                            // ngspice-compatible: at i == aux the (lolim2, hilim2)
+                            // interval and the (h2lov2, h2hiv2) values span
+                            // different segments (its disabled i == auxindex fix).
+                            coeff = h2dum1 - h2dum2 + intlin(lolim2, hilim2, h2lov2, h2hiv2, lolim2, hilim2);
+                            ci2 = ci2 + coeff * (hi2[i] - i20);
+                            ci1 = ci1 + coeff * (hi1[i] - i10);
+                            if (abs(coeff) <= h2relval) doh2 = 0;
+                        end
+                        if (doh3) begin
+                            h3dum2 = h3dum1;
+                            h3lov1 = h3hiv1;
+                            h3hiv1 = (hilim1 <= tt || beta == 0.0) ? 0.0 : expterm * bessi0e(barg) - expbetat;
+                            h3dum1 = intlin(lolim1, hilim1, h3lov1, h3hiv1, lolim1, hilim1) / delta1;
+                            coeff = h3dum1 - h3dum2;
+                            cw2 = cw2 + coeff * (hv2[i] - v20);
+                            cw1 = cw1 + coeff * (hv1[i] - v10);
+                            if (abs(coeff) <= h3relval) doh3 = 0;
                         end
                     end
 
