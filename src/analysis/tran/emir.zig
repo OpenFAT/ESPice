@@ -8,10 +8,19 @@
 //! Both are what the transient sums into each KCL row, so a net's
 //! terminals sum to its residual. The window reads samples as `.meas`
 //! FROM=/TO= do, and the average and EM_AVG halves fold as `.meas AVG` and
-//! `EM_AVG` fold them (output/scan.zig `Extremum`, output/measure.zig
-//! `EmAvg`), to the bit; the RMS is the trapezoid of i². An operating or
+//! `EM_AVG` fold them (`Extremum`, `EmAvg`), to the bit; the RMS is the trapezoid of i². An operating or
 //! DC point is one sample (`atPoint`): every statistic its |i|, the sign
 //! kept in the average.
+//! In: a circuit, its per-batch port counts and each accepted point. Out:
+//! `core.Emir`, one row per terminal.
+//! Cites #237; output/measure/passes.zig `Extremum` and
+//! output/measure/Wave.zig `EmAvg`.
+//!
+//! Contents:
+//! - `pub const Step = struct { method, c, ag, gear_hi }`
+//! - `pub const Emir = struct` (`init`, `deinit`, `start`, `point`, `publish`)
+//! - `pub fn atPoint(ctx: *const RunCtx, x: []const f64) !core.Emir`
+
 const std = @import("std");
 const core = @import("core");
 const root = @import("../types.zig");
@@ -19,9 +28,6 @@ const integrator = @import("integrator.zig");
 const Method = @import("types.zig").Method;
 const Planes = @import("device").abi.Planes;
 const positiveArea = @import("measure").positiveArea;
-
-const none = std.math.maxInt(u32);
-const nan = std.math.nan(f64);
 
 /// The accepted step a point closes: its attempt's method and coefficients.
 pub const Step = struct { method: Method, c: integrator.Coeffs, ag: [7]f64, gear_hi: bool };
@@ -169,6 +175,33 @@ pub const Emir = struct {
         if (t >= e.t_start) e.fold(t);
     }
 
+    /// The window's statistics, every terminal's in terminal order, in `a`.
+    /// A window of one sample publishes that sample.
+    pub fn publish(e: *const Emir, a: std.mem.Allocator, ckt: *const root.Circuit) !core.Emir {
+        const one = e.from == e.to;
+        const out = try a.alloc(core.EmirTerminal, e.sum.len);
+        for (ckt.batches, e.ports, e.tbase[0..ckt.batches.len], 0..) |b, p, base, k| {
+            const rows = b.hooks.scatter_tapes(b.ctx).rows;
+            for (0..b.count) |id| for (0..p) |u| {
+                const j = base + id * p + u;
+                out[j] = .{
+                    .batch = @intCast(k),
+                    .instance = @intCast(id),
+                    .port = @intCast(u),
+                    .row = rows[id * b.n_u + u],
+                    .avg = if (one) e.last[j] else e.sum[j] / e.span,
+                    .rms = if (one) e.peak[j] else @sqrt(e.sum2[j] / e.span),
+                    .peak = e.peak[j],
+                    .pos = e.pos[j],
+                    .neg = e.neg[j],
+                };
+            };
+        }
+        return .{ .from = e.from, .to = e.to, .terminals = out };
+    }
+
+    // ---- private ----
+
     /// Each terminal's static current at `x` into `i`, its charge into
     /// ring slot 0.
     fn stamp(e: *Emir, ckt: *root.Circuit, x: []const f64, t: f64) void {
@@ -220,32 +253,10 @@ pub const Emir = struct {
         }
         e.to = t;
     }
-
-    /// The window's statistics, every terminal's in terminal order, in `a`.
-    /// A window of one sample publishes that sample.
-    pub fn publish(e: *const Emir, a: std.mem.Allocator, ckt: *const root.Circuit) !core.Emir {
-        const one = e.from == e.to;
-        const out = try a.alloc(core.EmirTerminal, e.sum.len);
-        for (ckt.batches, e.ports, e.tbase[0..ckt.batches.len], 0..) |b, p, base, k| {
-            const rows = b.hooks.scatter_tapes(b.ctx).rows;
-            for (0..b.count) |id| for (0..p) |u| {
-                const j = base + id * p + u;
-                out[j] = .{
-                    .batch = @intCast(k),
-                    .instance = @intCast(id),
-                    .port = @intCast(u),
-                    .row = rows[id * b.n_u + u],
-                    .avg = if (one) e.last[j] else e.sum[j] / e.span,
-                    .rms = if (one) e.peak[j] else @sqrt(e.sum2[j] / e.span),
-                    .peak = e.peak[j],
-                    .pos = e.pos[j],
-                    .neg = e.neg[j],
-                };
-            };
-        }
-        return .{ .from = e.from, .to = e.to, .terminals = out };
-    }
 };
+
+const none = std.math.maxInt(u32);
+const nan = std.math.nan(f64);
 
 /// Every terminal's current at the static point `x` of `ctx.circuit` (an
 /// `.op`, a `.dc` point), at t = 0; no terminals when `ctx` has no ports.
@@ -256,6 +267,8 @@ pub fn atPoint(ctx: *const root.RunCtx, x: []const f64) !core.Emir {
     e.start(ctx.circuit, x, true);
     return e.publish(ctx.allocator, ctx.circuit);
 }
+
+// ---- private ----
 
 /// The first `len` of `rest`, which then starts past them.
 fn cut(rest: *[]f64, len: usize) []f64 {

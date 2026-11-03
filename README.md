@@ -11,28 +11,28 @@ espice --format=touchstone -r out.s2p deck.sp
 espice --backend cuda sweep.sp                   # sweep points as GPU lanes
 ```
 
-Docs: <https://openfat.github.io/EGSpice/> · Changes: [CHANGELOGS.md](CHANGELOGS.md)
+Docs: <https://openfat.github.io/ESPice/> · Changes: [CHANGELOGS.md](CHANGELOGS.md)
 
 ## Install
 
 | Route | Command |
 |---|---|
-| Install script (Linux, macOS) | `curl -fsSL https://raw.githubusercontent.com/OpenFAT/EGSpice/main/tools/install.sh \| sh` (`sh -s -- 0.3.0` pins a version): reads `sources.json`, checks the download's sha256, caches it, and keeps versions side by side under `~/.local/share/espice` |
-| Debian, Ubuntu, Mint | `sudo apt install ./espice-0.3.0-linux-amd64.deb` (`arm64` too) |
-| Fedora, openSUSE | `sudo dnf install ./espice-0.3.0-linux-amd64.rpm` (`zypper install` on openSUSE) |
-| Arch | `sudo pacman -U ./espice-0.3.0-linux-amd64.pkg.tar.zst`, or the release's `PKGBUILD` (`espice-bin`) with `makepkg`; on the AUR once published |
-| NVIDIA / AMD GPUs (Linux) | `espice-cuda-0.3.0-linux-{amd64,arm64}.{deb,rpm,pkg.tar.zst}` (any NVIDIA GPU from Turing on; needs the driver) or `espice-hip-0.3.0-linux-amd64.*` (every AMD target the release builds, picked at start; needs ROCm's HIP runtime). One of `espice`, `espice-cuda`, `espice-hip` at a time |
+| Install script (Linux, macOS) | `curl -fsSL https://raw.githubusercontent.com/OpenFAT/ESPice/main/tools/install.sh \| sh` (`sh -s -- 0.20.0` pins a version): reads `sources.json`, checks the download's sha256, caches it, and keeps versions side by side under `~/.local/share/espice` |
+| Debian, Ubuntu, Mint | `sudo apt install ./espice-0.20.0-linux-amd64.deb` (`arm64` too) |
+| Fedora, openSUSE | `sudo dnf install ./espice-0.20.0-linux-amd64.rpm` (`zypper install` on openSUSE) |
+| Arch | `sudo pacman -U ./espice-0.20.0-linux-amd64.pkg.tar.zst`, or the release's `PKGBUILD` (`espice-bin`) with `makepkg`; on the AUR once published |
+| NVIDIA / AMD GPUs (Linux) | `espice-cuda-0.20.0-linux-{amd64,arm64}.{deb,rpm,pkg.tar.zst}` (any NVIDIA GPU from Turing on; needs the driver) or `espice-hip-0.20.0-linux-amd64.*` (every AMD target the release builds, picked at start; needs ROCm's HIP runtime). One of `espice`, `espice-cuda`, `espice-hip` at a time |
 | Homebrew (macOS, Linux) | `brew install OpenFAT/espice/espice`, once the tap is published (the release's `espice.rb`) |
-| Nix (release binary) | `nix run github:OpenFAT/EGSpice#latest -- deck.sp`, or `'#"0.3.0"'` for a given release |
-| Nix (from source) | `nix run github:OpenFAT/EGSpice -- deck.sp`; `nix profile install github:OpenFAT/EGSpice` (`.#espice-cuda` adds CUDA) |
-| Release tarball | [GitHub releases](https://github.com/OpenFAT/EGSpice/releases): every platform and CPU level, with `SHA256SUMS`; GPU builds as self-extracting `.run` bundles |
+| Nix (release binary) | `nix run github:OpenFAT/ESPice#latest -- deck.sp`, or `'#"0.20.0"'` for a given release |
+| Nix (from source) | `nix run github:OpenFAT/ESPice -- deck.sp`; `nix profile install github:OpenFAT/ESPice` (`.#espice-cuda` adds CUDA) |
+| Release tarball | [GitHub releases](https://github.com/OpenFAT/ESPice/releases): every platform and CPU level, with `SHA256SUMS`; GPU builds as self-extracting `.run` bundles |
 
 The packages, the install script, Homebrew and Nix install the CPU build at the baseline instruction
 set. Every route but the two from source needs a published release, and none exists yet; until
 one does, use Nix from source or build from source. Runtime `.hdl`
 models build with Zig 0.18.0-dev.349: the Linux packages and Nix carry it; with the install script,
 Homebrew or a tarball, put it on `PATH` or in `$ZIG`. More in the
-[install guide](https://openfat.github.io/EGSpice/using/install/).
+[install guide](https://openfat.github.io/ESPice/using/install/).
 
 From source (Zig 0.18.0-dev.349, provided by the devshell; VerA and Gompute are pinned in
 `build.zig.zon`):

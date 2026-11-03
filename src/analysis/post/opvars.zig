@@ -6,11 +6,62 @@
 //! and C_t = dY/ds at s = 0 of the same complement of G + sC, which is
 //! C_PP - C_PI K - G_PI G_II⁻¹ (C_IP - C_II K) with K = G_II⁻¹ G_IP.
 //! Names and terminal order (d, g, s, b) after ngspice's MOSFETs.
+//! In: a recorded result and its circuit. Out: the result with one column
+//! per `deck.opvars` entry.
+//! Cites ngspice (the variable names and terminal order); #236.
+//!
+//! Contents:
+//! - `pub fn publish(a: Allocator, scratch: Allocator, circuit: *const Circuit, deck: *const Deck, res: Result) Allocator.Error!Result`
+
 const std = @import("std");
 const core = @import("core");
 const abi = @import("device").abi;
 const dense_lu = @import("solver").dense_lu;
 const types = @import("../types.zig");
+
+/// A merged evaluation's dense `n x n` partials and its internal unknowns.
+const Terminals = struct {
+    n: usize,
+    g: []const f64,
+    c: []const f64,
+    in: []const u32,
+    /// At least `in.len * (in.len + 2)` values, and `in.len` pivots.
+    work: []f64,
+    piv: []u32,
+
+    /// ∂f_i/∂x_j and ∂q_i/∂x_j between terminals `i` and `j` with the
+    /// internal unknowns eliminated; NaN when G_II is singular.
+    // ponytail: factors G_II per call, a few times per value; factor once
+    // per point if a deck saves many variables of large-node models.
+    fn partial(t: Terminals, i: usize, j: usize) [2]f64 {
+        const n = t.n;
+        var g = t.g[i * n + j];
+        var c = t.c[i * n + j];
+        const ni = t.in.len;
+        if (ni == 0) return .{ g, c };
+        var off: usize = 0;
+        const lu = types.take(t.work, &off, ni * ni);
+        const k = types.take(t.work, &off, ni);
+        const m = types.take(t.work, &off, ni);
+        for (t.in, 0..) |r, a| for (t.in, 0..) |col, b| {
+            lu[a * ni + b] = t.g[r * n + col];
+        };
+        dense_lu.factorize(ni, lu, t.piv) catch return @splat(std.math.nan(f64));
+        for (t.in, k) |r, *kv| kv.* = t.g[r * n + j];
+        dense_lu.solveFactored(ni, lu, t.piv, k, k);
+        for (t.in, m) |r, *mv| {
+            var s = t.c[r * n + j];
+            for (t.in, k) |col, kv| s -= t.c[r * n + col] * kv;
+            mv.* = s;
+        }
+        dense_lu.solveFactored(ni, lu, t.piv, m, m);
+        for (t.in, k, m) |col, kv, mv| {
+            g -= t.g[i * n + col] * kv;
+            c -= t.c[i * n + col] * kv + t.g[i * n + col] * mv;
+        }
+        return .{ g, c };
+    }
+};
 
 /// `res` with its columns past `deck.probes`, recorded from
 /// `deck.opvar_probes`, replaced by one column per `deck.opvars` entry,
@@ -29,6 +80,8 @@ pub fn publish(a: std.mem.Allocator, scratch: std.mem.Allocator, circuit: *const
     out.tangents = try columns(a, scratch, circuit, deck, res.tangents, scale);
     return out;
 }
+
+// ---- private ----
 
 /// `publish` over the point-major rows of `in`.
 fn columns(a: std.mem.Allocator, scratch: std.mem.Allocator, circuit: *const types.Circuit, deck: *const core.Deck, in: []const f64, scale: usize) ![]const f64 {
@@ -147,50 +200,6 @@ fn rootOf(root: []const u32, u: usize) usize {
     }
     return r;
 }
-
-/// A merged evaluation's dense `n x n` partials and its internal unknowns.
-const Terminals = struct {
-    n: usize,
-    g: []const f64,
-    c: []const f64,
-    in: []const u32,
-    /// At least `in.len * (in.len + 2)` values, and `in.len` pivots.
-    work: []f64,
-    piv: []u32,
-
-    /// ∂f_i/∂x_j and ∂q_i/∂x_j between terminals `i` and `j` with the
-    /// internal unknowns eliminated; NaN when G_II is singular.
-    // ponytail: factors G_II per call, a few times per value; factor once
-    // per point if a deck saves many variables of large-node models.
-    fn partial(t: Terminals, i: usize, j: usize) [2]f64 {
-        const n = t.n;
-        var g = t.g[i * n + j];
-        var c = t.c[i * n + j];
-        const ni = t.in.len;
-        if (ni == 0) return .{ g, c };
-        var off: usize = 0;
-        const lu = types.take(t.work, &off, ni * ni);
-        const k = types.take(t.work, &off, ni);
-        const m = types.take(t.work, &off, ni);
-        for (t.in, 0..) |r, a| for (t.in, 0..) |col, b| {
-            lu[a * ni + b] = t.g[r * n + col];
-        };
-        dense_lu.factorize(ni, lu, t.piv) catch return @splat(std.math.nan(f64));
-        for (t.in, k) |r, *kv| kv.* = t.g[r * n + j];
-        dense_lu.solveFactored(ni, lu, t.piv, k, k);
-        for (t.in, m) |r, *mv| {
-            var s = t.c[r * n + j];
-            for (t.in, k) |col, kv| s -= t.c[r * n + col] * kv;
-            mv.* = s;
-        }
-        dense_lu.solveFactored(ni, lu, t.piv, m, m);
-        for (t.in, k, m) |col, kv, mv| {
-            g -= t.g[i * n + col] * kv;
-            c -= t.c[i * n + col] * kv + t.g[i * n + col] * mv;
-        }
-        return .{ g, c };
-    }
-};
 
 test "an internal node eliminates to the terminals' series conductance and charge" {
     // Terminals 0, 1 and internal node 2: g1 from 0 to 2, g2 from 2 to 1,
