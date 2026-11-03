@@ -626,6 +626,35 @@ module ltra(p1, n1, p2, n2);
                     in2 = in2 + d2;
                 end
             end
+
+            // Which point a full history drops at this timepoint (LTRAtrunc):
+            // the first interior point whose four signals are all collinear
+            // with their neighbours; failing that, the oldest when the delayed
+            // read no longer reaches it, else the least bent point, so the
+            // window t - td stays sampled. It reads t and the accepted history
+            // only, so it runs once per timepoint here, not in every Newton
+            // evaluation. ponytail: lossy past cap (ngspice grows); VerA has
+            // no growable held storage.
+            drop = 1;
+            if (nh == cap && t > ht[nh - 1]) begin
+                found = 0;
+                bmin = 1e300;
+                for (k = 1; k + 1 < nh && !found; k = k + 1) begin
+                    bk = max(max(bend(ht[k - 1], hv1[k - 1], ht[k], hv1[k], ht[k + 1], hv1[k + 1], compactrel, compactabs),
+                                  bend(ht[k - 1], hv2[k - 1], ht[k], hv2[k], ht[k + 1], hv2[k + 1], compactrel, compactabs)),
+                             max(bend(ht[k - 1], hi1[k - 1], ht[k], hi1[k], ht[k + 1], hi1[k + 1], compactrel, compactabs),
+                                 bend(ht[k - 1], hi2[k - 1], ht[k], hi2[k], ht[k + 1], hi2[k + 1], compactrel, compactabs)));
+                    if (bk < 1.0) begin
+                        drop = k;
+                        found = 1;
+                    end else if (bk < bmin) begin
+                        bmin = bk;
+                        kbest = k;
+                    end
+                end
+                if (!found && t - ht[4] <= td)
+                    drop = kbest;
+            end
         end
 
         v1 = V(br1);
@@ -666,30 +695,7 @@ module ltra(p1, n1, p2, n2);
             hv1[nh - 1] = v1; hv2[nh - 1] = v2; hi1[nh - 1] = ib1; hi2[nh - 1] = ib2;
         end else begin
             if (nh == cap) begin
-                // Full: drop the first interior point whose four signals
-                // are all collinear with their neighbours. Failing that, the
-                // oldest when the delayed read no longer reaches it, else the
-                // least bent point, so the window t - td stays sampled.
-                // ponytail: lossy past cap (ngspice grows); VerA has no
-                // growable held storage.
-                drop = 1;
-                found = 0;
-                bmin = 1e300;
-                for (k = 1; k + 1 < nh && !found; k = k + 1) begin
-                    bk = max(max(bend(ht[k - 1], hv1[k - 1], ht[k], hv1[k], ht[k + 1], hv1[k + 1], compactrel, compactabs),
-                                  bend(ht[k - 1], hv2[k - 1], ht[k], hv2[k], ht[k + 1], hv2[k + 1], compactrel, compactabs)),
-                             max(bend(ht[k - 1], hi1[k - 1], ht[k], hi1[k], ht[k + 1], hi1[k + 1], compactrel, compactabs),
-                                 bend(ht[k - 1], hi2[k - 1], ht[k], hi2[k], ht[k + 1], hi2[k + 1], compactrel, compactabs)));
-                    if (bk < 1.0) begin
-                        drop = k;
-                        found = 1;
-                    end else if (bk < bmin) begin
-                        bmin = bk;
-                        kbest = k;
-                    end
-                end
-                if (!found && t - ht[4] <= td)
-                    drop = kbest;
+                // Full: drop the point the timepoint block chose.
                 for (k = drop; k < cap - 1; k = k + 1) begin
                     ht[k] = ht[k + 1]; hv1[k] = hv1[k + 1]; hv2[k] = hv2[k + 1];
                     hi1[k] = hi1[k + 1]; hi2[k] = hi2[k + 1];
