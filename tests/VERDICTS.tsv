@@ -521,6 +521,7 @@ PASS	conformance/tests/netlist/noise/device_bsim4_noise_ad_tnoimod0.sp
 PASS	conformance/tests/netlist/noise/device_bsim4_noise_ad_velocity.sp
 PASS	conformance/tests/netlist/noise/device_bsim4_noise_ad_velocity_lc_explicit.sp
 PASS	conformance/tests/netlist/noise/device_bsim4_noise_ad_velocity_lc_zero.sp
+PASS	conformance/tests/netlist/noise/device_bsim4_noise_rsh_nrd.sp
 PASS	conformance/tests/netlist/noise/device_bsim4_noise_tnoimod1.sp
 PASS	conformance/tests/netlist/noise/device_bsim4_noise_triode.sp
 PASS	conformance/tests/netlist/noise/device_vbic_noise_scale.sp
@@ -559,6 +560,7 @@ PASS	conformance/tests/netlist/op/bench_ensemble_corner_pathological.sp
 PASS	conformance/tests/netlist/op/bench_medium_resistor_mesh.sp
 PASS	conformance/tests/netlist/op/bench_mosfet_nand2.sp
 PASS	conformance/tests/netlist/op/bjt_instance_area.sp
+PASS	conformance/tests/netlist/op/bsim4_rsh_nrd.sp
 PASS	conformance/tests/netlist/op/bsource_brace_expr.sp
 PASS	conformance/tests/netlist/op/bsource_ln_zero_start.sp
 PASS	conformance/tests/netlist/op/capacitor_open_dc.sp

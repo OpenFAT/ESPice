@@ -2,6 +2,10 @@
 
 Newest first.
 
+## Unreleased
+
+- BSIM4 with rdsMod=0 stamps its drain and source diffusion resistances (RSH × NRD/NRS, or the RGEOMOD geometry), as b4ld.c's gdpr and gspr; bsim4va.va shorted them, so a deck that sets NRD/NRS, as a layout-extracted sky130 netlist does, solved a wrong point: a triode nfet with RSH = 20, NRD = NRS = 1 drew 21 % more than in ngspice 45 (2.525e-4 against 2.090e-4 A), now within 1.7e-13; and `.noise` lacked their thermal noise (total output noise 8.3 % low, now within 3e-13) (#236).
+
 ## 0.20.0 (2026-11-02)
 
 0.3.0 was never released; its entries are folded in below.

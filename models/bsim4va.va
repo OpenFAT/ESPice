@@ -9577,8 +9577,21 @@ module bsim4va(d, g, s, b);
             I(br_i_d_di) <+ Iddi;
         end
         else begin
-            V(br_v_s_si) <+ 0.0;
-            V(br_v_d_di) <+ 0.0;
+            // rdsMod = 0: b4ld.c stamps the diffusion conductances alone
+            // between the terminal and its internal node (gspr, gdpr), and
+            // b4set.c makes that node only for RSH > 0 with NRS (NRD) > 0
+            // given, or with RGEOMOD != 0 and none given. Instance and card
+            // parameters only, so the short stays a build-time collapse.
+            // ponytail: an RGEOMOD geometry of zero resistance keeps the
+            // node with b4temp.c's 1e3 S (1 mOhm) where b4set.c makes none.
+            if (rsh > 0.0 && (($param_given(nrs) && nrs > 0.0) || (!$param_given(nrs) && rgeomod != 0)))
+                I(br_i_s_si) <+ V(s,si) * BSIM4sourceConductance;
+            else
+                V(br_v_s_si) <+ 0.0;
+            if (rsh > 0.0 && (($param_given(nrd) && nrd > 0.0) || (!$param_given(nrd) && rgeomod != 0)))
+                I(br_i_d_di) <+ V(d,di) * BSIM4drainConductance;
+            else
+                V(br_v_d_di) <+ 0.0;
         end
 
         case (BSIM4rgateMod)
