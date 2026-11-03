@@ -370,12 +370,10 @@ const Graph = struct {
 /// The simulator's module graph for one target. `analysis` still needs `gompute_kernels`.
 fn graph(c: Cfg, vera: *Build.Dependency, gompute: *Module, models: []const Model, gen: []const Build.LazyPath, bo: *Module) Graph {
     const b = c.b;
-    // Device code: stripped whenever GPU kernels build (DWARF on generated models crashed NVPTX).
-    var dev = c;
-    // On the host they follow -Ddebug-info: the exe's LLVM module imports the
+    // Host device code follows -Ddebug-info: the exe's LLVM module imports the
     // models, and a stripped model inlined into an unstripped caller segfaults
-    // Zig 0.18.0-dev.349 while emitting DWARF.
-    dev.strip = c.strip or c.gpu_kernels;
+    // Zig 0.18.0-dev.349 while emitting DWARF. The kernel twins (`kmake`) stay
+    // stripped (DWARF on generated models crashed NVPTX).
     const contract: Import = .{ .name = "contract", .module = vera.module("contract") };
     const gomp: Import = .{ .name = "gompute", .module = gompute };
     // emitKernels mutates the public Gompute module to import all GPU blobs.
@@ -394,7 +392,7 @@ fn graph(c: Cfg, vera: *Build.Dependency, gompute: *Module, models: []const Mode
     const abi: Import = .{ .name = "device_abi", .module = c.make(b.path("src/device/abi.zig"), &.{ contract, core }) };
     // Device objects see only core's ids leaf (GROUND, DeviceType): an edit elsewhere in core
     // must not recompile every model. abi's own tests still get the full core.
-    const abi_dev = dev.make(b.path("src/device/abi.zig"), &.{ contract, .{ .name = "core", .module = dev.make(b.path("src/core/ids.zig"), &.{}) } });
+    const abi_dev = c.make(b.path("src/device/abi.zig"), &.{ contract, .{ .name = "core", .module = c.make(b.path("src/core/ids.zig"), &.{}) } });
     // Zig 0.18's std.Io.Threaded does not compile for wasm32-wasi with libc
     // (Environ and PATH_MAX); without it, it takes the WASI syscall path.
     const libc = !c.target.result.cpu.arch.isWasm();
@@ -415,7 +413,7 @@ fn graph(c: Cfg, vera: *Build.Dependency, gompute: *Module, models: []const Mode
     for (models, gen, dev_mods, kernel_models, objs) |m, src, *dm, *kone, *obj| {
         const line = b.fmt("pub const {s} = @import(\"{s}\");\n", .{ m.name, m.name });
         agg.appendSlice(b.allocator, line) catch @panic("OOM");
-        dm.* = dev.make(src, &.{contract});
+        dm.* = c.make(src, &.{contract});
         // The device kernels compile at .fast, where VerA's Debug-only Model
         // field (`su_ok`) does not exist; `gpu_kernels` makes the host's
         // device object drop it too, so a Model row has one size on both sides.
@@ -430,13 +428,13 @@ fn graph(c: Cfg, vera: *Build.Dependency, gompute: *Module, models: []const Mode
             if (c.gpu_kernels or c.optimize != .debug) "pub const gpu_kernels = true;\n" else "",
             if (ltra) "pub const ltra_ac = @import(\"ltra_ac\");\n" else "",
         }));
-        const one = dev.make(one_src, &.{.{ .name = m.name, .module = dm.* }});
+        const one = c.make(one_src, &.{.{ .name = m.name, .module = dm.* }});
         kone.* = kmake(b, one_src, &.{.{ .name = m.name, .module = kmake(b, src, &.{k_contract}) }});
         if (ltra) {
-            one.addImport("ltra_ac", dev.make(b.path("models/ltra_ac.zig"), &.{}));
+            one.addImport("ltra_ac", c.make(b.path("models/ltra_ac.zig"), &.{}));
             kone.*.addImport("ltra_ac", kmake(b, b.path("models/ltra_ac.zig"), &.{}));
         }
-        const host = dev.make(b.path("src/device/eval.zig"), &.{ contract, .{ .name = "models", .module = one }, .{ .name = "device_abi", .module = abi_dev }, object_gomp });
+        const host = c.make(b.path("src/device/eval.zig"), &.{ contract, .{ .name = "models", .module = one }, .{ .name = "device_abi", .module = abi_dev }, object_gomp });
         host.link_libc = libc;
         // The callconv(.auto) vtable gains a hidden *StackTrace when tracing is on.
         host.error_tracing = c.optimize == .debug;
