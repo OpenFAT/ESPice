@@ -359,7 +359,12 @@ pub const Executor = struct {
         defer if (self.config.thread_pool) |pool| pool.give(borrowed);
         var par: ?ParEval = null;
         if (lanes > 1) {
-            par = try ParEval.init(self.allocator, self.io, self.circuit.batches, self.circuit.nnz, self.circuit.n, self.circuit.has_charge, lanes);
+            // At most one stamp lane per `lane_min_weight`: a lane with less
+            // costs its two barriers a pass more than its share saves. One
+            // lane still stages and reduces, so the 1-vs-N oracle
+            // (tools/determinism.sh) keeps comparing that path to the serial one.
+            const stamp_lanes: u32 = @intCast(@max(1, @min(lanes, deviceWeight(&self.circuit) / lane_min_weight)));
+            par = try ParEval.init(self.allocator, self.io, self.circuit.batches, self.circuit.nnz, self.circuit.n, self.circuit.has_charge, stamp_lanes);
             self.circuit.par_eval = &par.?;
         }
         defer {
@@ -572,6 +577,12 @@ const gpu_lu_min_n = 10_000;
 /// measured 3.3x on 4,000 bsim4 at 8 threads and no gain on 4,000 mos1,
 /// whose summed weight sits below this (`gpu/context.zig` cost notes).
 const borrow_min_weight: u64 = 4_000_000;
+/// Device weight per ParEval lane. ReleaseSafe, alone on 32 cores, at 1 / 2
+/// / 8 threads: vacask_rc (weight ~150, 1M steps) 6.0 / 9.2 / 12.1 s,
+/// hspice_samples (8) 0.7 / 1.3 / 6.8 s, vacask_graetz (4 diodes, ~1,200)
+/// 39.7 / 32.7 / 25.6 s, device_mos6_inverter (~90,000) 0.81 / 0.49 / 0.19 s.
+/// 512 keeps each lane at half the ideal speedup or better on these.
+const lane_min_weight: u64 = 512;
 /// Matrix entries from which a refactor may be thick enough for the
 /// multicore LU; its own per-epoch admission (`direct.zig`) still decides.
 const borrow_min_nnz: u32 = 50_000;
@@ -580,9 +591,14 @@ const borrow_min_nnz: u32 = 50_000;
 
 /// Lanes for a query of `ckt`: 1 below both gates.
 fn wantLanes(ckt: *const types.Circuit) u32 {
+    return if (deviceWeight(ckt) >= borrow_min_weight or ckt.nnz >= borrow_min_nnz) ThreadPool.per_query else 1;
+}
+
+/// `ParEval.instanceWeight` summed over every instance of `ckt`.
+fn deviceWeight(ckt: *const types.Circuit) u64 {
     var weight: u64 = 0;
     for (ckt.batches) |b| weight += @as(u64, b.count) * par_eval.instanceWeight(b);
-    return if (weight >= borrow_min_weight or ckt.nnz >= borrow_min_nnz) ThreadPool.per_query else 1;
+    return weight;
 }
 
 /// `--timing-in-depth`: where the query's Newton time went.

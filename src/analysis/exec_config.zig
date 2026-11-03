@@ -37,7 +37,8 @@ pub const Config = struct {
     /// Solver threads; above 1 it also fixes the multicore refactor's
     /// lanes, which otherwise follow `device_threads` (`materialize`).
     solver_threads: u8 = 1,
-    /// Device-stamp lanes; above 1 each query builds a ParEval.
+    /// Device-stamp lanes at most; above 1 each query builds a ParEval
+    /// with one lane per 512 of device weight, up to this many (`runQuery`).
     device_threads: u32 = 1,
     /// Extra lanes a large query may borrow for its device stamp and
     /// multicore refactor when the caller fixed no thread count; null

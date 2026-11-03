@@ -40,6 +40,7 @@ and differential oracles come first; coverage and fuzzing alone cannot see it.
 | Batch or lane leaks into a neighbour | each lane bitwise equal to its run alone, NaN and failing lanes included | differential | `src/analysis/tests/` "lane batches" tests |
 | A `.four`/`.fft` reading a `.tran`'s result (#231) differs from its own run | the reader appended alone, bitwise; a `.tran` with other options, OP, columns or measures is not read | differential | `src/analysis/tests/session.zig` "read a matching .tran" |
 | Parallel nondeterminism | `--jobs=1` against N and permuted ready sets: byte-identical | determinism | `src/analysis/tests/session.zig`; whole corpus nightly: `tools/determinism.sh` |
+| Threaded device stamp differs from serial, or stalls on an unscheduled lane | the serial stamp, bitwise: the planes at one iterate (a bypass replay on tied terminals included, and against a fresh eval), a pass no worker ever runs, whole decks at 1 to 4 device threads | determinism | `src/analysis/tests/circuit.zig` "threaded", "bypass replay"; `src/tests/espice.zig` "same deck, same bytes"; whole corpus nightly: `tools/determinism.sh` |
 | Crash, hang or blow-up on huge or deep input | exit 0 or a diagnostic, never a signal or a timeout, under an 8 GB cap | adversarial sizes | `tools/adversarial.py`; nightly |
 | C ABI misuse | model of valid states under random call sequences, forged handles | stateful fuzz | `src/c_api.zig` |
 | Output corruption | round trip of every f64 bit pattern | round trip | `src/output/` tests |

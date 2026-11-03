@@ -204,7 +204,7 @@ pub fn Bypass(comptime D: type) type {
                     continue;
                 }
                 misses += 1;
-                var rec: RecordSink(SinkT) = .{ .inner = sink, .id = id, .out = bp.writes[@as(usize, id) * max_writes ..][0..max_writes] };
+                var rec: RecordSink(D, SinkT) = .{ .inner = sink, .id = id, .out = bp.writes[@as(usize, id) * max_writes ..][0..max_writes] };
                 self.evalSplit(&rec, id, id + 1, sim, limiting);
                 @memcpy(ref, &lx);
                 m.* = if (corr or rec.overflow) .{} else .{ .class = class, .len = @intCast(rec.n), .key = state_key };

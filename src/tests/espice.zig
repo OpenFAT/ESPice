@@ -1423,6 +1423,10 @@ test "same deck, same bytes: run twice, any solver_threads, any device_threads" 
         "tests/conformance/tests/netlist/stress/scaling_inverter_chain_256.sp",
         "tests/conformance/tests/netlist/stress/sweep_opamp_wl_200.sp",
         "tests/conformance/tests/netlist/stress/vacask_ring.sp",
+        // MOS6 with gate, source and bulk on one node: the bypass replays
+        // its source row by the wrong Jacobian row unless serial recording
+        // skips the unwritten gate row (`RecordSink`).
+        "tests/conformance/tests/netlist/tran/device_mos6_inverter.sp",
     };
     try t.expectEqual(@as(c_int, 0), setenv("ESPICE_LU_PAR", "1", 1));
     defer _ = unsetenv("ESPICE_LU_PAR");
