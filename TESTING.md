@@ -49,7 +49,7 @@ and differential oracles come first; coverage and fuzzing alone cannot see it.
 | `.wcd` worst-case distance wrong, or a guess reported as converged (#240) | closed-form β of a linear margin, signed; the exact design point of a parabola; Breitung's factor against a quadrature of the exact P_f; `.dcmatch`'s σ on a 5T OTA within 2 %; tangent rows against a finite-difference batch; 1 job against 8, byte for byte | analytic, differential, metamorphic | `src/core/form.zig`, `src/tests/espice.zig` ".wcd" tests |
 | Browser build differs from native | the native espice at the same lane width, within 1e-9 | differential | `tools/playground/compare.js` (`pages.yml`) |
 | A target or OS stops building | the compiler for every release target | cross compile | `cross.yml`; the gate on Linux and macOS |
-| GPU differs from CPU | the CPU result of the same deck | differential | `zig build test -- --backend cuda --jobs 1` (local; no GPU runner) |
+| GPU differs from CPU | the CPU result of the same deck | differential | `zig build test -- --backend auto --jobs 1` (the placement users get) and the cpu-vs-cuda parity sweep, every deck under `--backend cpu` and `--backend cuda` (local; no GPU runner) |
 | HIP backend miscompiles | kernel symbols present after an LLVM AMDGPU compile | compile probe | `build.zig`, in `test` |
 | Abstraction costs run time | hand-written twin's assembly | codegen probe | `tests/codegen.zig` + `tools/asm_probe.py` (in `test`) |
 | Release ships a broken artifact | smoke decks from a clean directory, a container with no `/nix` | smoke | `tools/release_smoke.sh`, `release.yml` |
@@ -75,7 +75,7 @@ Each line is a yes or a number a script reads; none is typed from memory.
 
 - `zig build test` passes in ReleaseSafe: the corpus at 100 percent with only `KNOWN GAP` XFAILs, `VERDICTS.tsv` unchanged or moved XFAIL → PASS only.
 - The last nightly on the release commit is green: zero certificate misses, zero decks differ between 1 and 8 threads, no fuzz crash in 20M iterations per run.
-- `zig build test -- --backend cuda --jobs 1` passes on CUDA hardware for the release commit. A backend that has never passed the corpus on a card is listed below as untested, and the README says so.
+- `zig build test -- --backend auto --jobs 1` passes on CUDA hardware for the release commit. `auto` runs some decks on the CPU (its price says the GPU loses them), so explicit `--backend cuda` correctness, every eligible device on the GPU, is the cpu-vs-cuda parity sweep over the whole corpus on the same commit. A backend that has never passed the corpus on a card is listed below as untested, and the README says so.
 - Zero open crash bugs.
 
 ## Not yet tested

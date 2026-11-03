@@ -1168,19 +1168,7 @@ fn expectDiagnostic(h: *c.espice_problem, want: []const u8) !void {
     try std.testing.expectEqualStrings(want, std.mem.sliceTo(&buf, 0));
 }
 
-/// Resident set size of this process, bytes (Linux /proc/self/statm).
-/// Elsewhere the peak RSS (`ru_maxrss`, bytes on macOS), which a leak still grows.
-fn residentBytes() !usize {
-    if (@import("builtin").os.tag.isDarwin())
-        return @intCast(std.posix.getrusage(std.posix.rusage.SELF).maxrss);
-    var buf: [128]u8 = undefined;
-    const text = try std.Io.Dir.cwd().readFile(std.testing.io, "/proc/self/statm", &buf);
-    var fields = std.mem.tokenizeScalar(u8, text, ' ');
-    _ = fields.next();
-    return try std.fmt.parseInt(usize, fields.next().?, 10) * std.heap.pageSize();
-}
-
-test "C points: 100 batches of 100 on one handle, released as they are read, keep run_all time and RSS flat" {
+test "C points: batches of 100 on one handle, released as they are read, each read in full" {
     const t = std.testing;
     const deck = "C batches\n.param rv=1k\nV1 in 0 pulse(0 1 0.1n 0.1n 0.1n 20n 40n)\nR1 in out {rv}\nC1 out 0 0.1p\n.tran 1p 2n\n" ++
         ".meas tran tpd trig v(in) val=0.5 rise=1 targ v(out) val=0.5 rise=1\n.end\n";
@@ -1190,19 +1178,18 @@ test "C points: 100 batches of 100 on one handle, released as they are read, kee
     points.measures_only = 1;
     points.early_stop = 1;
     const names = [_]c.espice_bytes{.{ .data = "tpd", .len = 3 }};
-    const batches = 100;
+    // What a long run of batches costs in allocations and memory is
+    // counted in src/tests/espice.zig ("run_all: a Problem appended to and run
+    // batch after batch", "release_points").
+    const batches = 3;
     const n = 100;
-    var ns: [batches]u64 = undefined;
-    var rss: [batches]usize = undefined;
     var rows: [n]f64 = undefined;
     var first_ids: [batches]u32 = undefined;
     for (0..batches) |b| {
         // The same work every batch: only the handle's history grows.
         for (&rows, 0..) |*r, k| r.* = 1e3 * (1 + 0.01 * @as(f64, @floatFromInt(k)));
         try t.expectEqual(@as(u32, 0), c.espice_append_points(handle, &rows, n, &points, &first_ids[b]));
-        const start = std.Io.Timestamp.now(t.io, .awake);
         try t.expectEqual(@as(u32, 0), c.espice_run_all(handle));
-        ns[b] = @intCast(start.durationTo(std.Io.Timestamp.now(t.io, .awake)).nanoseconds);
         var values: [n]f64 = undefined;
         var why: [n]u32 = undefined;
         try t.expectEqual(@as(u32, 0), c.espice_copy_point_measures(handle, first_ids[b], n, &names, 1, &values, &why));
@@ -1211,7 +1198,6 @@ test "C points: 100 batches of 100 on one handle, released as they are read, kee
             try t.expectEqual(@as(u32, c.ESPICE_REASON_OK), w);
         }
         try t.expectEqual(@as(u32, 0), c.espice_release_points(handle, first_ids[b], n));
-        rss[b] = try residentBytes();
     }
     // A released point keeps its id, its measures are gone; releasing again is a no-op.
     var value: [1]f64 = undefined;
@@ -1220,16 +1206,6 @@ test "C points: 100 batches of 100 on one handle, released as they are read, kee
     var len: usize = 0;
     try t.expectEqual(@as(u32, c.ESPICE_RESULT_UNAVAILABLE), c.espice_copy_result(handle, first_ids[0], null, 0, &len));
     try t.expectEqual(@as(u32, 0), c.espice_release_points(handle, first_ids[0], 1));
-    var early: u64 = 0;
-    var late: u64 = 0;
-    for (ns[10..20]) |x| early += x;
-    for (ns[90..100]) |x| late += x;
-    const grown = rss[batches - 1] -| rss[19];
-    std.debug.print("batches: run_all {d} ms (11-20) vs {d} ms (91-100) per 10; RSS {d} MB at 20, {d} MB at 100, {d} B per point after\n", .{ early / 1_000_000, late / 1_000_000, rss[19] >> 20, rss[batches - 1] >> 20, grown / (80 * n) });
-    try t.expect(late < 2 * early);
-    // A released point keeps its query rows (the Zig test of
-    // `release_points` counts them), plus allocator slack.
-    try t.expect(grown < 80 * n * 8 * 1024);
 }
 
 /// Options with every flag off, no abort bound and no tangents.

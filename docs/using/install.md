@@ -3,15 +3,15 @@
 ESPice is one binary, `espice`, plus a static library and C header for
 embedding. Every route below except building from source installs a
 published release, and no release exists yet: until one does, use Nix from
-source (`nix run github:OpenFAT/EGSpice`) or build from source.
+source (`nix run github:OpenFAT/ESPice`) or build from source.
 
 ## Install script
 
 On Linux or macOS, without root:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/OpenFAT/EGSpice/main/tools/install.sh | sh
-curl -fsSL https://raw.githubusercontent.com/OpenFAT/EGSpice/main/tools/install.sh | sh -s -- 0.3.0
+curl -fsSL https://raw.githubusercontent.com/OpenFAT/ESPice/main/tools/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/OpenFAT/ESPice/main/tools/install.sh | sh -s -- 0.20.0
 ```
 
 It reads `sources.json` (each release's tarballs and checksums), downloads
@@ -40,10 +40,10 @@ Each release attaches a `.deb`, an `.rpm` and an Arch package for x86-64
 and ARM64 (CPU builds at the baseline instruction set):
 
 ```sh
-sudo apt install ./espice-0.3.0-linux-amd64.deb            # Debian, Ubuntu
-sudo dnf install ./espice-0.3.0-linux-amd64.rpm            # Fedora
-sudo zypper install ./espice-0.3.0-linux-amd64.rpm         # openSUSE
-sudo pacman -U ./espice-0.3.0-linux-amd64.pkg.tar.zst      # Arch
+sudo apt install ./espice-0.20.0-linux-amd64.deb            # Debian, Ubuntu
+sudo dnf install ./espice-0.20.0-linux-amd64.rpm            # Fedora
+sudo zypper install ./espice-0.20.0-linux-amd64.rpm         # openSUSE
+sudo pacman -U ./espice-0.20.0-linux-amd64.pkg.tar.zst      # Arch
 ```
 
 For GPUs, two more packages install in place of `espice` (each conflicts
@@ -81,13 +81,13 @@ built-in model and a runtime Verilog-A deck.
 The repository is a flake. Run it without installing:
 
 ```sh
-nix run github:OpenFAT/EGSpice -- my_circuit.sp
+nix run github:OpenFAT/ESPice -- my_circuit.sp
 ```
 
 Install it into your profile:
 
 ```sh
-nix profile install github:OpenFAT/EGSpice
+nix profile install github:OpenFAT/ESPice
 espice --version
 ```
 
@@ -95,7 +95,7 @@ Or use it as an input of your own flake:
 
 ```nix
 {
-  inputs.espice.url = "github:OpenFAT/EGSpice";
+  inputs.espice.url = "github:OpenFAT/ESPice";
 
   outputs = { self, nixpkgs, espice, ... }: {
     # espice.packages.<system>.default is the espice package
@@ -110,8 +110,8 @@ A released version installs from its release binary instead of building
 from source (CPU build, baseline instruction set):
 
 ```sh
-nix run github:OpenFAT/EGSpice#latest -- my_circuit.sp
-nix run 'github:OpenFAT/EGSpice#"0.3.0"' -- my_circuit.sp
+nix run github:OpenFAT/ESPice#latest -- my_circuit.sp
+nix run 'github:OpenFAT/ESPice#"0.20.0"' -- my_circuit.sp
 ```
 
 `sources.json` lists each release's tarballs and checksums; the release
@@ -127,13 +127,13 @@ a checkout. Build from source inside `nix develop` for other targets.
 
 The release workflow builds a tarball per platform, plus a `SHA256SUMS`
 file, for each tagged release on the
-[GitHub releases page](https://github.com/OpenFAT/EGSpice/releases).
+[GitHub releases page](https://github.com/OpenFAT/ESPice/releases).
 
 !!! note
     The 0.1.0 release has no tarballs: its release build failed. Until a
     release carries them, install with Nix or build from source.
 
-The release catalogue is [tools/release-targets.json](https://github.com/OpenFAT/EGSpice/blob/main/tools/release-targets.json).
+The release catalogue is [tools/release-targets.json](https://github.com/OpenFAT/ESPice/blob/main/tools/release-targets.json).
 It currently configures **128 variants**, with separate CPU and GPU choices:
 
 | Host | CPU targets | Backends |
@@ -166,8 +166,8 @@ machine supports: `grep -o 'avx512f\|avx2' /proc/cpuinfo | sort -u` helps
 identify v3 and v4. A higher unsupported level can terminate with `SIGILL`.
 
 ```sh
-tar xzf espice-0.3.0-linux-x86_64-v3-cuda-sm_89.tar.gz
-./espice-0.3.0-linux-x86_64-v3-cuda-sm_89/bin/espice --version
+tar xzf espice-0.20.0-linux-x86_64-v3-cuda-sm_89.tar.gz
+./espice-0.20.0-linux-x86_64-v3-cuda-sm_89/bin/espice --version
 ```
 
 Archives contain `bin/espice`, `lib/libespice.a`, `include/espice.h`, and
@@ -187,8 +187,8 @@ The launcher's host prerequisites are a shell, `tar` and `bzip2`; they are
 needed before the bundled runtime can be extracted.
 
 ```sh
-chmod +x espice-0.3.0-linux-x86_64-v1-cpu.run
-./espice-0.3.0-linux-x86_64-v1-cpu.run circuit.sp
+chmod +x espice-0.20.0-linux-x86_64-v1-cpu.run
+./espice-0.20.0-linux-x86_64-v1-cpu.run circuit.sp
 ```
 
 To build the same bundle locally, use the repository's locked bundler:
@@ -229,7 +229,7 @@ else; the Zig dependencies (VerA, Gompute) are pinned in `build.zig.zon` and
 fetched by the build.
 
 ```sh
-git clone https://github.com/OpenFAT/EGSpice
+git clone https://github.com/OpenFAT/ESPice
 cd ESPice
 nix develop     # pinned Zig plus the CUDA and ROCm toolchains
 zig build       # zig-out/bin/espice
