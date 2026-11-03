@@ -286,6 +286,7 @@ PASS	conformance/tests/netlist/hbxf/two_poles_hspice.sp
 PASS	conformance/tests/netlist/hdl/a09_absdelay_accepted_only.sp
 PASS	conformance/tests/netlist/hdl/a09_abstime_per_attempt.sp
 PASS	conformance/tests/netlist/hdl/a09_analog_initial_once.sp
+PASS	conformance/tests/netlist/hdl/a09_analog_initial_once_lanes.sp
 PASS	conformance/tests/netlist/hdl/a09_cross_count_revert.sp
 PASS	conformance/tests/netlist/hdl/a09_idt_bystander_reject.sp
 PASS	conformance/tests/netlist/hdl/a09_idt_lte_reject.sp

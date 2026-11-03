@@ -175,7 +175,7 @@ pub fn retapeFrom(self: *GpuLanes, first: u32) !void {
     try packLanes(self, 1, nnz, self.buf(.a), 0);
     try self.buf(.peel).download(vals.ptr, nnz * @sizeOf(f64));
     const l: usize = first;
-    const slv = &self.ckts[l].ws.?.slv;
+    const slv = &(try self.ckts[l].workspace()).slv;
     slv.factor(vals, self.ckts[l].solver_execution) catch |e| switch (e) {
         error.SingularMatrix => return,
         else => |other| return other,
@@ -230,7 +230,9 @@ fn peel(self: *GpuLanes, refresh: bool) !void {
     var lead: ?usize = null;
     for (idx, 0..) |l32, j| {
         const l: usize = l32;
-        const slv = &self.ckts[l].ws.?.slv;
+        // A static lane's operating point has no workspace until its
+        // first host solve (`initStatic` makes lane 0's only).
+        const slv = &(try self.ckts[l].workspace()).slv;
         slv.factor(host[j * nnz ..][0..nnz], self.ckts[l].solver_execution) catch |e| switch (e) {
             error.SingularMatrix => {
                 @memset(xs[j * n ..][0..n], 0);
@@ -298,7 +300,7 @@ fn unpackLanes(self: *GpuLanes, k: usize, rows: usize, at: usize, dst: *Buffer) 
 /// graphs hold the old tape, so they go; the next `newton` recaptures.
 /// Called with the stream idle.
 fn retape(self: *GpuLanes, l: usize) !void {
-    const slv = &self.ckts[l].ws.?.slv;
+    const slv = &(try self.ckts[l].workspace()).slv;
     const lu = slv.sparse() orelse return;
     if (!lu.factored) return;
     const built = try lk.buildTab(self.gpa, lu, slv.col_ptr, slv.params.refactor_growth_limit, direct.pivot_tol);
