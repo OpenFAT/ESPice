@@ -1227,8 +1227,8 @@ const HostOps = struct {
         integrator.advanceCurrent(a.method, s.i_prev, q_hist[0], q_hist[1], if (a.gear_hi) s.g_row else q_hist[2], a.c);
         if (s.n_qt > 0)
             integrator.advanceCurrent(a.method, s.qt_i_prev, qt_hist[0], qt_hist[1], if (a.gear_hi) s.qt_g else qt_hist[2], a.c);
-        std.mem.rotate([]f64, q_hist, s.n_hist - 1);
-        if (s.n_qt > 0) std.mem.rotate([]f64, qt_hist, s.n_hist - 1);
+        shiftRing(q_hist);
+        if (s.n_qt > 0) shiftRing(qt_hist);
     }
     /// commitStates and the commit, at the rotated `cur`.
     inline fn commit(_: HostOps, s: *Sim) void {
@@ -1291,6 +1291,34 @@ fn ring(block: []f64, parts: usize) [9][]f64 {
     var out: [9][]f64 = @splat(block[0..0]);
     for (out[0 .. parts - 1], 1..) |*o, i| o.* = block[i * m ..][0..m];
     return out;
+}
+
+/// Moves every history slot one older, [cur, prev, ...] -> [stale, cur,
+/// prev, ...]: the oldest slot comes round as the scratch slot 0. The
+/// permutation of `std.mem.rotate(h, h.len - 1)` (the GPU lanes and emir
+/// still move their rings that way), without its three reversals: they
+/// cost 3.6% of vacask_rc's instructions.
+fn shiftRing(h: [][]f64) void {
+    std.debug.assert(h.len > 0);
+    const stale = h[h.len - 1];
+    std.mem.copyBackwards([]f64, h[1..], h[0 .. h.len - 1]);
+    h[0] = stale;
+}
+
+test "shiftRing is std.mem.rotate by len - 1 at every ring length" {
+    var block: [10]f64 = undefined;
+    for (1..10) |len| {
+        var a: [9][]f64 = undefined;
+        var b: [9][]f64 = undefined;
+        for (a[0..len], b[0..len], 0..) |*x, *y, k| {
+            x.* = block[k..][0..1];
+            y.* = x.*;
+        }
+        shiftRing(a[0..len]);
+        std.mem.rotate([]f64, b[0..len], len - 1);
+        for (a[0..len], b[0..len]) |x, y| try std.testing.expectEqual(y.ptr, x.ptr);
+        if (len > 1) try std.testing.expect(a[0].ptr != a[1].ptr);
+    }
 }
 
 /// The method an order-`k` step integrates with: BE at 1, else `top` itself
