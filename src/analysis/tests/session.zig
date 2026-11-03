@@ -1,7 +1,8 @@
 //! Query-boundary validation and Session scheduling tests. Oracles: the
 //! named refusal each invalid query must get (the frontend's own refusals
 //! for `validate`), the dependency order a Session must keep, and the
-//! columns a run publishes for `schemaOf`'s prediction.
+//! columns a run publishes for `schemaOf`'s prediction, and the lane gate's
+//! decision table.
 
 const Deck = @import("core").Deck;
 const builtin = @import("device").Library.builtin;
@@ -129,6 +130,22 @@ test "backend validation rejects zero thread counts" {
     try validateBackend(.{});
     try t.expectError(error.InvalidThreadCount, validateBackend(.{ .solver_threads = 0 }));
     try t.expectError(error.InvalidThreadCount, validateBackend(.{ .device_threads = 0 }));
+}
+
+test "a query past only the nnz gate borrows lanes but stamps serially" {
+    // Oracle: the gate's decision table. ParEval pays from the device-weight
+    // gate; a circuit that reaches only the nnz gate borrows for the
+    // multicore LU and must not stamp on the lanes.
+    const executor = @import("../executor.zig");
+    const lanePlan = executor.lanePlan;
+    const w = executor.borrow_min_weight;
+    const nnz = executor.borrow_min_nnz;
+    const lanes = executor.ThreadPool.per_query;
+    try t.expectEqual(executor.LanePlan{ .want = 1, .eval = false }, lanePlan(w - 1, nnz - 1));
+    try t.expectEqual(executor.LanePlan{ .want = lanes, .eval = false }, lanePlan(w - 1, nnz));
+    try t.expectEqual(executor.LanePlan{ .want = lanes, .eval = false }, lanePlan(0, std.math.maxInt(u32)));
+    try t.expectEqual(executor.LanePlan{ .want = lanes, .eval = true }, lanePlan(w, 0));
+    try t.expectEqual(executor.LanePlan{ .want = lanes, .eval = true }, lanePlan(w, nnz));
 }
 
 test "backend validation refuses an explicit GPU this build has no kernels for" {

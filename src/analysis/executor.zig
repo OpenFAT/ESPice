@@ -19,6 +19,7 @@
 //!   `seedUic`, `opStart`, `finish`, `runCtx`, `sayNames`, `executeBatch`,
 //!   `executeGpuBatch`, `runGpuWave`, `runGpuOps`, `executeGpuFreqBatch`,
 //!   `precompute`, `frequencyPlan`, `gpuMembers`)
+//! - `pub const LanePlan`, `lanePlan`, `borrow_min_weight`, `borrow_min_nnz`
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -351,10 +352,10 @@ pub const Executor = struct {
         var eval_lanes = lanes;
         var borrowed: u32 = 0;
         if (self.config.thread_pool) |pool| if (self.circuit.ws == null) {
-            const want = wantLanes(&self.circuit);
-            borrowed = pool.take(want - 1);
+            const plan = lanePlan(deviceWeight(&self.circuit), self.circuit.nnz);
+            borrowed = pool.take(plan.want - 1);
             lanes = 1 + borrowed;
-            eval_lanes = if (evalPays(&self.circuit)) lanes else 1;
+            eval_lanes = if (plan.eval) lanes else 1;
             var execution = self.circuit.solver_execution;
             execution.lu_threads = @intCast(@min(lanes, 16));
             self.circuit.configure(execution, self.circuit.knobs);
@@ -574,27 +575,39 @@ const gpu_lu_min_n = 10_000;
 /// circuit) from which extra lanes pay: about 800 BSIM4 instances. ParEval
 /// measured 3.3x on 4,000 bsim4 at 8 threads and no gain on 4,000 mos1,
 /// whose summed weight sits below this (`gpu/context.zig` cost notes).
-const borrow_min_weight: u64 = 4_000_000;
+pub const borrow_min_weight: u64 = 4_000_000;
 /// Matrix entries from which a refactor may be thick enough for the
 /// multicore LU; its own per-epoch admission (`direct.zig`) still decides.
-const borrow_min_nnz: u32 = 50_000;
+pub const borrow_min_nnz: u32 = 50_000;
+
+/// What a pooled query borrows (`lanePlan`).
+pub const LanePlan = struct {
+    /// Lanes to ask the pool for, the query's own included; 1 below both gates.
+    want: u32,
+    /// Whether the device stamp runs a ParEval on the lanes it gets.
+    eval: bool,
+};
+
+/// The lane plan of a pooled query whose circuit has device weight
+/// `weight` (`par_eval.instanceWeight` summed over its instances) and
+/// `nnz` matrix entries. Only the weight gate stamps on the borrowed
+/// lanes; past the nnz gate alone they serve the multicore LU. On
+/// stress/scaling_rc_ladder_100k (200k linear instances) a ParEval cost
+/// 22.5 G user cycles against 5.3 G without, at equal wall time, since its
+/// reduce walks every cell the serial baseline copy skips.
+pub fn lanePlan(weight: u64, nnz: u32) LanePlan {
+    const eval = weight >= borrow_min_weight;
+    const want: u32 = if (eval or nnz >= borrow_min_nnz) ThreadPool.per_query else 1;
+    return .{ .want = want, .eval = eval };
+}
 
 // ---- private ----
 
-/// Lanes for a query of `ckt`: 1 below both gates.
-fn wantLanes(ckt: *const types.Circuit) u32 {
-    return if (evalPays(ckt) or ckt.nnz >= borrow_min_nnz) ThreadPool.per_query else 1;
-}
-
-/// Whether `ckt`'s device weight reaches `borrow_min_weight`, from which a
-/// ParEval stamp pays. Below it borrowed lanes serve only the multicore LU:
-/// on stress/scaling_rc_ladder_100k (200k linear instances, past the nnz
-/// gate) a ParEval took the run from 1.69 s to 1.87 s and 1.7 to 7.3 s of
-/// CPU, since its reduce walks every cell the serial baseline copy skips.
-fn evalPays(ckt: *const types.Circuit) bool {
+/// `ckt`'s device weight: `par_eval.instanceWeight` over its instances.
+fn deviceWeight(ckt: *const types.Circuit) u64 {
     var weight: u64 = 0;
     for (ckt.batches) |b| weight += @as(u64, b.count) * par_eval.instanceWeight(b);
-    return weight >= borrow_min_weight;
+    return weight;
 }
 
 /// `--timing-in-depth`: where the query's Newton time went.
