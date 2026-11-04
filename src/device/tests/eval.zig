@@ -1689,3 +1689,64 @@ fn checkBypassReplay(tied: bool) !void {
     try std.testing.expect(largest > 1e-12);
     for (1..m) |r| try std.testing.expectApproxEqAbs(moved[r], got.rhs[r] - plain0.rhs[r], 1e-6 * largest);
 }
+
+test "a TXL step dirties only the history elements it stores" {
+    // Oracle: txl.va's accept loop. A step that commits the staged point
+    // stores one element of each history array (the new tail, and hb at
+    // nh - 2), so `stateCtl` has one element per array to copy. A cached
+    // `vera_timepoint` copied into the Instance dirties all 2048.
+    const D = @import("models").txl;
+    const n = contract.nU(D);
+    // Node 0 is ground: the instance sits on nodes 1..n, x[0] stays 0.
+    const m = n + 1;
+    const vt = deviceVtable(D, "txl_dirty_test");
+    const a = std.testing.allocator;
+    var rows: [m * m]u32 = undefined;
+    var columns: [m + 1]u32 = undefined;
+    for (&rows, 0..) |*row, i| row.* = @intCast(i % m);
+    for (&columns, 0..) |*column, i| column.* = @intCast(i * m);
+    const pattern: impl.test_access.PatternView = .{ .col_ptr = &columns, .row_idx = &rows, .n = m, .trash_slot = m * m };
+    // tran/txl_wide_batch_1000's line: Z0 = 50 ohm, Td = 1 ns.
+    var model: D.Model = .{ .r = 1e-6, .l = 250e-9, .g = 0, .c = 100e-12, .len = 0.2 };
+    D.derive(Real, &model);
+    const instance: D.Instance = .{};
+    var nodes: [n]u32 = undefined;
+    for (&nodes, 0..) |*node, u| node.* = @intCast(1 + u);
+    const proto = try vt.proto_create(a).unwrap();
+    defer proto.destroy(proto.ctx, a);
+    try vt.proto_add(proto.ctx, a, @ptrCast(&model), @ptrCast(&instance), &nodes).unwrap();
+    const b = try proto.finalize(proto.ctx, a, pattern).unwrap();
+    defer b.hooks.deinit(b.ctx, a);
+    const store: *DeviceBatch(D) = @ptrCast(@alignCast(b.ctx));
+    var g: [m * m + 1]f64 = @splat(0);
+    var c: [m * m + 1]f64 = @splat(0);
+    var rhs: [m + 1]f64 = @splat(0);
+    var q: [m + 1]f64 = @splat(0);
+    const dt = 20e-12;
+    for (0..30) |k| {
+        const t = @as(f64, @floatFromInt(k)) * dt;
+        b.hooks.set_sim_state(b.ctx, .{ .t = t, .dt = if (k == 0) 0 else dt, .kind = if (k == 0) .dc else .tran, .analog_initial = k == 0 });
+        const s = @sin(@as(f64, @floatFromInt(k)) * 0.3);
+        var x: [m]f64 = @splat(0);
+        x[1 + @intFromEnum(D.U.p1)] = 0.5 + 0.1 * s;
+        x[1 + @intFromEnum(D.U.p2)] = 0.25 * s;
+        x[1 + @intFromEnum(D.U.flowZ28p1Z2cgndZ29)] = 1e-2 * s;
+        x[1 + @intFromEnum(D.U.flowZ28p2Z2cgndZ29)] = -5e-3;
+        // The solver evaluates before it accepts: that fills the cache.
+        b.eval(b.ctx, &.{ .g_vals = &g, .c_vals = &c, .rhs = &rhs, .q_vec = &q }, 0, 1, &x, t);
+        _ = b.hooks.update_state.?(b.ctx, &x);
+        const inst = &store.instances[0];
+        // A fresh Instance starts all dirty, until the first commit.
+        if (k > 0) inline for (@typeInfo(D.Instance).@"struct".field_names) |f| if (comptime std.mem.endsWith(u8, f, "__dirty")) {
+            const d = @field(inst.*, f);
+            std.testing.expect(d[1] <= d[0]) catch |e| {
+                std.debug.print("step {d}: {s} = {any}\n", .{ k, f, d });
+                return e;
+            };
+        };
+        // From the second step on, every step commits a point.
+        if (k >= 2) try std.testing.expectEqual(inst.txl__held__ht__dirty[0], inst.txl__held__ht__dirty[1]);
+        _ = b.hooks.state_ctl.?(b.ctx, .commit);
+    }
+    try std.testing.expectEqual(@as(i64, 29), store.instances[0].txl__held__nh);
+}

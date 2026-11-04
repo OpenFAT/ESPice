@@ -104,6 +104,13 @@ pub fn DeviceBatch(comptime D: type) type {
         /// `held_initial` at the last `stateCtl(.commit)`, which a
         /// `.revert` restores along with the held values it rolls back.
         committed_initial: bool = false,
+        /// `updateRange` drops D's array-holding `vera_timepoint` caches
+        /// before `updateState` (`State.tp_keys`) while the reruns stay
+        /// narrow; `updateDone` decides. Both ways give the same values.
+        tp_rerun: bool = true,
+        /// `updateDone` calls since `tp_rerun` went false; at 64 it reruns
+        /// once more to look again.
+        tp_idle: u8 = 0,
         instances: []D.Instance,
         states: if (has_state) []D.State else void,
         gath: []u32,
