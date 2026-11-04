@@ -1,0 +1,339 @@
+# gpu: NVIDIA GeForce RTX 4060 Laptop GPU
+# driver: 595.71.05
+# commit: 681b3ccda3edd592ae56da3fc46dd8682e6730b9
+# date: 2026-11-04
+# ref: rtx4060_laptop
+# host: 32 x Intel(R) Core(TM) i9-14900HX (pinned to P-cores 0-15)
+# built by the A100 model study (CUPTI activity trace + SASS counts, cuda walls median of 3); decks: corpus stress/, postlayout/gen.py output, lane decks; deck = study id
+deck	path	kernel	class	launches	threads	block	regs	warp_inst	fp64_warp_inst	gsect	lsect	t_ref_us	host_s	bus_bytes	copy_s	cpu_wall	cuda_wall	source	devices	analysis	phases
+ac_8192	AC frequency lanes	_deck											4.1117	89129410	0.0166	1.248	4.144	measured	26	ac	
+ac_8192	AC frequency lanes	arp_leval_bsim4va	lanes	2								7115.500						time-only			
+ac_8192	AC frequency lanes	arp_llim_bsim4va	lanes	4								387.000						time-only			
+ac_8192	AC frequency lanes	arp_lane_refactor	lanes	2								48.500						time-only			
+ac_8192	AC frequency lanes	arp_lane_solve	lanes	2								25.000						time-only			
+ac_8192	AC frequency lanes	arp_lane_update	lanes	2								17.500						time-only			
+ac_8192	AC frequency lanes	arp_leval_capacitor	lanes	2								11.500						time-only			
+ac_8192	AC frequency lanes	arp_lane_assemble	lanes	2								9.500						time-only			
+ac_8192	AC frequency lanes	arp_leval_vsource	lanes	2								9.000						time-only			
+ac_8192	AC frequency lanes	arp_lane_gates	lanes	2								6.000						time-only			
+ac_8192	AC frequency lanes	arp_lane_finalize	lanes	2								3.500						time-only			
+ac_8192	AC frequency lanes	arp_lane_clear_q	lanes	2								2.500						time-only			
+ac_8192	AC frequency lanes	arp_lane_peel_dense	lanes	2								2.000						time-only			
+ac_8192	AC frequency lanes	arp_lctl_bsim4va	lanes	1								3.000						time-only			
+ac_8192	AC frequency lanes	arp_lane_set_limw	lanes	2								1.000						time-only			
+chain4k	device eval	_deck											1.8001	2464033096	0.2353	3.450	2.810	measured	12002	tran	
+chain4k	device eval	arp_eval_mos1	device eval	4722	8000	64	164	430757	159002	755814	0	55.587						measured			
+chain4k	device eval	arp_reduce_vsource	device eval	13910	37421	256	36	107227	12904	198385	0	17.646						measured			
+chain4k	device eval	arp_lim_mos1	device eval	7093	8000	64	78	209187	52412	171177	68289	22.395						measured			
+chain4k	device eval	arp_qonly_mos1	device eval	2233	8000	64	72	192750	54250	308751	66000	20.230						measured			
+chain4k	device eval	arp_ctl_mos1	device eval	2373	8000	64	22	11713	662	217608	0	9.630						measured			
+chain4k	device eval	arp_eval_vsource	device eval	4722	64	64	106	260	46	37	22	3.468						measured			
+chain4k	device eval	arp_gc_combine	device eval	5884	20224	256	16	14446	1252	15635	0	1.389						measured			
+chain4k	device eval	arp_evalc_capacitor	device eval	4722	4032	64	20	5758	750	13875	0	1.388						measured			
+chain4k	device eval	arp_gc_gather	device eval	4720	256	256	16	82	0	5	0	1.071						measured			
+chain4k	device eval	arp_qonly_capacitor	device eval	2233	4032	64	20	6633	875	14875	0	1.419						measured			
+chain4k	device eval	arp_qtp_mos1	device eval	1	8000	64	76	183000	49250	248751	56000	19.000						measured			
+chain4k	device eval	arp_qtp_capacitor	device eval	1	4032	64	20	4758	375	7875	0	1.000						measured			
+chain_p103_1k	device eval	_deck											0.8184	681095660	0.0593	1.000	1.317	measured	11508	tran	
+chain_p103_1k	device eval	arp_eval_psp103	device eval	1541	1024	64	255	792639	419772	318931	626548	223.189						measured			
+chain_p103_1k	device eval	arp_reduce_vsource	device eval	4144	53706	256	36	163358	23508	144976	0	10.308						measured			
+chain_p103_1k	device eval	arp_qonly_psp103	device eval	531	1024	64	194	228759	112313	89836	12500	67.742						measured			
+chain_p103_1k	device eval	arp_eval_vsource	device eval	1541	64	64	106	260	46	35	22	3.578						measured			
+chain_p103_1k	device eval	arp_evalc_resistor	device eval	1541	4096	64	29	8974	1690	22604	0	1.914						measured			
+chain_p103_1k	device eval	arp_evalc_capacitor	device eval	1541	6464	64	20	9254	1206	27927	0	1.787						measured			
+chain_p103_1k	device eval	arp_gc_combine	device eval	1540	28672	256	16	20563	1786	22316	0	1.540						measured			
+chain_p103_1k	device eval	arp_gc_gather	device eval	1540	256	256	16	82	0	5	0	1.084						measured			
+chain_p103_1k	device eval	arp_qonly_capacitor	device eval	531	6464	64	20	10661	1407	29534	0	1.844						measured			
+chain_p103_1k	device eval	arp_qtp_psp103	device eval	1	1024	64	194	224800	109728	56113	12500	73.000						measured			
+chain_p103_1k	device eval	arp_qtp_capacitor	device eval	1	6464	64	20	7646	603	18060	0	1.000						measured			
+chainb4_2000	device eval	_deck											1.2474	184554400	0.0191	1.456	1.529	measured	6002	tran	
+chainb4_2000	device eval	arp_eval_bsim4va	device eval	467	4032	64	255	2228922	976259	903395	1512524	337.069						measured			
+chainb4_2000	device eval	arp_reduce_vsource	device eval	1810	15448	256	36	67726	13166	195224	0	21.466						measured			
+chainb4_2000	device eval	arp_qonly_bsim4va	device eval	438	4032	64	164	550399	221752	230851	35000	77.571						measured			
+chainb4_2000	device eval	arp_lim_bsim4va	device eval	904	4032	64	126	229572	69148	131184	113681	29.660						measured			
+chainb4_2000	device eval	arp_eval_vsource	device eval	467	64	64	106	261	46	37	22	3.591						measured			
+chainb4_2000	device eval	arp_ctl_bsim4va	device eval	439	4032	64	22	4452	313	64146	0	3.210						measured			
+chainb4_2000	device eval	arp_evalc_capacitor	device eval	467	2048	64	20	2906	378	6939	0	1.261						measured			
+chainb4_2000	device eval	arp_gc_combine	device eval	492	10240	256	16	7255	626	7822	0	1.146						measured			
+chainb4_2000	device eval	arp_qonly_capacitor	device eval	438	2048	64	20	3347	441	7439	0	1.285						measured			
+chainb4_2000	device eval	arp_gc_gather	device eval	465	256	256	16	82	0	5	0	1.077						measured			
+chainb4_2000	device eval	arp_qtp_bsim4va	device eval	1	4032	64	164	545135	219750	183130	35000	76.000						measured			
+chainb4_2000	device eval	arp_qtp_capacitor	device eval	1	2048	64	20	2402	189	3939	0	1.000						measured			
+hb_2048	HB/periodic	_deck											23.3318	7849515	0.0007	6.257	23.333	measured	5	hb	
+hb_2048	HB/periodic	arp_leval_diode	lanes	2								12.500						time-only			
+hb_2048	HB/periodic	arp_lane_refactor	lanes	2								8.000						time-only			
+hb_2048	HB/periodic	arp_lane_solve	lanes	2								7.000						time-only			
+hb_2048	HB/periodic	arp_lane_update	lanes	2								5.000						time-only			
+hb_2048	HB/periodic	arp_llim_diode	lanes	4								2.000						time-only			
+hb_2048	HB/periodic	arp_leval_resistor	lanes	2								3.000						time-only			
+hb_2048	HB/periodic	arp_leval_vsource	lanes	2								2.500						time-only			
+hb_2048	HB/periodic	arp_lane_gates	lanes	2								2.500						time-only			
+hb_2048	HB/periodic	arp_leval_capacitor	lanes	2								2.000						time-only			
+hb_2048	HB/periodic	arp_lane_finalize	lanes	2								2.000						time-only			
+hb_2048	HB/periodic	arp_lane_assemble	lanes	2								1.500						time-only			
+hb_2048	HB/periodic	arp_lane_peel_dense	lanes	2								1.500						time-only			
+hb_2048	HB/periodic	arp_lane_clear_q	lanes	2								1.000						time-only			
+hb_2048	HB/periodic	arp_lane_set_limw	lanes	2								1.000						time-only			
+logic_b4_10k	device eval + device LU	_deck											24.2127	38662585784	3.2213	57.884	47.148	measured	90549	tran	
+logic_b4_10k	device eval + device LU	arp_lu_refactor16	device LU	1188	2471616	64	48	599065203	19022787	409725330	0	10289.808						measured-short			
+logic_b4_10k	device eval + device LU	arp_lu_upanel	device LU	1189	3072	64	40	5341175	120885	2431242	0	2111.613						measured-short			
+logic_b4_10k	device eval + device LU	arp_lu_lpanel	device LU	1189	3072	64	40	1921312	107522	1929162	0	1109.993						measured-short			
+logic_b4_10k	device eval + device LU	arp_lu_uhead	device LU	1189	42882	256	48	20755253	615074	40949680	0	940.842						measured-short			
+logic_b4_10k	device eval + device LU	arp_eval_bsim4va	device eval	1113	10688	64	255	6176906	2730548	3603141	4061312	978.426						measured-short			
+logic_b4_10k	device eval + device LU	arp_lu_lhead	device LU	1189	45842	256	48	4921625	261603	3222173	0	668.088						measured-short			
+logic_b4_10k	device eval + device LU	arp_reduce_vsource	device eval	3782	274635	256	36	1025224	158844	1084977	0	65.955						measured-short			
+logic_b4_10k	device eval + device LU	arp_qonly_bsim4va	device eval	778	10688	64	164	1530316	636497	799246	93100	258.316						measured-short			
+logic_b4_10k	device eval + device LU	arp_lim_bsim4va	device eval	1889	10688	64	126	669448	211779	473203	305573	76.912						measured-short			
+logic_b4_10k	device eval + device LU	arp_evalc_resistor	device eval	1113	33216	64	29	87647	16453	184600	0	12.437						measured-short			
+logic_b4_10k	device eval + device LU	arp_evalc_capacitor	device eval	1113	46528	64	20	66846	8718	213216	0	11.443						measured-short			
+logic_b4_10k	device eval + device LU	arp_qonly_capacitor	device eval	778	46528	64	20	77017	10171	224840	0	11.066						measured-short			
+logic_b4_10k	device eval + device LU	arp_eval_vsource	device eval	1113	256	64	106	1865	375	5097	704	6.374						measured-short			
+logic_b4_10k	device eval + device LU	arp_gc_combine	device eval	1111	187648	256	16	134812	11720	140634	0	5.145						measured-short			
+logic_b4_10k	device eval + device LU	arp_ctl_bsim4va	device eval	779	10688	64	22	11890	839	171404	0	7.119						measured-short			
+logic_b4_10k	device eval + device LU	arp_gc_scatter	device eval	1109	38656	256	16	22941	0	47910	0	3.454						measured-short			
+logic_b4_10k	device eval + device LU	arp_gc_gather	device eval	1111	38173	256	16	30996	0	91039	0	3.377						measured-short			
+logic_b4_10k	device eval + device LU	arp_qtp_bsim4va	device eval	1	10688	64	164	1513317	630926	651367	93100	245.000						measured-short			
+logic_b4_10k	device eval + device LU	arp_qtp_capacitor	device eval	1	46528	64	20	55222	4359	143436	0	12.000						measured-short			
+logic_b4_10k_nolu	device eval	_deck											46.2554	5221768560	0.4205	57.884	48.982	measured	90549	tran	
+logic_b4_10k_nolu	device eval	arp_eval_bsim4va	device eval	1112	10688	64	255	6176936	2730552	3603494	4061322	1308.362						measured-short			
+logic_b4_10k_nolu	device eval	arp_reduce_vsource	device eval	3780	273967	256	36	1022623	158419	1082435	0	83.685						measured-short			
+logic_b4_10k_nolu	device eval	arp_qonly_bsim4va	device eval	778	10688	64	164	1530316	636497	799246	93100	345.243						measured-short			
+logic_b4_10k_nolu	device eval	arp_lim_bsim4va	device eval	1889	10688	64	126	669448	211779	473203	305573	103.293						measured-short			
+logic_b4_10k_nolu	device eval	arp_evalc_resistor	device eval	1112	33216	64	29	87472	16421	184600	0	15.075						measured-short			
+logic_b4_10k_nolu	device eval	arp_evalc_capacitor	device eval	1112	46528	64	20	66846	8718	213216	0	14.730						measured-short			
+logic_b4_10k_nolu	device eval	arp_qonly_capacitor	device eval	778	46528	64	20	77017	10171	224840	0	13.803						measured-short			
+logic_b4_10k_nolu	device eval	arp_eval_vsource	device eval	1112	256	64	106	1865	375	5097	704	7.878						measured-short			
+logic_b4_10k_nolu	device eval	arp_gc_combine	device eval	1337	187648	256	16	134812	11720	140634	0	6.404						measured-short			
+logic_b4_10k_nolu	device eval	arp_ctl_bsim4va	device eval	779	10688	64	22	11890	839	171404	0	9.483						measured-short			
+logic_b4_10k_nolu	device eval	arp_gc_gather	device eval	1110	256	256	16	82	0	5	0	1.803						measured-short			
+logic_b4_10k_nolu	device eval	arp_qtp_bsim4va	device eval	1	10688	64	164	1513317	630926	651367	93100	378.000						measured-short			
+logic_b4_10k_nolu	device eval	arp_qtp_capacitor	device eval	1	46528	64	20	55222	4359	143436	0	14.000						measured-short			
+logic_b4_1k	device eval	_deck											2.3799	983548500	0.1012	3.102	3.191	measured	9301	tran	
+logic_b4_1k	device eval	arp_eval_bsim4va	device eval	1959	1088	64	255	631304	278863	371815	416612	216.073						measured			
+logic_b4_1k	device eval	arp_qonly_bsim4va	device eval	1548	1088	64	164	156294	64825	83311	9520	57.357						measured			
+logic_b4_1k	device eval	arp_lim_bsim4va	device eval	3506	1088	64	126	70358	22381	48732	31436	23.820						measured			
+logic_b4_1k	device eval	arp_reduce_vsource	device eval	7014	28907	256	36	106978	16520	112958	0	11.518						measured			
+logic_b4_1k	device eval	arp_eval_vsource	device eval	1959	64	64	106	264	47	537	88	5.253						measured			
+logic_b4_1k	device eval	arp_evalc_resistor	device eval	1959	3456	64	29	7474	1406	18903	0	2.469						measured			
+logic_b4_1k	device eval	arp_gc_combine	device eval	2409	19456	256	16	13879	1202	15015	0	1.867						measured			
+logic_b4_1k	device eval	arp_evalc_capacitor	device eval	1959	4800	64	20	6900	900	20958	0	2.100						measured			
+logic_b4_1k	device eval	arp_ctl_bsim4va	device eval	1549	1088	64	22	1208	85	17355	0	2.470						measured			
+logic_b4_1k	device eval	arp_qonly_capacitor	device eval	1548	4800	64	20	7950	1050	22154	0	2.147						measured			
+logic_b4_1k	device eval	arp_gc_gather	device eval	1957	256	256	16	82	0	5	0	1.474						measured			
+logic_b4_1k	device eval	arp_qtp_bsim4va	device eval	1	1088	64	164	154558	64436	66212	9520	57.000						measured			
+logic_b4_1k	device eval	arp_qtp_capacitor	device eval	1	4800	64	20	5700	450	13774	0	2.000						measured			
+logic_p103_10k	device eval + device LU	_deck											4.7087	7315248028	0.5888	61.480	32.483	measured	90549	tran	
+logic_p103_10k	device eval + device LU	arp_lu_refactor16	device LU	1763	3152192	64	48	424935915	13946413	245434782	0	8899.995						measured-short			
+logic_p103_10k	device eval + device LU	arp_lu_uhead	device LU	1764	59392	256	48	56208387	1145849	118321013	0	1660.525						measured-short			
+logic_p103_10k	device eval + device LU	arp_lu_upanel	device LU	1764	2048	64	40	2768010	86973	1672328	0	1416.296						measured-short			
+logic_p103_10k	device eval + device LU	arp_eval_psp103	device eval	1336	10688	64	255	8247524	4368468	3408045	6665404	1553.673						measured-short			
+logic_p103_10k	device eval + device LU	arp_lu_lhead	device LU	1764	64512	256	48	9124196	406993	5714500	0	1118.852						measured-short			
+logic_p103_10k	device eval + device LU	arp_lu_lpanel	device LU	1764	2048	64	40	1104937	79577	1480011	0	813.494						measured-short			
+logic_p103_10k	device eval + device LU	arp_reduce_vsource	device eval	3450	475010	256	36	1617049	238656	1367237	0	101.920						measured-short			
+logic_p103_10k	device eval + device LU	arp_qonly_psp103	device eval	389	10688	64	194	2382037	1170163	943548	133000	429.401						measured-short			
+logic_p103_10k	device eval + device LU	arp_evalc_resistor	device eval	1336	33216	64	29	86750	16287	184601	0	12.279						measured-short			
+logic_p103_10k	device eval + device LU	arp_evalc_capacitor	device eval	1336	46528	64	20	66846	8718	213173	0	10.784						measured-short			
+logic_p103_10k	device eval + device LU	arp_gc_combine	device eval	1335	264448	256	16	189982	16516	206431	0	6.705						measured-short			
+logic_p103_10k	device eval + device LU	arp_eval_vsource	device eval	1336	256	64	106	1876	377	5097	704	6.266						measured-short			
+logic_p103_10k	device eval + device LU	arp_gc_gather	device eval	1335	48816	256	16	39590	0	121282	0	4.207						measured-short			
+logic_p103_10k	device eval + device LU	arp_qonly_capacitor	device eval	389	46528	64	20	77017	10171	224797	0	13.224						measured-short			
+logic_p103_10k	device eval + device LU	arp_gc_scatter	device eval	1333	49408	256	16	29292	0	63715	0	3.648						measured-short			
+logic_p103_10k	device eval + device LU	arp_qtp_psp103	device eval	1	10688	64	194	2361293	1159641	727287	133000	405.000						measured-short			
+logic_p103_10k	device eval + device LU	arp_qtp_capacitor	device eval	1	46528	64	20	55222	4359	143436	0	12.000						measured-short			
+logic_p103_10k_nolu	device eval	_deck											57.4154	5253047824	0.4122	61.480	61.379	measured	90549	tran	
+logic_p103_10k_nolu	device eval	arp_eval_psp103	device eval	1336	10688	64	255	8247524	4368468	3408045	6665404	2096.724						measured-short			
+logic_p103_10k_nolu	device eval	arp_reduce_vsource	device eval	3450	475010	256	36	1617049	238656	1367237	0	129.941						measured-short			
+logic_p103_10k_nolu	device eval	arp_qonly_psp103	device eval	389	10688	64	194	2382037	1170163	943548	133000	573.728						measured-short			
+logic_p103_10k_nolu	device eval	arp_evalc_resistor	device eval	1336	33216	64	29	86750	16287	184601	0	21.086						measured-short			
+logic_p103_10k_nolu	device eval	arp_evalc_capacitor	device eval	1336	46528	64	20	66846	8718	213173	0	14.460						measured-short			
+logic_p103_10k_nolu	device eval	arp_gc_combine	device eval	1335	264448	256	16	189982	16516	206431	0	8.565						measured-short			
+logic_p103_10k_nolu	device eval	arp_eval_vsource	device eval	1336	256	64	106	1876	377	5097	704	7.737						measured-short			
+logic_p103_10k_nolu	device eval	arp_qonly_capacitor	device eval	389	46528	64	20	77017	10171	224797	0	17.769						measured-short			
+logic_p103_10k_nolu	device eval	arp_gc_gather	device eval	1335	256	256	16	82	0	5	0	1.666						measured-short			
+logic_p103_10k_nolu	device eval	arp_qtp_psp103	device eval	1	10688	64	194	2361293	1159641	727287	133000	563.000						measured-short			
+logic_p103_10k_nolu	device eval	arp_qtp_capacitor	device eval	1	46528	64	20	55222	4359	143436	0	14.000						measured-short			
+logic_p103_1k	device eval	_deck											3.3130	959227468	0.0854	5.698	4.319	measured	9301	tran	
+logic_p103_1k	device eval	arp_eval_psp103	device eval	2339	1088	64	255	842893	446517	365501	681861	307.589						measured			
+logic_p103_1k	device eval	arp_reduce_vsource	device eval	6226	50995	256	36	173631	25695	145606	0	15.504						measured			
+logic_p103_1k	device eval	arp_qonly_psp103	device eval	774	1088	64	194	243691	119824	112413	13600	93.545						measured			
+logic_p103_1k	device eval	arp_eval_vsource	device eval	2339	64	64	106	264	47	537	88	5.195						measured			
+logic_p103_1k	device eval	arp_evalc_resistor	device eval	2339	3456	64	29	7461	1404	18902	0	2.422						measured			
+logic_p103_1k	device eval	arp_evalc_capacitor	device eval	2339	4800	64	20	6900	900	20958	0	2.059						measured			
+logic_p103_1k	device eval	arp_gc_combine	device eval	2338	27136	256	16	19459	1690	20277	0	2.056						measured			
+logic_p103_1k	device eval	arp_gc_gather	device eval	2338	256	256	16	82	0	5	0	1.451						measured			
+logic_p103_1k	device eval	arp_qonly_capacitor	device eval	774	4800	64	20	7950	1050	22154	0	2.092						measured			
+logic_p103_1k	device eval	arp_qtp_psp103	device eval	1	1088	64	194	241011	118350	74409	13600	73.000						measured			
+logic_p103_1k	device eval	arp_qtp_capacitor	device eval	1	4800	64	20	5700	450	13774	0	1.000						measured			
+op_8192	op lanes	_deck											0.5552	89129410	0.0165	0.166	0.588	measured	26	op	
+op_8192	op lanes	arp_leval_bsim4va	lanes	2	3712	64	255	31956100	13817940	4485803	21636100	7114.000						measured			
+op_8192	op lanes	arp_llim_bsim4va	lanes	4	58816	64	128	3067442	888484	793159	1164341	386.500						measured			
+op_8192	op lanes	arp_lane_refactor	lanes	2	3712	64	96	810528	50025	489803	0	47.500						measured			
+op_8192	op lanes	arp_lane_solve	lanes	2	3712	64	40	327643	29555	215268	0	25.500						measured			
+op_8192	op lanes	arp_lane_update	lanes	2	3712	64	40	184412	27485	83522	0	17.500						measured			
+op_8192	op lanes	arp_leval_capacitor	lanes	2	3712	64	42	86147	11040	110673	0	11.500						measured			
+op_8192	op lanes	arp_lane_assemble	lanes	2	235072	64	30	596541	1608	502986	0	9.500						measured			
+op_8192	op lanes	arp_leval_vsource	lanes	2	3712	64	108	39346	2760	37775	20240	9.000						measured			
+op_8192	op lanes	arp_lane_gates	lanes	2	3712	64	32	44513	6842	44428	0	6.000						measured			
+op_8192	op lanes	arp_lane_finalize	lanes	2	3712	64	34	21226	0	45802	0	3.500						measured			
+op_8192	op lanes	arp_lane_clear_q	lanes	2	51456	64	16	77150	0	15958	0	2.500						measured			
+op_8192	op lanes	arp_lane_peel_dense	lanes	2	3712	64	94	2193	0	230	0	2.000						measured			
+op_8192	op lanes	arp_lctl_bsim4va	lanes	1	58816	64	22	84516	0	3562	0	3.000						measured			
+op_8192	op lanes	arp_lane_set_limw	lanes	2	3712	64	16	2193	0	575	0	1.000						measured			
+pinv2000	device eval	_deck											0.5223	421349404	0.0457	0.589	0.712	measured	6002	tran	
+pinv2000	device eval	arp_reduce_vsource	device eval	4970	15269	256	36	39937	4472	77808	0	9.046						measured			
+pinv2000	device eval	arp_eval_mos1	device eval	1317	4032	64	164	215454	79537	365864	0	28.961						measured			
+pinv2000	device eval	arp_lim_mos1	device eval	2492	4032	64	78	106838	27461	91243	31326	12.509						measured			
+pinv2000	device eval	arp_qonly_mos1	device eval	1168	4032	64	72	96404	27125	152625	33024	10.766						measured			
+pinv2000	device eval	arp_ctl_mos1	device eval	1177	4032	64	22	6216	370	118797	0	5.612						measured			
+pinv2000	device eval	arp_eval_vsource	device eval	1317	64	64	106	261	46	37	22	3.462						measured			
+pinv2000	device eval	arp_gc_combine	device eval	1436	10240	256	16	7255	626	7822	0	1.143						measured			
+pinv2000	device eval	arp_evalc_capacitor	device eval	1317	2048	64	20	2906	378	6939	0	1.207						measured			
+pinv2000	device eval	arp_qonly_capacitor	device eval	1168	2048	64	20	3347	441	7439	0	1.260						measured			
+pinv2000	device eval	arp_gc_gather	device eval	1315	256	256	16	82	0	5	0	1.084						measured			
+pinv2000	device eval	arp_qtp_mos1	device eval	1	4032	64	76	91519	24625	124000	28024	10.000						measured			
+pinv2000	device eval	arp_qtp_capacitor	device eval	1	2048	64	20	2402	189	3939	0	1.000						measured			
+pss_2048	PSS lanes	_deck											1.1357	483128378	0.0723	0.551	1.426	measured	4	pss	
+pss_2048	PSS lanes	arp_leval_diode	lanes	4483	790	64	134	35124	12846	11112	0	13.174						measured			
+pss_2048	PSS lanes	arp_lane_refactor	lanes	4483	790	64	96	24639	975	12266	0	5.217						measured			
+pss_2048	PSS lanes	arp_lane_solve	lanes	4483	790	64	40	17908	1532	9841	0	5.059						measured			
+pss_2048	PSS lanes	arp_llim_diode	lanes	8966	790	64	46	4767	979	731	0	1.932						measured			
+pss_2048	PSS lanes	arp_leval_vsource	lanes	4483	790	64	108	8350	1433	4416	2978	3.760						measured			
+pss_2048	PSS lanes	arp_lane_update	lanes	4483	790	64	40	13028	1676	6273	0	3.505						measured			
+pss_2048	PSS lanes	arp_leval_resistor	lanes	4483	790	64	46	3342	487	2660	0	1.924						measured			
+pss_2048	PSS lanes	arp_lane_gates	lanes	4483	790	64	32	3523	418	4963	0	1.842						measured			
+pss_2048	PSS lanes	arp_lane_assemble	lanes	4483	9062	64	30	27613	935	27136	0	1.838						measured			
+pss_2048	PSS lanes	arp_leval_capacitor	lanes	4483	790	64	42	3110	278	2345	0	1.650						measured			
+pss_2048	PSS lanes	arp_lane_finalize	lanes	4483	790	64	34	2963	0	7247	0	1.644						measured			
+pss_2048	PSS lanes	arp_lane_gmin	lanes	4481	3039	64	20	7373	273	3923	0	1.324						measured			
+pss_2048	PSS lanes	arp_lane_peel_dense	lanes	4483	790	64	94	458	0	47	0	1.280						measured			
+pss_2048	PSS lanes	arp_lane_clear_q	lanes	4483	3789	64	16	5654	0	1120	0	0.910						measured			
+pss_2048	PSS lanes	arp_lane_accept	lanes	2048	3016	64	30	11915	375	21797	0	1.859						measured			
+pss_2048	PSS lanes	arp_lane_set_limw	lanes	4483	790	64	16	458	0	115	0	0.817						measured			
+ring_b4_1k	device eval	_deck											1.0896	1112070192	0.1099	1.541	1.724	measured	10936	tran	
+ring_b4_1k	device eval	arp_eval_bsim4va	device eval	2035	960	64	255	545983	240624	313782	364755	148.032						measured			
+ring_b4_1k	device eval	arp_qonly_bsim4va	device eval	2026	960	64	164	132366	54141	67958	8400	38.814						measured			
+ring_b4_1k	device eval	arp_lim_bsim4va	device eval	4060	960	64	126	61985	19645	45538	27130	16.844						measured			
+ring_b4_1k	device eval	arp_reduce_vsource	device eval	8122	28149	256	36	89189	11684	100165	0	6.152						measured			
+ring_b4_1k	device eval	arp_eval_vsource	device eval	2035	64	64	106	260	46	35	22	3.577						measured			
+ring_b4_1k	device eval	arp_evalc_resistor	device eval	2035	3904	64	29	8543	1607	21507	0	1.845						measured			
+ring_b4_1k	device eval	arp_ctl_bsim4va	device eval	2027	960	64	22	1065	75	15368	0	1.807						measured			
+ring_b4_1k	device eval	arp_qonly_capacitor	device eval	2026	6144	64	20	10131	1337	27915	0	1.707						measured			
+ring_b4_1k	device eval	arp_evalc_capacitor	device eval	2035	6144	64	20	8794	1146	26388	0	1.657						measured			
+ring_b4_1k	device eval	arp_gc_combine	device eval	2050	20736	256	16	14859	1290	15459	0	1.406						measured			
+ring_b4_1k	device eval	arp_gc_gather	device eval	2033	256	256	16	82	0	5	0	1.089						measured			
+ring_b4_1k	device eval	arp_qtp_bsim4va	device eval	1	960	64	164	131250	54090	53661	8400	40.000						measured			
+ring_b4_1k	device eval	arp_qtp_capacitor	device eval	1	6144	64	20	7266	573	17251	0	1.000						measured			
+sram_b4_10k	device eval + device LU	_deck											1.4217	2844496060	0.2431	18.038	13.260	measured	42627	tran	
+sram_b4_10k	device eval + device LU	arp_lu_refactor16	device LU	1125	1091392	64	48	242113946	4068810	78346135	0	5065.868						measured-short			
+sram_b4_10k	device eval + device LU	arp_lu_upanel	device LU	1125	3072	64	40	5901721	97300	1992362	0	2175.980						measured-short			
+sram_b4_10k	device eval + device LU	arp_lu_lpanel	device LU	1125	3072	64	40	2130575	80944	1315182	0	1129.201						measured-short			
+sram_b4_10k	device eval + device LU	arp_eval_bsim4va	device eval	1103	10240	64	255	5949443	2627332	3324024	3923228	937.972						measured-short			
+sram_b4_10k	device eval + device LU	arp_lu_uhead	device LU	1125	19456	256	48	1745670	76134	2055528	0	269.698						measured-short			
+sram_b4_10k	device eval + device LU	arp_qonly_bsim4va	device eval	1056	10240	64	164	1478042	614680	697584	89390	237.284						measured-short			
+sram_b4_10k	device eval + device LU	arp_lu_lhead	device LU	1125	22528	256	48	746849	49292	628645	0	179.028						measured-short			
+sram_b4_10k	device eval + device LU	arp_reduce_vsource	device eval	4318	135460	256	36	641457	117160	816819	0	41.607						measured-short			
+sram_b4_10k	device eval + device LU	arp_lim_bsim4va	device eval	2157	10240	64	126	701017	223997	425491	288602	77.767						measured-short			
+sram_b4_10k	device eval + device LU	arp_evalc_resistor	device eval	1103	13760	64	29	45307	8475	80887	0	7.185						measured-short			
+sram_b4_10k	device eval + device LU	arp_ctl_bsim4va	device eval	1057	10240	64	22	11396	804	164216	0	6.714						measured-short			
+sram_b4_10k	device eval + device LU	arp_eval_vsource	device eval	1103	64	64	106	260	46	98	22	5.984						measured-short			
+sram_b4_10k	device eval + device LU	arp_evalc_capacitor	device eval	1103	18688	64	20	26864	3504	94473	0	5.055						measured-short			
+sram_b4_10k	device eval + device LU	arp_qonly_capacitor	device eval	1056	18688	64	20	30952	4088	99143	0	5.238						measured-short			
+sram_b4_10k	device eval + device LU	arp_gc_combine	device eval	1101	102400	256	16	73585	6398	79963	0	3.344						measured-short			
+sram_b4_10k	device eval + device LU	arp_gc_scatter	device eval	1099	17152	256	16	10151	0	21386	0	1.898						measured-short			
+sram_b4_10k	device eval + device LU	arp_gc_gather	device eval	1101	16994	256	16	13753	0	40840	0	1.892						measured-short			
+sram_b4_10k	device eval + device LU	arp_qtp_bsim4va	device eval	1	10240	64	164	1464602	609560	575853	89390	269.000						measured-short			
+sram_b4_10k	device eval + device LU	arp_qtp_capacitor	device eval	1	18688	64	20	22192	1752	63526	0	5.000						measured-short			
+sram_b4_10k_nolu	device eval	_deck											12.1554	2804945976	0.2356	18.038	14.689	measured	42627	tran	
+sram_b4_10k_nolu	device eval	arp_eval_bsim4va	device eval	1102	10240	64	255	5949443	2627332	3324023	3923227	1302.522						measured-short			
+sram_b4_10k_nolu	device eval	arp_qonly_bsim4va	device eval	1056	10240	64	164	1478042	614680	697584	89390	326.321						measured-short			
+sram_b4_10k_nolu	device eval	arp_reduce_vsource	device eval	4316	135186	256	36	640108	116907	815239	0	54.824						measured-short			
+sram_b4_10k_nolu	device eval	arp_lim_bsim4va	device eval	2157	10240	64	126	701017	223997	425491	288602	107.967						measured-short			
+sram_b4_10k_nolu	device eval	arp_ctl_bsim4va	device eval	1057	10240	64	22	11396	804	164216	0	9.117						measured-short			
+sram_b4_10k_nolu	device eval	arp_evalc_resistor	device eval	1102	13760	64	29	45308	8476	80887	0	8.472						measured-short			
+sram_b4_10k_nolu	device eval	arp_eval_vsource	device eval	1102	64	64	106	260	46	98	22	7.483						measured-short			
+sram_b4_10k_nolu	device eval	arp_evalc_capacitor	device eval	1102	18688	64	20	26864	3504	94473	0	6.423						measured-short			
+sram_b4_10k_nolu	device eval	arp_qonly_capacitor	device eval	1056	18688	64	20	30952	4088	99143	0	6.536						measured-short			
+sram_b4_10k_nolu	device eval	arp_gc_combine	device eval	1143	102400	256	16	73585	6398	79963	0	4.098						measured-short			
+sram_b4_10k_nolu	device eval	arp_gc_gather	device eval	1100	256	256	16	82	0	5	0	1.650						measured-short			
+sram_b4_10k_nolu	device eval	arp_qtp_bsim4va	device eval	1	10240	64	164	1464602	609560	575853	89390	375.000						measured-short			
+sram_b4_10k_nolu	device eval	arp_qtp_capacitor	device eval	1	18688	64	20	22192	1752	63526	0	5.000						measured-short			
+sram_b4_1k	device eval	_deck											0.8492	282952724	0.0336	1.118	1.172	measured	4307	tran	
+sram_b4_1k	device eval	arp_eval_bsim4va	device eval	1089	1088	64	255	612685	270127	350089	396880	154.274						measured			
+sram_b4_1k	device eval	arp_qonly_bsim4va	device eval	1056	1088	64	164	151570	62603	76629	9030	40.813						measured			
+sram_b4_1k	device eval	arp_lim_bsim4va	device eval	2144	1088	64	126	69612	22198	44468	29239	17.395						measured			
+sram_b4_1k	device eval	arp_reduce_vsource	device eval	4290	13944	256	36	65398	11924	83315	0	6.406						measured			
+sram_b4_1k	device eval	arp_eval_vsource	device eval	1089	64	64	106	261	46	98	22	3.624						measured			
+sram_b4_1k	device eval	arp_ctl_bsim4va	device eval	1057	1088	64	22	1180	83	16528	0	1.804						measured			
+sram_b4_1k	device eval	arp_evalc_resistor	device eval	1089	1408	64	29	4109	768	8024	0	1.699						measured			
+sram_b4_1k	device eval	arp_evalc_capacitor	device eval	1089	1920	64	20	2760	360	8937	0	1.242						measured			
+sram_b4_1k	device eval	arp_qonly_capacitor	device eval	1056	1920	64	20	3180	420	9411	0	1.270						measured			
+sram_b4_1k	device eval	arp_gc_combine	device eval	1130	10496	256	16	7469	646	8075	0	1.150						measured			
+sram_b4_1k	device eval	arp_gc_gather	device eval	1087	256	256	16	82	0	5	0	1.074						measured			
+sram_b4_1k	device eval	arp_qtp_bsim4va	device eval	1	1088	64	164	150719	62738	61358	9030	40.000						measured			
+sram_b4_1k	device eval	arp_qtp_capacitor	device eval	1	1920	64	20	2280	180	5887	0	1.000						measured			
+tran_1024	transient lanes	_deck											0.4503	55897062	0.0045	1.731	3.401	measured	26	tran	
+tran_1024	transient lanes	arp_leval_bsim4va	lanes	1342	512	64	255	3547890	1533128	474609	2303046	1647.283						measured			
+tran_1024	transient lanes	arp_lchg_bsim4va	lanes	894	512	64	180	1039034	388781	202994	64810	508.631						measured			
+tran_1024	transient lanes	arp_lane_lte	lanes	447	512	64	86	480337	158223	57619	0	225.246						measured			
+tran_1024	transient lanes	arp_llim_bsim4va	lanes	3131	7360	64	128	321917	86787	83647	144316	27.897						measured			
+tran_1024	transient lanes	arp_lane_refactor	lanes	1342	512	64	96	89946	5549	47689	0	21.162						measured			
+tran_1024	transient lanes	arp_lane_solve	lanes	1342	512	64	40	36482	3151	21270	0	12.345						measured			
+tran_1024	transient lanes	arp_lane_update	lanes	1342	512	64	40	19572	2890	8172	0	6.387						measured			
+tran_1024	transient lanes	arp_lane_gates	lanes	1342	512	64	32	5005	763	4435	0	3.311						measured			
+tran_1024	transient lanes	arp_lctl_bsim4va	lanes	895	7360	64	22	16080	573	117792	0	4.697						measured			
+tran_1024	transient lanes	arp_leval_vsource	lanes	1342	960	64	108	7568	782	4594	2132	2.878						measured			
+tran_1024	transient lanes	arp_lane_assemble	lanes	1342	29440	64	30	80796	2203	63769	0	2.132						measured			
+tran_1024	transient lanes	arp_lane_finalize	lanes	1342	512	64	34	2408	0	4711	0	1.880						measured			
+tran_1024	transient lanes	arp_leval_capacitor	lanes	1342	3712	64	42	18306	1175	11273	0	1.803						measured			
+tran_1024	transient lanes	arp_lane_accept	lanes	447	46464	64	30	162714	5731	288076	0	4.736						measured			
+tran_1024	transient lanes	arp_lane_set_limw	lanes	2236	512	64	16	287	0	68	0	0.818						measured			
+tran_1024	transient lanes	arp_lane_step_end_a	lanes	447	512	64	48	4792	166	27899	0	3.743						measured			
+tran_1024	transient lanes	arp_lchg_capacitor	lanes	894	3712	64	38	20918	1033	12491	0	1.858						measured			
+tran_1024	transient lanes	arp_lane_step_begin	lanes	447	512	64	42	2737	518	22300	0	3.163						measured			
+tran_1024	transient lanes	arp_lane_peel_dense	lanes	1342	512	64	94	282	0	28	0	1.023						measured			
+tran_1024	transient lanes	arp_lane_rebase	lanes	447	46464	64	22	146303	4349	144812	0	3.031						measured			
+tran_1024	transient lanes	arp_lane_clear_q	lanes	1342	6464	64	16	9576	0	1736	0	0.956						measured			
+tran_1024	transient lanes	arp_lane_step_end_b	lanes	447	512	64	26	1756	150	12576	0	2.255						measured			
+tran_1024	transient lanes	arp_lane_ring_put	lanes	447	512	64	30	2528	0	16575	0	1.767						measured			
+tran_1024	transient lanes	arp_lane_slot_zero	lanes	894	512	64	16	413	0	274	0	0.847						measured			
+tran_1024	transient lanes	arp_lbrk_vsource	device eval	447	512	64	56	1748	174	1761	0	1.490						measured			
+tran_1024	transient lanes	arp_lane_gather	lanes	447	5568	64	16	12116	0	12577	0	1.427						measured			
+tran_1024	transient lanes	arp_lane_predict	lanes	447	6016	64	16	11787	560	17912	0	1.329						measured			
+tran_1024	transient lanes	arp_lane_settle	lanes	447	512	64	16	473	0	1408	0	1.096						measured			
+tran_1024	transient lanes	arp_lane_newton_init	lanes	447	512	64	18	532	0	2225	0	0.877						measured			
+tran_1024	transient lanes	arp_lane_set_ops	lanes	447	512	64	16	293	0	30	0	0.814						measured			
+tran_1024	transient lanes	arp_lane_ring_next	lanes	447	64	64	16	23	0	2	0	0.812						measured			
+tran_1024	transient lanes	arp_lane_step_stop	lanes	31	512	64	16	218	0	15	0	0.839						measured			
+tran_8192	transient lanes	_deck											2.4254	445800430	0.0593	14.565	9.450	measured	26	tran	
+tran_8192	transient lanes	arp_leval_bsim4va	lanes	1342	3712	64	255	27114608	11720745	3859897	18370547	3691.554						measured-short			
+tran_8192	transient lanes	arp_lchg_bsim4va	lanes	894	3712	64	180	7895951	2958683	1541266	510681	1120.450						measured-short			
+tran_8192	transient lanes	arp_llim_bsim4va	lanes	3131	58816	64	128	2522679	674145	681201	1156513	179.648						measured-short			
+tran_8192	transient lanes	arp_lane_lte	lanes	447	3712	64	86	4612658	1380109	499697	0	519.313						measured-short			
+tran_8192	transient lanes	arp_lane_refactor	lanes	1342	3712	64	96	688277	42465	415288	0	30.080						measured-short			
+tran_8192	transient lanes	arp_lctl_bsim4va	lanes	895	58816	64	22	127994	4532	931532	0	40.042						measured-short			
+tran_8192	transient lanes	arp_lane_solve	lanes	1342	3712	64	40	279400	24182	185928	0	15.765						measured-short			
+tran_8192	transient lanes	arp_lane_update	lanes	1342	3712	64	40	150466	22201	70681	0	9.238						measured-short			
+tran_8192	transient lanes	arp_leval_vsource	lanes	1342	3712	64	108	44655	6073	33116	17161	9.183						measured-short			
+tran_8192	transient lanes	arp_lane_assemble	lanes	1342	235072	64	30	643569	17393	529593	0	8.945						measured-short			
+tran_8192	transient lanes	arp_lane_accept	lanes	447	371008	64	30	1294250	45156	2326879	0	26.183						measured-short			
+tran_8192	transient lanes	arp_leval_capacitor	lanes	1342	3712	64	42	73460	9372	93841	0	8.076						measured-short			
+tran_8192	transient lanes	arp_lane_rebase	lanes	447	371008	64	22	1164244	34477	1191818	0	22.718						measured-short			
+tran_8192	transient lanes	arp_lchg_capacitor	lanes	894	3712	64	38	69112	8207	100488	0	9.612						measured-short			
+tran_8192	transient lanes	arp_lane_step_end_a	lanes	447	3712	64	48	36459	1267	221253	0	15.655						measured-short			
+tran_8192	transient lanes	arp_lane_gates	lanes	1342	3712	64	32	37887	5775	37521	0	3.751						measured-short			
+tran_8192	transient lanes	arp_lane_step_end_b	lanes	447	3712	64	26	13317	1143	100179	0	8.830						measured-short			
+tran_8192	transient lanes	arp_lane_gather	lanes	447	44096	64	16	96218	0	101421	0	8.107						measured-short			
+tran_8192	transient lanes	arp_lane_clear_q	lanes	1342	51456	64	16	76179	0	14001	0	2.287						measured-short			
+tran_8192	transient lanes	arp_lane_finalize	lanes	1342	3712	64	34	18222	0	38779	0	2.168						measured-short			
+tran_8192	transient lanes	arp_lane_step_begin	lanes	447	3712	64	42	20787	3922	177021	0	5.837						measured-short			
+tran_8192	transient lanes	arp_lane_ring_put	lanes	447	3712	64	30	19328	0	132343	0	4.727						measured-short			
+tran_8192	transient lanes	arp_lane_set_limw	lanes	2236	3712	64	16	2144	0	535	0	0.849						measured-short			
+tran_8192	transient lanes	arp_lane_peel_dense	lanes	1342	3712	64	94	2106	0	213	0	1.142						measured-short			
+tran_8192	transient lanes	arp_lane_predict	lanes	447	47808	64	16	93824	4440	142412	0	3.025						measured-short			
+tran_8192	transient lanes	arp_lane_settle	lanes	447	3712	64	16	3562	0	11184	0	3.016						measured-short			
+tran_8192	transient lanes	arp_lbrk_vsource	device eval	447	3712	64	56	13307	1327	14196	0	2.503						measured-short			
+tran_8192	transient lanes	arp_lane_slot_zero	lanes	894	3712	64	16	3113	0	2182	0	1.001						measured-short			
+tran_8192	transient lanes	arp_lane_newton_init	lanes	447	3712	64	18	4012	0	17637	0	1.338						measured-short			
+tran_8192	transient lanes	arp_lane_ring_next	lanes	447	64	64	16	23	0	2	0	0.919						measured-short			
+tran_8192	transient lanes	arp_lane_set_ops	lanes	447	3712	64	16	2193	0	230	0	0.841						measured-short			
+tran_8192	transient lanes	arp_lane_step_stop	lanes	31	3712	64	16	1618	0	115	0	1.355						measured-short			
