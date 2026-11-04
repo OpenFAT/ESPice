@@ -50,6 +50,29 @@ pub fn State(comptime D: type) type {
         const has_bp = @hasDecl(D, "nextBreakpoint") and traits.skipsTimerState(D);
         const has_src_brk = traits.hasSpiceBreaks(D);
         const Ac = traits.AcTerms(D);
+        /// The `tp<k>_t` time keys of D's `vera_timepoint` caches that hold
+        /// a slot (`tp<k>_s<j>`) as long as a dirty-tracked held array (one
+        /// with a `<name>__dirty` range). Others save no copy by a rerun
+        /// (ltra caches only scalars), so they keep their cache.
+        const tp_keys: []const []const u8 = blk: {
+            var keys: []const []const u8 = &.{};
+            if (!@hasDecl(D, "Instance")) break :blk keys;
+            @setEvalBranchQuota(10_000_000);
+            const I = @typeInfo(D.Instance).@"struct";
+            for (I.field_names) |key| {
+                if (!(key.len > 4 and std.mem.startsWith(u8, key, "tp") and std.mem.endsWith(u8, key, "_t"))) continue;
+                const slot = key[0 .. key.len - 1] ++ "s";
+                const holds_tracked = for (I.field_names, I.field_types) |f, T| {
+                    if (!std.mem.startsWith(u8, f, slot) or @typeInfo(T) != .array) continue;
+                    const tracked = for (I.field_names, I.field_types) |h, H| {
+                        if (@hasField(D.Instance, h ++ "__dirty") and H == T) break true;
+                    } else false;
+                    if (tracked) break true;
+                } else false;
+                if (holds_tracked) keys = keys ++ .{key};
+            }
+            break :blk keys;
+        };
 
         pub fn advanceIteration(ctx: *anyopaque, previous_x: []const f64) void {
             const self = Batch.of(ctx);
@@ -166,8 +189,18 @@ pub fn State(comptime D: type) type {
 
         pub fn updateRange(ctx: *anyopaque, x: []const f64, first: u32, last: u32) ?f64 {
             const self = Batch.of(ctx);
+            assert(first <= last);
+            assert(last <= self.count);
             var min_reject: ?f64 = null;
             for (first..last) |id| {
+                // VerA's `vera_timepoint` cache on a hit makes `updateState`
+                // copy every cached held array whole into the Instance and
+                // dirty it end to end, so `stateCtl` copies it whole again:
+                // 2 x 96 KB per TXL line per step. Dropped (NaN, which no
+                // time equals), the statement reruns in place from the held
+                // state and SimState the cached eval read, so the same
+                // values, and dirties only the elements it stores.
+                inline for (tp_keys) |f| @field(self.instances[id], f) = std.math.nan(f64);
                 const lx = self.localX(x, id);
                 switch (D.updateState(Real, self.model(id), &self.instances[id], lx, &self.states[id], self.sim)) {
                     .ok => {},
