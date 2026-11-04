@@ -55,6 +55,69 @@ pub const Error = error{
 /// exits at once (`espice calibrate --probe-start` / `--probe-none`).
 pub const Probe = enum { start, none };
 
+/// Children per start probe (the plan's median of 7).
+const probe_runs = 7;
+
+/// The LU matrices: 2-D grids for low flops per column, 3-D for high
+/// (the plan's F/n ~60 to ~4000), each at a size the host factors fast.
+const grids = [_]cal.Grid{
+    .{ .side = 48, .dims = 2 },
+    .{ .side = 160, .dims = 2 },
+    .{ .side = 16, .dims = 3 },
+    .{ .side = 28, .dims = 3 },
+};
+
+/// One generated deck's card: the letter, the `.model` type and LEVEL
+/// (`frontend` spice.zig's tables), and the terminals it wires.
+const Card = struct { name: []const u8, letter: u8, kind: []const u8, level: u16, nodes: u8 };
+
+/// Every LEVEL-table compact model, one LEVEL each. A model this build
+/// lacks fails to build and is skipped.
+const cards = [_]Card{
+    .{ .name = "mos1", .letter = 'm', .kind = "nmos", .level = 1, .nodes = 4 },
+    .{ .name = "mos2", .letter = 'm', .kind = "nmos", .level = 2, .nodes = 4 },
+    .{ .name = "mos3", .letter = 'm', .kind = "nmos", .level = 3, .nodes = 4 },
+    .{ .name = "bsim1", .letter = 'm', .kind = "nmos", .level = 4, .nodes = 4 },
+    .{ .name = "bsim2", .letter = 'm', .kind = "nmos", .level = 5, .nodes = 4 },
+    .{ .name = "mos6", .letter = 'm', .kind = "nmos", .level = 6, .nodes = 4 },
+    .{ .name = "bsim3", .letter = 'm', .kind = "nmos", .level = 8, .nodes = 4 },
+    .{ .name = "mos9", .letter = 'm', .kind = "nmos", .level = 9, .nodes = 4 },
+    .{ .name = "bsimsoi", .letter = 'm', .kind = "nmos", .level = 10, .nodes = 4 },
+    .{ .name = "bsim4va", .letter = 'm', .kind = "nmos", .level = 54, .nodes = 4 },
+    .{ .name = "b3soifd", .letter = 'm', .kind = "nmos", .level = 55, .nodes = 4 },
+    .{ .name = "b3soidd", .letter = 'm', .kind = "nmos", .level = 56, .nodes = 4 },
+    .{ .name = "b3soipd", .letter = 'm', .kind = "nmos", .level = 57, .nodes = 4 },
+    .{ .name = "soi3", .letter = 'm', .kind = "nmos", .level = 60, .nodes = 4 },
+    .{ .name = "hisim2", .letter = 'm', .kind = "nmos", .level = 68, .nodes = 4 },
+    .{ .name = "hisimhv", .letter = 'm', .kind = "nmos", .level = 73, .nodes = 4 },
+    .{ .name = "psp103", .letter = 'm', .kind = "nmos", .level = 1040, .nodes = 4 },
+    .{ .name = "bsimcmg", .letter = 'm', .kind = "nmos", .level = 72, .nodes = 4 },
+    .{ .name = "l_utsoi", .letter = 'm', .kind = "nmos", .level = 76, .nodes = 4 },
+    .{ .name = "bsimbulk", .letter = 'm', .kind = "nmos", .level = 77, .nodes = 4 },
+    .{ .name = "bsimimg", .letter = 'm', .kind = "nmos", .level = 78, .nodes = 4 },
+    .{ .name = "gummel_poon", .letter = 'q', .kind = "npn", .level = 1, .nodes = 3 },
+    .{ .name = "vbic", .letter = 'q', .kind = "npn", .level = 4, .nodes = 3 },
+    .{ .name = "mextram", .letter = 'q', .kind = "npn", .level = 6, .nodes = 3 },
+    .{ .name = "hicumL2", .letter = 'q', .kind = "npn", .level = 8, .nodes = 3 },
+    .{ .name = "diode", .letter = 'd', .kind = "d", .level = 1, .nodes = 2 },
+    .{ .name = "juncap200", .letter = 'd', .kind = "d", .level = 6, .nodes = 2 },
+    .{ .name = "jfet", .letter = 'j', .kind = "njf", .level = 1, .nodes = 3 },
+    .{ .name = "jfet2", .letter = 'j', .kind = "njf", .level = 2, .nodes = 3 },
+    .{ .name = "mes", .letter = 'z', .kind = "nmf", .level = 1, .nodes = 3 },
+    .{ .name = "mesa", .letter = 'z', .kind = "nmf", .level = 2, .nodes = 3 },
+    .{ .name = "hfet1", .letter = 'z', .kind = "nmf", .level = 5, .nodes = 3 },
+    .{ .name = "hfet2", .letter = 'z', .kind = "nmf", .level = 6, .nodes = 3 },
+};
+
+/// Gate nets the instances share, so the cost probe's spread x puts them
+/// in a mix of regions.
+const shared_nets = 13;
+
+/// Policy, not measurement: the stage-2 price's bars and its history-walk
+/// terms, carried until stage 4 derives the margin from the placement
+/// oracle and prices history from the model rows (price plan sec. 5, 7).
+const policy = .{ .margin = 1.3, .min_ratio = 2.0, .hist_ns_per_byte = 0.3, .hist_floor_bytes = 4096.0, .host_ratio = 4.0, .host_loss_us = 1000.0 };
+
 /// Measures every row of the calibration file and writes it. Fails, with
 /// nothing written, on `Error`, a driver error while measuring the card, a
 /// write error (`machine.WriteError`) or out of memory. A model that cannot
@@ -144,69 +207,6 @@ pub fn probe(which: Probe, out: *std.Io.Writer) !void {
 }
 
 // ---- private ----
-
-/// Children per start probe (the plan's median of 7).
-const probe_runs = 7;
-
-/// The LU matrices: 2-D grids for low flops per column, 3-D for high
-/// (the plan's F/n ~60 to ~4000), each at a size the host factors fast.
-const grids = [_]cal.Grid{
-    .{ .side = 48, .dims = 2 },
-    .{ .side = 160, .dims = 2 },
-    .{ .side = 16, .dims = 3 },
-    .{ .side = 28, .dims = 3 },
-};
-
-/// One generated deck's card: the letter, the `.model` type and LEVEL
-/// (`frontend` spice.zig's tables), and the terminals it wires.
-const Card = struct { name: []const u8, letter: u8, kind: []const u8, level: u16, nodes: u8 };
-
-/// Every LEVEL-table compact model, one LEVEL each. A model this build
-/// lacks fails to build and is skipped.
-const cards = [_]Card{
-    .{ .name = "mos1", .letter = 'm', .kind = "nmos", .level = 1, .nodes = 4 },
-    .{ .name = "mos2", .letter = 'm', .kind = "nmos", .level = 2, .nodes = 4 },
-    .{ .name = "mos3", .letter = 'm', .kind = "nmos", .level = 3, .nodes = 4 },
-    .{ .name = "bsim1", .letter = 'm', .kind = "nmos", .level = 4, .nodes = 4 },
-    .{ .name = "bsim2", .letter = 'm', .kind = "nmos", .level = 5, .nodes = 4 },
-    .{ .name = "mos6", .letter = 'm', .kind = "nmos", .level = 6, .nodes = 4 },
-    .{ .name = "bsim3", .letter = 'm', .kind = "nmos", .level = 8, .nodes = 4 },
-    .{ .name = "mos9", .letter = 'm', .kind = "nmos", .level = 9, .nodes = 4 },
-    .{ .name = "bsimsoi", .letter = 'm', .kind = "nmos", .level = 10, .nodes = 4 },
-    .{ .name = "bsim4va", .letter = 'm', .kind = "nmos", .level = 54, .nodes = 4 },
-    .{ .name = "b3soifd", .letter = 'm', .kind = "nmos", .level = 55, .nodes = 4 },
-    .{ .name = "b3soidd", .letter = 'm', .kind = "nmos", .level = 56, .nodes = 4 },
-    .{ .name = "b3soipd", .letter = 'm', .kind = "nmos", .level = 57, .nodes = 4 },
-    .{ .name = "soi3", .letter = 'm', .kind = "nmos", .level = 60, .nodes = 4 },
-    .{ .name = "hisim2", .letter = 'm', .kind = "nmos", .level = 68, .nodes = 4 },
-    .{ .name = "hisimhv", .letter = 'm', .kind = "nmos", .level = 73, .nodes = 4 },
-    .{ .name = "psp103", .letter = 'm', .kind = "nmos", .level = 1040, .nodes = 4 },
-    .{ .name = "bsimcmg", .letter = 'm', .kind = "nmos", .level = 72, .nodes = 4 },
-    .{ .name = "l_utsoi", .letter = 'm', .kind = "nmos", .level = 76, .nodes = 4 },
-    .{ .name = "bsimbulk", .letter = 'm', .kind = "nmos", .level = 77, .nodes = 4 },
-    .{ .name = "bsimimg", .letter = 'm', .kind = "nmos", .level = 78, .nodes = 4 },
-    .{ .name = "gummel_poon", .letter = 'q', .kind = "npn", .level = 1, .nodes = 3 },
-    .{ .name = "vbic", .letter = 'q', .kind = "npn", .level = 4, .nodes = 3 },
-    .{ .name = "mextram", .letter = 'q', .kind = "npn", .level = 6, .nodes = 3 },
-    .{ .name = "hicumL2", .letter = 'q', .kind = "npn", .level = 8, .nodes = 3 },
-    .{ .name = "diode", .letter = 'd', .kind = "d", .level = 1, .nodes = 2 },
-    .{ .name = "juncap200", .letter = 'd', .kind = "d", .level = 6, .nodes = 2 },
-    .{ .name = "jfet", .letter = 'j', .kind = "njf", .level = 1, .nodes = 3 },
-    .{ .name = "jfet2", .letter = 'j', .kind = "njf", .level = 2, .nodes = 3 },
-    .{ .name = "mes", .letter = 'z', .kind = "nmf", .level = 1, .nodes = 3 },
-    .{ .name = "mesa", .letter = 'z', .kind = "nmf", .level = 2, .nodes = 3 },
-    .{ .name = "hfet1", .letter = 'z', .kind = "nmf", .level = 5, .nodes = 3 },
-    .{ .name = "hfet2", .letter = 'z', .kind = "nmf", .level = 6, .nodes = 3 },
-};
-
-/// Gate nets the instances share, so the cost probe's spread x puts them
-/// in a mix of regions.
-const shared_nets = 13;
-
-/// Policy, not measurement: the stage-2 price's bars and its history-walk
-/// terms, carried until stage 4 derives the margin from the placement
-/// oracle and prices history from the model rows (price plan sec. 5, 7).
-const policy = .{ .margin = 1.3, .min_ratio = 2.0, .hist_ns_per_byte = 0.3, .hist_floor_bytes = 4096.0, .host_ratio = 4.0, .host_loss_us = 1000.0 };
 
 /// Wall of one start-probe child, ms; `.start` also returns the child's
 /// own in-process ms in `in_ms`.

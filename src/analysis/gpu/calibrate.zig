@@ -14,7 +14,7 @@
 //! Contents:
 //! - `pub const Error`
 //! - `pub const Device = struct`
-//! - `pub const Cpus = struct` (`parse`)
+//! - `pub const Cpus = struct` (`Range`, `parse`)
 //! - `pub const Sample = struct`
 //! - `pub const Grid = struct`
 //! - `pub fn probeStart() !f64`
@@ -106,6 +106,20 @@ pub const Sample = struct {
 /// A `side`^`dims` grid Laplacian (5- or 7-point): its flops per column
 /// grow with `side`, steeply in 3-D, which spans the price's F/n axis.
 pub const Grid = struct { side: u32, dims: u2 };
+
+/// A fitted line t = at0 + slope * x.
+const Line = struct { at0: f64, slope: f64 };
+
+/// CPUs a `cpu_set_t` names.
+const cpus_max = @bitSizeOf(linux.cpu_set_t);
+
+/// One sample batches calls until it lasts this long, so a sub-microsecond
+/// eval is not timer noise.
+const sample_ns: u64 = 20 * std.time.ns_per_us;
+/// Samples are taken until this much wall has gone, at least 3...
+const budget_ns: u64 = 15 * std.time.ns_per_ms;
+/// ...and at most this many.
+const samples_max = 40;
 
 /// The driver's in-process start: init, the primary context, and the LU
 /// image's load, ms. `espice calibrate --probe-start` runs it in a child
@@ -371,17 +385,6 @@ pub fn lu(gpa: Allocator, grid: Grid, knobs: Knobs) !machine.Lu {
 
 // ---- private ----
 
-/// CPUs a `cpu_set_t` names.
-const cpus_max = @bitSizeOf(linux.cpu_set_t);
-
-/// One sample batches calls until it lasts this long, so a sub-microsecond
-/// eval is not timer noise.
-const sample_ns: u64 = 20 * std.time.ns_per_us;
-/// Samples are taken until this much wall has gone, at least 3...
-const budget_ns: u64 = 15 * std.time.ns_per_ms;
-/// ...and at most this many.
-const samples_max = 40;
-
 /// Median us of one `f.run()`. The batch-growing pass doubles as a warm-up.
 fn medianUs(f: anytype) f64 {
     var inner: u32 = 1;
@@ -407,8 +410,6 @@ fn medianUs(f: anytype) f64 {
 fn ms(ns: u64) f64 {
     return @as(f64, @floatFromInt(ns)) * 1e-6;
 }
-
-const Line = struct { at0: f64, slope: f64 };
 
 /// Least squares t = at0 + slope * bytes.
 fn leastSquares(bytes: []const usize, ts: []const f64) Line {
