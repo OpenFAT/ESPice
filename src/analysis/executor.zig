@@ -531,7 +531,7 @@ pub const Executor = struct {
         if (self.config.knobs.gpu_lu) |on| {
             if (!on) return null;
             forced = true;
-        } else if (self.circuit.n < gpu_lu_min_n) return null;
+        } else if (self.circuit.n < gpu_lu_min_n or !self.config.gpuPriced()) return null;
         const context = gpu_lu.GpuLu.init(self.allocator, self.circuit.n, self.circuit.nnz, self.config.knobs) catch |err| {
             if (forced) std.debug.print("warning: device LU unavailable ({s})\n", .{@errorName(err)});
             return null;
@@ -546,10 +546,11 @@ pub const Executor = struct {
         // Under GPU lanes the operating points run on the CPU workers, in
         // parallel, and only the transients' lanes take the device.
         if (self.config.backend == .cpu or (self.config.gpu_lanes and self.job == .op)) return null;
+        if (!self.config.gpuPriced()) return null;
         const explicit = self.config.gpu_explicit or self.config.backend != .auto;
         const c = &self.circuit;
         const host: gpu.Host = .{ .batches = c.batches, .planes = c.ownPlanes(), .n = c.n, .trash_slot = c.trash_slot, .has_charge = c.has_charge, .knobs = c.knobs };
-        const context = gpu.GpuContext.init(self.allocator, host, self.config.gpu_driver, explicit, lanes, dispatch.expectedEvals(self.job)) catch |err| {
+        const context = gpu.GpuContext.init(self.allocator, host, self.config.gpu_driver, explicit, lanes, dispatch.expectedEvals(self.job), self.config.machine) catch |err| {
             if (!gpu.fallsBack(self.config.backend, explicit, err)) {
                 std.log.warn("--backend {s}: GPU unavailable ({s}); detected GPU hardware: {s}", .{ @tagName(self.config.backend), @errorName(err), gpu.detectedHardware() });
                 return err;

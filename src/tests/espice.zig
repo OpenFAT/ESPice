@@ -3622,3 +3622,65 @@ test "auto: a deck priced on the CPU never starts the GPU driver (price plan sta
         try t.expectEqual(before, after);
     }
 }
+
+test "auto: a .step deck's GPU lane policy makes no driver entry (price plan stage 2, T2)" {
+    // Oracle: the driver-entry counter (`gpu/driver.zig`). The lane policy
+    // reads the card's FP64 rate from the machine file, never the driver.
+    const touches = &@import("analysis").driver_test_hooks.touches;
+    const before = touches.load(.monotonic);
+    const p = try api.Problem.init(t.allocator, t.io, .{ .source = .{ .file = "tests/conformance/tests/netlist/variants/step_alter_keeps_steps.sp" }, .backend = .{ .backend = .auto, .gpu_quiet = true } });
+    defer p.deinit();
+    try p.run_all();
+    try t.expectEqual(before, touches.load(.monotonic));
+}
+
+/// Runs corpus deck `name` under `auto`, checks whether its Problem found a
+/// calibration (`calibrated`), and returns the GPU driver entries it made.
+fn autoRun(name: []const u8, calibrated: bool) !u32 {
+    var path_buf: [256]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "tests/conformance/tests/netlist/{s}", .{name});
+    const touches = &@import("analysis").driver_test_hooks.touches;
+    const before = touches.load(.monotonic);
+    const p = try api.Problem.init(t.allocator, t.io, .{ .source = .{ .file = path }, .backend = .{ .backend = .auto, .gpu_quiet = true } });
+    defer p.deinit();
+    try t.expectEqual(calibrated, p.machine != null);
+    try p.run_all();
+    const made = touches.load(.monotonic) - before;
+    if (made != 0) std.debug.print("{s}: {d} driver entries under auto\n", .{ name, made });
+    return made;
+}
+
+test "auto: no calibration keeps the driver unloaded and notes it once; the fixture's prices it without the driver (price plan stage 2)" {
+    // Oracles: the driver-entry counter (`gpu/driver.zig`) and the note
+    // counter (`machine.zig`), whatever the executor believes it ran.
+    const m = @import("analysis").machine;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [128]u8 = undefined;
+    const root = try std.mem.printSentinel(&root_buf, ".zig-cache/tmp/{s}", .{&tmp.sub_path}, 0);
+    // Restored after: later tests read the real cache root.
+    var old_buf: [512]u8 = undefined;
+    const old: ?[:0]const u8 = if (std.c.getenv("XDG_CACHE_HOME")) |v| try std.mem.printSentinel(&old_buf, "{s}", .{v}, 0) else null;
+    defer _ = if (old) |v| setenv("XDG_CACHE_HOME", v, 1) else unsetenv("XDG_CACHE_HOME");
+    try t.expectEqual(@as(c_int, 0), setenv("XDG_CACHE_HOME", root, 1));
+
+    // An empty cache root: no file, so `auto` keeps everything on the CPU.
+    const decks = tiny_decks ++ [_][]const u8{"variants/step_alter_keeps_steps.sp"};
+    for (decks) |name| try t.expectEqual(@as(u32, 0), try autoRun(name, false));
+    // The note: once per process, only with kernels and a driver in sysfs.
+    const v = m.vendor orelse return;
+    const live = m.identity("", v);
+    const notes: u32 = @intFromBool(live.driver.len > 0);
+    try t.expectEqual(notes, m.test_hooks.notes.load(.monotonic));
+
+    // The fixture's constants on this machine's identity: loaded, priced, and
+    // still no driver entry (the tiny decks price CPU; the `.step` deck's
+    // lane policy reads FP64 1:64 from the file).
+    var arena: std.heap.ArenaAllocator = .init(t.allocator);
+    defer arena.deinit();
+    var calibration = try m.parse(arena.allocator(), m.test_hooks.fixture);
+    calibration.id = live;
+    try m.write(t.allocator, &calibration, .{ .xdg_cache_home = root });
+    for (decks) |name| try t.expectEqual(@as(u32, 0), try autoRun(name, true));
+    try t.expectEqual(notes, m.test_hooks.notes.load(.monotonic));
+}

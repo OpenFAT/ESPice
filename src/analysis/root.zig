@@ -6,7 +6,7 @@
 //! Contents:
 //! - `pub const session`, `ExecutionConfig`, `Knobs`, `validateBackend`, `batchWidth`
 //! - `pub const ThreadPool`, `Threads`, `WsPool`, `GpuDriver`, `gpu_available`
-//! - `pub const gpu_lanes`, `driver_test_hooks`, `schemaOf`, `mosra`
+//! - `pub const gpu_lanes`, `driver_test_hooks`, `machine`, `Machine`, `schemaOf`, `mosra`
 
 /// The query graph and its scheduler (`Session`).
 pub const session = @import("session.zig");
@@ -36,6 +36,11 @@ pub const gpu_lanes = @import("gpu/lanes.zig");
 /// Test binaries only: `touches`, the GPU driver entries called so far
 /// (`gpu/driver.zig`); an empty struct in any other build.
 pub const driver_test_hooks = @import("gpu/driver.zig").test_hooks;
+/// The machine calibration file `auto` prices the GPU with: identity,
+/// load, parse, format, write, and the uncalibrated note.
+pub const machine = @import("machine.zig");
+/// One parsed calibration (`ExecutionConfig.machine`).
+pub const Machine = @import("machine.zig").Machine;
 /// HSPICE MOSRA level 1 aging over a stress transient.
 pub const mosra = @import("post/mosra.zig");
 /// The result shape of a query, without running it.
@@ -53,6 +58,7 @@ test {
     _ = @import("gpu/lane_color.zig");
     _ = @import("gpu/devices.zig");
     _ = @import("gpu/price.zig");
+    _ = @import("machine.zig");
     _ = @import("gpu/context_cost.zig");
     _ = @import("tests/periodic.zig");
     _ = @import("tests/pz.zig");

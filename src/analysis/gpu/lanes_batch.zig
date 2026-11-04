@@ -21,7 +21,6 @@
 //! - `pub fn pack(gpa: Allocator, ps: []const device_ir.GpuPayload) !Packed`
 //! - `pub fn laneName(buf: []u8, eval_kernel: []const u8, what: []const u8) ?[:0]const u8`
 //! - `pub fn multiprocessorCount() ?u32`
-//! - `pub fn fp64Ratio() ?u32`
 //! - `pub fn staged(k: *Raw, cells: usize, tail: usize, N: usize) !Buffer`
 //! - `pub fn upload(k: *Raw, bytes: []const u8) !Buffer`
 //! - `pub fn zeros(k: *Raw, bytes: usize) !Buffer`
@@ -368,15 +367,6 @@ pub fn multiprocessorCount() ?u32 {
     var compute = drv.compute(null) catch return null;
     defer compute.deinit();
     return compute.multiprocessorCount() catch null;
-}
-
-/// The device's FP64:FP32 ratio, or null (HIP, no driver). Starts the
-/// driver.
-pub fn fp64Ratio() ?u32 {
-    if (comptime @import("builtin").cpu.arch.isWasm()) return null;
-    var compute = drv.compute(null) catch return null;
-    defer compute.deinit();
-    return compute.fp64Ratio() catch null;
 }
 
 /// `cells` zeroed rows of N lanes followed by `tail` rows of -0.0

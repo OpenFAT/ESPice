@@ -1,6 +1,7 @@
 //! The `auto` backend's price of a GPU query. In: the circuit's batches, a
-//! host probe of their eval time, the caller's eval estimate and the
-//! measurements earlier runs left in the cache directory. Out: an admit or a
+//! host probe of their eval time, the caller's eval estimate, the machine's
+//! calibrated constants (`machine.zig`) and the measurements earlier runs
+//! left in the cache directory. Out: an admit or a
 //! decline before the first driver call, the audit that holds an admitted
 //! query to its price, and the JIT warmth of the heavy kernel images.
 //! Cites #126 and #139 (the measurements behind the constants).
@@ -10,9 +11,9 @@
 //! - `pub const Audit = struct (`from`, `at`)`
 //! - `pub const CostCache = struct (`key`, `read`, `learn`, `write`, `Rec`)`
 //! - `pub const heavy_image_bytes: usize`
-//! - `pub fn admit(gpa: std.mem.Allocator, host: Host, threads: u32, evals: f64, driver_up: bool) !Price`
-//! - `pub fn quote(gpa: std.mem.Allocator, host: Host, threads: u32) !price.Cost`
-//! - `pub fn recommend(host: Host) bool`
+//! - `pub fn admit(gpa: std.mem.Allocator, host: Host, threads: u32, evals: f64, driver_up: bool, m: *const Machine) !Price`
+//! - `pub fn quote(gpa: std.mem.Allocator, host: Host, threads: u32, c: *const Constants) !price.Cost`
+//! - `pub fn recommend(host: Host, m: ?*const Machine) bool`
 //! - `pub fn imageOf(kernel: []const u8) ?[:0]const u8`
 //! - `pub fn imageWarm(image: []const u8, knobs: Knobs) bool`
 //! - `pub fn markWarm(image: []const u8, knobs: Knobs) void`
@@ -28,6 +29,9 @@ const devices = @import("devices.zig");
 const context = @import("context.zig");
 const ctx_scatter = @import("context_scatter.zig");
 const price = @import("price.zig");
+const machine = @import("../machine.zig");
+const Machine = machine.Machine;
+const Constants = machine.Constants;
 const Planes = device_ir.Planes;
 const backend = devices.backend;
 const Host = context.Host;
@@ -64,7 +68,7 @@ pub const Audit = struct {
 /// host and device microseconds per eval. `Cost.admit` prices from them
 /// instead of probing, and declines a circuit the device lost before
 /// without starting the driver. The key covers the machine's cards (read
-/// without the driver: `machineId`), the circuit's
+/// without the driver: `Identity.cardsKey`), the circuit's
 /// shape and models, the kernel images, the host threads and the query's
 /// expected evals (an OP and a transient of one circuit price apart), so a
 /// rebuild, another card or another thread count measures again.
@@ -73,7 +77,8 @@ pub const CostCache = struct {
 
     pub fn key(host: Host, threads: u32, evals: f64) u64 {
         var h = std.hash.Wyhash.init(0x5e1ce);
-        h.update(std.mem.asBytes(&machineId()));
+        const cards = if (machine.vendor) |v| machine.identity("", v).cardsKey() else 0;
+        h.update(std.mem.asBytes(&cards));
         for ([_]u64{ host.n, host.planes.g_vals.len, @intFromBool(host.has_charge), threads, @bitCast(evals) }) |v| h.update(std.mem.asBytes(&v));
         for (host.batches) |b| {
             const get = b.hooks.gpu_payload orelse continue;
@@ -91,7 +96,7 @@ pub const CostCache = struct {
 
     pub fn read(k: u64, knobs: Knobs) ?Rec {
         var buf: [512]u8 = undefined;
-        const p = cachePath(&buf, "gpu-cost", k, knobs) orelse return null;
+        const p = machine.cachePath(&buf, "gpu-cost", k, "", knobs) orelse return null;
         const fd = std.c.open(p, .{ .ACCMODE = .RDONLY }, @as(c_uint, 0));
         if (fd < 0) return null;
         defer _ = std.c.close(fd);
@@ -118,8 +123,8 @@ pub const CostCache = struct {
     /// run probes.
     pub fn write(k: u64, knobs: Knobs, rec: Rec) void {
         var buf: [512]u8 = undefined;
-        const p = cachePath(&buf, "gpu-cost", k, knobs) orelse return;
-        if (!makeParents(&buf, p)) return;
+        const p = machine.cachePath(&buf, "gpu-cost", k, "", knobs) orelse return;
+        if (!machine.makeParents(&buf, p)) return;
         const fd = std.c.open(p, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(c_uint, 0o644));
         if (fd < 0) return;
         defer _ = std.c.close(fd);
@@ -177,62 +182,30 @@ const StubBatch = struct {
     }
 };
 
-/// The price of the device path, measured on an RTX 4060 Laptop (sm_89,
-/// PCIe 4.0 x8) against an i9-14900HX; see `Cost`.
-///
-/// Per eval: launches and the one host wait, with the limit pass sharing it
-/// (mos1_2000 phases: 10 us upload and clear, 42 us kernels, 40 us reduce,
-/// 19 us download, and ~40 us of launch and wait around them).
-const cost_fixed_us: f64 = 40;
-
-/// Pinned-memory transfer rate, bytes per microsecond (~11 GB/s).
-const cost_bus_b_per_us: f64 = 11_000;
-
-/// Staging clear and the two reduce levels, bytes of staging per
-/// microsecond (mos1_2000: 4.8 MB in 50 us).
-const cost_stage_b_per_us: f64 = 100_000;
-
-/// One-time driver setup (cuInit, the context, module loads) in the first
-/// query of a Problem (`Driver`); later queries reuse it.
-const cost_init_us: f64 = 350_000;
-
-/// Host lanes ParEval is worth per thread past the first. Measured on 8
-/// threads against 1: bsim4_2000 3.3x, psp103_2000 1.8x, bsim3_2000 and the
-/// mos1 decks 1x or slower. 0.1 (1.7x on 8) keeps the heavy models, where
-/// the GPU's lead is large, and does not credit the light ones with lanes
-/// they do not get.
-const cost_lane_gain: f64 = 0.1;
-
-/// The GPU must beat the CPU by this factor over the whole query: wall time
-/// on a shared machine wanders by more than the model's error.
-const cost_margin: f64 = 1.3;
-
-/// ...and by this factor per eval. The probe's host time moves by up to 2x
-/// between queries of one process under load (scaling_rc_ladder_100k: 1.5
-/// and 2.9 ms), and that deck's GPU path costs more per step than its evals
-/// show (8.3-8.9 ms against 8.2 on the CPU). The decks where the GPU wins
-/// clear this easily: bsim3_2000 5.8x, bsim4va and psp103 ~5x.
-const cost_min_ratio: f64 = 2.0;
-
-pub fn admit(gpa: std.mem.Allocator, host: Host, threads: u32, evals: f64, driver_up: bool) !Price {
+/// Admits the device for `host`'s query, or declines it with
+/// `NotEnoughGpuWork`, from the machine's calibrated constants (`m.c`):
+/// the GPU must beat the CPU by `min_ratio` per eval and by `margin` over
+/// the whole query, the driver's `start_ms` included unless `driver_up`.
+pub fn admit(gpa: std.mem.Allocator, host: Host, threads: u32, evals: f64, driver_up: bool, m: *const Machine) !Price {
+    const c = &m.c;
     const stats = host.knobs.gpu_stats != .off;
-    const init_us: f64 = if (driver_up) 0 else cost_init_us;
+    const init_us: f64 = if (driver_up) 0 else c.start_ms * 1e3;
     // The probe costs three host evals; a query with few more than
     // that cannot repay the setup.
     if (evals < 20) return decline(stats, 0, 0, "too few evals");
     const key = CostCache.key(host, threads, evals);
     if (CostCache.read(key, host.knobs)) |rec| if (rec.gpu_us > 0) {
-        if (!measuredWins(rec, evals, init_us)) return decline(stats, rec.cpu_us, rec.gpu_us, "measured on this card");
+        if (!measuredWins(c, rec, evals, init_us)) return decline(stats, rec.cpu_us, rec.gpu_us, "measured on this card");
         if (stats) std.debug.print(
             "gpu-stats: cost per eval cpu={d:.0} us gpu={d:.0} us (measured on this card), {d:.0} evals, setup {d:.0} ms: GPU\n",
             .{ rec.cpu_us, rec.gpu_us, evals, init_us * 1e-3 },
         );
         return .{ .cpu_us = rec.cpu_us, .key = key };
     };
-    const q = try quote(gpa, host, threads);
+    const q = try quote(gpa, host, threads, c);
     const cpu_us = q.cpu_us;
     const gpu_us = q.gpu_us;
-    if (!gpuWins(cpu_us, gpu_us, evals, init_us)) {
+    if (!gpuWins(c, cpu_us, gpu_us, evals, init_us)) {
         // The host's price, for an explicit device run to set beside
         // its measured one (`CostCache.learn`).
         CostCache.write(key, host.knobs, .{ .cpu_us = cpu_us, .gpu_us = 0 });
@@ -248,7 +221,7 @@ pub fn admit(gpa: std.mem.Allocator, host: Host, threads: u32, evals: f64, drive
 /// Both sides' price per eval of `host`'s GPU-eligible batches (`price`),
 /// from one host probe of each: three evals on scratch planes at a spread
 /// x, the fastest kept.
-pub fn quote(gpa: std.mem.Allocator, host: Host, threads: u32) !price.Cost {
+pub fn quote(gpa: std.mem.Allocator, host: Host, threads: u32, c: *const Constants) !price.Cost {
     var slots: u64 = 0;
     var n_rows: usize = 0;
     for (host.batches) |b| {
@@ -295,17 +268,20 @@ pub fn quote(gpa: std.mem.Allocator, host: Host, threads: u32) !price.Cost {
     const n_planes: usize = if (host.has_charge) 4 else 2;
     const bus_bytes: f64 = @floatFromInt((n_planes * (ng + nr) / 2 + 2 * host.n) * @sizeOf(f64));
     const stage_bytes: f64 = @floatFromInt(slots * n_planes / 2 * @sizeOf(f64));
-    const fixed_us = cost_fixed_us + bus_bytes / cost_bus_b_per_us + stage_bytes / cost_stage_b_per_us;
-    const lanes = 1.0 + cost_lane_gain * @as(f64, @floatFromInt(@max(1, threads) - 1));
+    const fixed_us = c.eval_fixed_us + bus_bytes / c.bus_b_per_us + stage_bytes / c.stage_b_per_us;
+    const lanes = 1.0 + c.host_lane_gain * @as(f64, @floatFromInt(@max(1, threads) - 1));
     if (host.knobs.gpu_stats != .off) std.debug.print("gpu-stats: price fixed_us={d:.1} lanes={d:.2}\n", .{ fixed_us, lanes });
-    return price.ofQuery(rows, fixed_us, lanes);
+    return price.ofQuery(c, rows, fixed_us, lanes);
 }
 
 /// Under an explicit device backend, one stderr line when the history walk
 /// alone (`price.ofHistory`: counts and held bytes, no probe, so the same
 /// text on every run) loses on the device by far. Advice only; every
-/// eligible batch still runs where it was asked to. True when it printed.
-pub fn recommend(host: Host) bool {
+/// eligible batch still runs where it was asked to. Silent without a
+/// calibrated machine `m`, whose constants price the walk. True when it
+/// printed.
+pub fn recommend(host: Host, m: ?*const Machine) bool {
+    const c = &(m orelse return false).c;
     var hist: price.Cost = .{ .cpu_us = 0, .gpu_us = 0 };
     var n_lines: usize = 0;
     var n_rows: usize = 0;
@@ -314,13 +290,13 @@ pub fn recommend(host: Host) bool {
         const p = get(b.ctx);
         n_rows += 1;
         const held: f64 = @floatFromInt((p.instances.len + p.states.len) / @max(p.count, 1));
-        if (held <= price.hist_floor_bytes) continue;
+        if (held <= c.hist_floor_bytes) continue;
         n_lines += 1;
-        const c = price.ofHistory(&.{.{ .count = @max(p.count, 1), .host_us = 0, .held_bytes = held }});
-        hist.cpu_us += c.cpu_us;
-        hist.gpu_us += c.gpu_us;
+        const line = price.ofHistory(c, &.{.{ .count = @max(p.count, 1), .host_us = 0, .held_bytes = held }});
+        hist.cpu_us += line.cpu_us;
+        hist.gpu_us += line.gpu_us;
     }
-    if (!price.historyLoses(hist)) return false;
+    if (!price.historyLoses(c, hist)) return false;
     std.debug.print(
         "note: {d} of {d} GPU-eligible device types hold a waveform history that one GPU thread per instance walks serially, priced at {d:.0} us per iteration against {d:.0} us on the CPU; `--backend auto` or `cpu` runs this circuit faster\n",
         .{ n_lines, n_rows, hist.gpu_us, hist.cpu_us },
@@ -346,7 +322,7 @@ pub fn imageWarm(image: []const u8, knobs: Knobs) bool {
 pub fn markWarm(image: []const u8, knobs: Knobs) void {
     var buf: [512]u8 = undefined;
     const path = markerPath(&buf, image, knobs) orelse return;
-    if (!makeParents(&buf, path)) return;
+    if (!machine.makeParents(&buf, path)) return;
     const fd = std.c.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true }, @as(c_uint, 0o644));
     if (fd >= 0) _ = std.c.close(fd);
 }
@@ -355,15 +331,14 @@ pub fn markWarm(image: []const u8, knobs: Knobs) void {
 
 /// `gpuWins` for prices `Audit` measured: no per-eval safety ratio
 /// (the audit demotes at 1), the query margin and the setup kept.
-fn measuredWins(rec: CostCache.Rec, evals: f64, init_us: f64) bool {
-    return rec.cpu_us > rec.gpu_us and cost_margin * (init_us + evals * rec.gpu_us) < evals * rec.cpu_us;
+fn measuredWins(c: *const Constants, rec: CostCache.Rec, evals: f64, init_us: f64) bool {
+    return rec.cpu_us > rec.gpu_us and c.margin * (init_us + evals * rec.gpu_us) < evals * rec.cpu_us;
 }
 
-/// The GPU must beat the CPU by `cost_min_ratio` per eval and by
-/// `cost_margin` over the whole query, setup included. Any NaN input
-/// prices the CPU.
-fn gpuWins(cpu_us: f64, gpu_us: f64, evals: f64, init_us: f64) bool {
-    return cpu_us >= cost_min_ratio * gpu_us and cost_margin * (init_us + evals * gpu_us) < evals * cpu_us;
+/// The GPU must beat the CPU by `min_ratio` per eval and by `margin` over
+/// the whole query, setup included. Any NaN input prices the CPU.
+fn gpuWins(c: *const Constants, cpu_us: f64, gpu_us: f64, evals: f64, init_us: f64) bool {
+    return cpu_us >= c.min_ratio * gpu_us and c.margin * (init_us + evals * gpu_us) < evals * cpu_us;
 }
 
 fn decline(stats: bool, cpu_us: f64, gpu_us: f64, why: []const u8) Error {
@@ -401,32 +376,7 @@ fn sassFits() bool {
 /// leaves stale markers and `auto` pays one cold JIT; key on the version too
 /// if that ever matters.
 fn markerPath(buf: []u8, image: []const u8, knobs: Knobs) ?[:0]const u8 {
-    return cachePath(buf, "gpu-jit", std.hash.Wyhash.hash(0, image), knobs);
-}
-
-/// `<cache>/espice/<dir>/<key as 16 hex digits>` in `buf`, `<cache>` being
-/// `$XDG_CACHE_HOME`, else `$HOME/.cache`. Null without either, or past
-/// `buf` (no path, never a truncated one).
-fn cachePath(buf: []u8, comptime dir: []const u8, key: u64, knobs: Knobs) ?[:0]const u8 {
-    if (knobs.xdg_cache_home) |x|
-        return std.mem.printSentinel(buf, "{s}/espice/" ++ dir ++ "/{x:0>16}", .{ x, key }, 0) catch null;
-    const home = knobs.home orelse return null;
-    return std.mem.printSentinel(buf, "{s}/.cache/espice/" ++ dir ++ "/{x:0>16}", .{ home, key }, 0) catch null;
-}
-
-/// mkdir -p for `path`'s `espice/` and `<dir>/` (`cachePath`), whose bytes
-/// live at the start of `buf`; EEXIST is the common case. False when
-/// `path` has fewer than two slashes. Best effort: a failed mkdir surfaces
-/// as the caller's failed open.
-fn makeParents(buf: []u8, path: []const u8) bool {
-    const leaf = std.mem.lastIndexOfScalar(u8, path, '/') orelse return false;
-    const app = std.mem.lastIndexOfScalar(u8, path[0..leaf], '/') orelse return false;
-    for ([_]usize{ app, leaf }) |end| {
-        buf[end] = 0;
-        _ = std.c.mkdir(@ptrCast(buf.ptr), 0o755);
-        buf[end] = '/';
-    }
-    return true;
+    return machine.cachePath(buf, "gpu-jit", std.hash.Wyhash.hash(0, image), "", knobs);
 }
 
 /// Whether `markWarm` recorded `image` under `knobs`' cache root.
@@ -436,99 +386,14 @@ fn markedWarm(image: []const u8, knobs: Knobs) bool {
     return std.c.access(path, 0) == 0;
 }
 
-/// The machine's GPU identity, read without the driver: the wrapping sum
-/// of `Wyhash(0, uuid)` over every card procfs lists (CUDA:
-/// `/proc/driver/nvidia/gpus/*/information`; HIP: the kfd topology nodes'
-/// `unique_id`). One CUDA card hashes to `Wyhash(0, uuid)` of the 16 bytes
-/// `cuDeviceGetUuid` reports, the key the driver read gave before, so
-/// records written then stay valid. 0 off Linux, without images or a card.
-/// ponytail: the set of cards, not the one a query lands on (it is placed
-/// after the price); unlike cards in one box share a record until the
-/// machine file keys rows per card.
-fn machineId() u64 {
-    if (comptime @import("builtin").os.tag != .linux) return 0;
-    const be = backend orelse return 0;
-    const root: [:0]const u8 = if (be == .cuda) "/proc/driver/nvidia/gpus" else "/sys/class/kfd/kfd/topology/nodes";
-    const dir = std.c.opendir(root) orelse return 0;
-    defer _ = std.c.closedir(dir);
-    var id: u64 = 0;
-    // Bounded: one entry per card plus `.` and `..` (and kfd's CPU nodes).
-    for (0..4 * devices.devices_max) |_| {
-        const ent = std.c.readdir(dir) orelse break;
-        const name = std.mem.sliceTo(&ent.name, 0);
-        if (name.len == 0 or name[0] == '.') continue;
-        var path_buf: [256]u8 = undefined;
-        const leaf = if (be == .cuda) "information" else "properties";
-        const path = std.mem.printSentinel(&path_buf, "{s}/{s}/{s}", .{ root, name, leaf }, 0) catch continue;
-        var text_buf: [4096]u8 = undefined;
-        const text = readSmall(path, &text_buf) orelse continue;
-        const uuid = (if (be == .cuda) nvidiaUuid(text) else kfdUuid(text)) orelse continue;
-        id +%= std.hash.Wyhash.hash(0, &uuid);
-    }
-    return id;
+/// The constants the tests price with: the placement fixture's.
+fn fixture() !Constants {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    return (try machine.parse(arena.allocator(), machine.test_hooks.fixture)).c;
 }
 
-/// The 16 bytes of the `GPU UUID: GPU-xxxxxxxx-xxxx-...` line of an
-/// NVIDIA procfs `information` file, or null when it has none.
-fn nvidiaUuid(text: []const u8) ?[16]u8 {
-    const key = "GPU UUID:";
-    const at = std.mem.indexOf(u8, text, key) orelse return null;
-    var rest = std.mem.trimStart(u8, text[at + key.len ..], " \t");
-    if (!std.mem.startsWith(u8, rest, "GPU-")) return null;
-    rest = rest["GPU-".len..];
-    var out: [16]u8 = undefined;
-    var nibbles: usize = 0;
-    for (rest) |c| {
-        if (c == '-') continue;
-        if (nibbles == 32) break;
-        const v = std.fmt.charToDigit(c, 16) catch return null;
-        if (nibbles % 2 == 0) out[nibbles / 2] = v << 4 else out[nibbles / 2] |= v;
-        nibbles += 1;
-    }
-    if (nibbles != 32) return null;
-    return out;
-}
-
-/// A kfd node's nonzero `unique_id` as 16 bytes (little-endian, zero
-/// padded), or null: a CPU node, or no such line.
-fn kfdUuid(text: []const u8) ?[16]u8 {
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |line| {
-        if (!std.mem.startsWith(u8, line, "unique_id ")) continue;
-        const v = std.fmt.parseInt(u64, std.mem.trim(u8, line["unique_id ".len..], " \t"), 10) catch return null;
-        if (v == 0) return null;
-        var out: [16]u8 = @splat(0);
-        std.mem.writeInt(u64, out[0..8], v, .little);
-        return out;
-    }
-    return null;
-}
-
-/// `path`'s first `buf.len` bytes, or null when it cannot be read.
-fn readSmall(path: [:0]const u8, buf: []u8) ?[]const u8 {
-    const fd = std.c.open(path, .{ .ACCMODE = .RDONLY }, @as(c_uint, 0));
-    if (fd < 0) return null;
-    defer _ = std.c.close(fd);
-    const got = std.c.read(fd, buf.ptr, buf.len);
-    if (got <= 0) return null;
-    return buf[0..@intCast(got)];
-}
-
-test "nvidiaUuid: the procfs uuid line is the 16 bytes the driver reports" {
-    // Oracle: this RTX 4060 Laptop's `information` file, its uuid bytes
-    // transcribed by hand from the hex.
-    const text = "Model: \t\t NVIDIA GeForce RTX 4060 Laptop GPU\nIRQ:   \t\t 187\nGPU UUID: \t GPU-a5b262fa-fc3e-0653-9187-0d58e7372cbd\nVideo BIOS: \t 95.07.41.00.56\n";
-    const want = [16]u8{ 0xa5, 0xb2, 0x62, 0xfa, 0xfc, 0x3e, 0x06, 0x53, 0x91, 0x87, 0x0d, 0x58, 0xe7, 0x37, 0x2c, 0xbd };
-    try std.testing.expectEqualSlices(u8, &want, &(nvidiaUuid(text) orelse return error.TestUnexpectedResult));
-    try std.testing.expect(nvidiaUuid("Model: x\n") == null);
-    try std.testing.expect(nvidiaUuid("GPU UUID: GPU-a5b2\n") == null);
-    try std.testing.expect(nvidiaUuid("GPU UUID: GPU-zzb262fa-fc3e-0653-9187-0d58e7372cbd\n") == null);
-    const node = "cpu_cores_count 0\nunique_id 4096\n";
-    try std.testing.expectEqual(@as(u8, 0x10), (kfdUuid(node) orelse return error.TestUnexpectedResult)[1]);
-    try std.testing.expect(kfdUuid("unique_id 0\n") == null);
-}
-
-test "machineId: procfs gives the key the driver's own card uuids give" {
+test "cardsKey:procfs gives the key the driver's own card uuids give" {
     // Oracle: the driver (`cuDeviceGetUuid` per ordinal), which the key
     // read before stage 1. Without images or a CUDA driver both sides are 0.
     var want: u64 = 0;
@@ -541,7 +406,8 @@ test "machineId: procfs gives the key the driver's own card uuids give" {
     } else |_| {};
     // ponytail: no AMD card here to check kfd ids against.
     if (comptime backend == .hip) return;
-    try std.testing.expectEqual(want, machineId());
+    const got = if (machine.vendor) |v| machine.identity("", v).cardsKey() else 0;
+    try std.testing.expectEqual(want, got);
 }
 
 test "CostCache: a record reads back under its key and nowhere else" {
@@ -559,34 +425,38 @@ test "CostCache: a record reads back under its key and nowhere else" {
     // `learn`, with no device price to admit on.
     CostCache.write(44, knobs, .{ .cpu_us = 120, .gpu_us = 0 });
     try std.testing.expectEqual(@as(f64, 0), (CostCache.read(44, knobs) orelse return error.TestUnexpectedResult).gpu_us);
-    try std.testing.expect(measuredWins(rec, 1000, 0));
-    try std.testing.expect(!measuredWins(.{ .cpu_us = 30, .gpu_us = 120 }, 1000, 0));
+    const c = try fixture();
+    try std.testing.expect(measuredWins(&c, rec, 1000, 0));
+    try std.testing.expect(!measuredWins(&c, .{ .cpu_us = 30, .gpu_us = 120 }, 1000, 0));
 }
 
 test "Cost.gpuWins needs both margins and refuses NaN" {
+    const c = try fixture();
     // 10x per eval, cheap setup: the GPU.
-    try std.testing.expect(gpuWins(1000, 100, 1000, 0));
+    try std.testing.expect(gpuWins(&c, 1000, 100, 1000, 0));
     // Under the per-eval ratio, however many evals.
-    try std.testing.expect(!gpuWins(199, 100, 1e9, 0));
+    try std.testing.expect(!gpuWins(&c, 199, 100, 1e9, 0));
     // Fast per eval, but setup outweighs the query.
-    try std.testing.expect(!gpuWins(1000, 100, 10, cost_init_us));
-    try std.testing.expect(!gpuWins(std.math.nan(f64), 100, 1000, 0));
-    try std.testing.expect(!gpuWins(1000, std.math.nan(f64), 1000, 0));
+    try std.testing.expect(!gpuWins(&c, 1000, 100, 10, c.start_ms * 1e3));
+    try std.testing.expect(!gpuWins(&c, std.math.nan(f64), 100, 1000, 0));
+    try std.testing.expect(!gpuWins(&c, 1000, std.math.nan(f64), 1000, 0));
 }
 
 test "Cost.gpuWins at its bars and on infinities" {
-    // `cost_min_ratio` exactly passes.
-    try std.testing.expect(gpuWins(cost_min_ratio * 100, 100, 1e6, 0));
+    const c = try fixture();
+    // `min_ratio` exactly passes.
+    try std.testing.expect(gpuWins(&c, c.min_ratio * 100, 100, 1e6, 0));
     // Setup: 1.3 * (init + 1e5) < 1e6 holds below init = 669,230.8 us.
-    try std.testing.expect(gpuWins(1000, 100, 1000, 669_000));
-    try std.testing.expect(!gpuWins(1000, 100, 1000, 670_000));
-    try std.testing.expect(!gpuWins(1000, std.math.inf(f64), 1000, 0));
+    try std.testing.expect(gpuWins(&c, 1000, 100, 1000, 669_000));
+    try std.testing.expect(!gpuWins(&c, 1000, 100, 1000, 670_000));
+    try std.testing.expect(!gpuWins(&c, 1000, std.math.inf(f64), 1000, 0));
     // Unbounded evals: inf < inf is false, so the CPU.
-    try std.testing.expect(!gpuWins(1000, 100, std.math.inf(f64), 0));
+    try std.testing.expect(!gpuWins(&c, 1000, 100, std.math.inf(f64), 0));
 }
 
 test "Cost.admit prices a measured host eval and leaves the planes alone" {
     const gpa = std.testing.allocator;
+    const m: Machine = .{ .id = .{ .threads = 1 }, .c = try fixture() };
     // `admit` reads only `gpu_payload` off the hooks.
     var gpu_hooks: device_ir.Hooks = undefined;
     gpu_hooks.gpu_payload = StubBatch.payload;
@@ -612,7 +482,7 @@ test "Cost.admit prices a measured host eval and leaves the planes alone" {
         var other: StubBatch = .{ .spin_ns = 0 };
         const batches = [_]device_ir.Batch{ other.batch(&host_hooks), dev.batch(&gpu_hooks) };
         const host: Host = .{ .batches = &batches, .planes = planes, .n = 2, .trash_slot = 2, .has_charge = false, .knobs = .{} };
-        const got = admit(gpa, host, 1, c.evals, c.driver_up);
+        const got = admit(gpa, host, 1, c.evals, c.driver_up, &m);
         if (c.admitted) try std.testing.expect((try got).cpu_us > 0) else try std.testing.expectError(Error.NotEnoughGpuWork, got);
         try std.testing.expectEqual(@as(u32, if (c.probed) 3 else 0), dev.evals);
         try std.testing.expectEqual(@as(u32, 0), other.evals);
@@ -621,6 +491,7 @@ test "Cost.admit prices a measured host eval and leaves the planes alone" {
 }
 
 test "Cost.recommend speaks for one history line, not for a thousand" {
+    const m: Machine = .{ .id = .{ .threads = 1 }, .c = try fixture() };
     var gpu_hooks: device_ir.Hooks = undefined;
     gpu_hooks.gpu_payload = StubBatch.payload;
     var vals: [8]f64 = @splat(7);
@@ -632,24 +503,28 @@ test "Cost.recommend speaks for one history line, not for a thousand" {
         var dev: StubBatch = .{ .spin_ns = 0, .count = c.count, .held = history[0 .. c.count * 5 * 8192 * 8] };
         const batches = [_]device_ir.Batch{dev.batch(&gpu_hooks)};
         const host: Host = .{ .batches = &batches, .planes = planes, .n = 2, .trash_slot = 2, .has_charge = false, .knobs = .{} };
-        try std.testing.expectEqual(c.speaks, recommend(host));
+        try std.testing.expectEqual(c.speaks, recommend(host, &m));
+        // No calibration: no constants to price the walk with, no advice.
+        try std.testing.expect(!recommend(host, null));
         // No probe: the advice is the same on every run.
         try std.testing.expectEqual(@as(u32, 0), dev.evals);
     }
     // A compact model's few bytes: no advice.
     var small: StubBatch = .{ .spin_ns = 0, .held = history[0..256] };
     const batches = [_]device_ir.Batch{small.batch(&gpu_hooks)};
-    try std.testing.expect(!recommend(.{ .batches = &batches, .planes = planes, .n = 2, .trash_slot = 2, .has_charge = false, .knobs = .{} }));
+    try std.testing.expect(!recommend(.{ .batches = &batches, .planes = planes, .n = 2, .trash_slot = 2, .has_charge = false, .knobs = .{} }, &m));
 }
 
 test "price: each recorded deck lands on its measured winner" {
-    // placement.tsv: measured walls and the price's inputs, with provenance.
-    // The verdict: a deck within `cost_margin` of a tie may go either way;
+    // placement.tsv: measured walls and the price's inputs, with provenance;
+    // placement.machine.tsv: the machine's constants, measured beside them.
+    // The verdict: a deck within `margin` of a tie may go either way;
     // a `known` deck must miss, so a fix that lands it fails until the
     // marker goes. The size: the priced wall ratio (setup included) within
     // `tolerance` of the measured one either way, the oracle's own accuracy
     // (one deck's walls wander 2-5x on the loaded machine that measured them).
     const tolerance: f64 = 10;
+    const c = try fixture();
     var rows_buf: [8]price.Row = undefined;
     var lines = std.mem.tokenizeScalar(u8, @embedFile("placement.tsv"), '\n');
     var decks: usize = 0;
@@ -681,11 +556,11 @@ test "price: each recorded deck lands on its measured winner" {
         const known = !std.mem.eql(u8, f.next().?, "-");
         try std.testing.expect(f.next() == null);
 
-        const q = price.ofQuery(rows_buf[0..n_rows], fixed_us, 1);
+        const q = price.ofQuery(&c, rows_buf[0..n_rows], fixed_us, 1);
         const priced = (init_us + evals * q.gpu_us) / (evals * q.cpu_us);
         const measured = cuda_s / cpu_s;
-        const on_gpu = gpuWins(q.cpu_us, q.gpu_us, evals, init_us);
-        const right = if (on_gpu) cost_margin * cpu_s >= cuda_s else cost_margin * cuda_s >= cpu_s;
+        const on_gpu = gpuWins(&c, q.cpu_us, q.gpu_us, evals, init_us);
+        const right = if (on_gpu) c.margin * cpu_s >= cuda_s else c.margin * cuda_s >= cpu_s;
         const sized = priced < tolerance * measured and measured < tolerance * priced;
         if (right == known or !sized) std.debug.print("{s}: priced cpu={d:.1} gpu={d:.1} us per eval, {s}, {d:.1}x; measured cpu {d} s cuda {d} s, {d:.1}x\n", .{ deck, q.cpu_us, q.gpu_us, if (on_gpu) "GPU" else "CPU", priced, cpu_s, cuda_s, measured });
         try std.testing.expect(right != known);
