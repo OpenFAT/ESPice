@@ -128,6 +128,24 @@ test "HSPICE sweep tails: lin by count, poi by list, .dc over a bare .param (#94
     });
 }
 
+test "HSPICE .dc: a bare MONTE= or DATA= is the whole sweep; after a swept source it needs SWEEP [CR .DC]" {
+    // The manual's forms: `.DC MONTE=val`, `.DC DATA=name` and
+    // `.DC var start stop incr SWEEP MONTE=val`.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var nl = try netlist.parse(a, "t\nv1 a 0 1\nr1 a 0 1\n.dc monte=5\n", .hspice);
+    try std.testing.expectEqual(@as(usize, 0), nl.deck.analyses[0].args.len);
+    try std.testing.expectEqual(@as(u32, 5), nl.deck.analyses[0].sweep.monte.n);
+    nl = try netlist.parse(a, "t\nv1 a 0 1\nr1 a 0 1\n.dc v1 1 1 1 sweep monte=5\n", .hspice);
+    try std.testing.expectEqual(@as(usize, 4), nl.deck.analyses[0].args.len);
+    try std.testing.expectEqual(@as(u32, 5), nl.deck.analyses[0].sweep.monte.n);
+    try expectRefused(.hspice, error.UnsupportedCard, &.{
+        "t\nv1 a 0 1\nr1 a 0 1\n.dc v1 1 1 1 monte=5\n",
+        "t\nv1 a 0 1\nr1 a 0 1\n.data d\nx\n1\n.enddata\n.dc v1 0 1 0.1 data=d\n",
+    });
+}
+
 test ".mosra reads its keys; SimMode 1 and unknown keys are refused [SA Ch.29]" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

@@ -191,7 +191,7 @@ pub fn Methods(comptime S: type) type {
                     // HSPICE's `.temp t1 t2 ...` lists run temperatures; ngspice's
                     // three-number form is a sweep.
                     const temp_list = kind == .temp and args.len > 1 and r.dialect == .hspice;
-                    var swept = r.readSweep(kind, args) catch |err| return r.failed(line, err);
+                    var swept = r.readSweep(kind, args, line) catch |err| return if (r.logged) err else r.failed(line, err);
                     const scaled = swept.sweep == .monte and swept.sweep.monte.scales.len != 0;
                     if (scaled != (fail.len != 0)) return r.unsupported(line, "SIGMA_SCALE= without FAIL=, or FAIL= without SIGMA_SCALE=");
                     if (scaled) {
