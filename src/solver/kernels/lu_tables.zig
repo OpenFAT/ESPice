@@ -10,6 +10,7 @@
 //! - `pub const Tables = struct`
 //!   - `pub fn deinit(self: *Tables, gpa: std.mem.Allocator) void`
 //! - `pub fn build(gpa: std.mem.Allocator, lu: *const SparseLu, col_ptr: []const u32, growth: f64, opt: Options) !Tables`
+//! - `pub fn buildInto(gpa: std.mem.Allocator, out: *std.ArrayList(u32), lu: *const SparseLu, col_ptr: []const u32, growth: f64, opt: Options) !klu.Tab`
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -63,14 +64,29 @@ const head_level_cost = 4;
 
 const tail_step_cost = 1;
 
-/// Builds the tables for `lu`'s current factor. O(F + nnz(L+U)) time; the
-/// narrow columns' `dmap` is 2 bytes per flop when every column has fewer
-/// than 65,535 slots, else 4. Asserts a successful
-/// `factor` and a tail of at most `tail_max` steps. `OutOfMemory` also
-/// means the tables passed u32 offsets. Caller owns the result; free with
-/// `Tables.deinit`. A later `factor` of `lu` (new `pattern_epoch`) makes
-/// them stale.
+/// Builds the tables for `lu`'s current factor, as `buildInto`. Caller
+/// owns the result; free with `Tables.deinit`.
 pub fn build(gpa: std.mem.Allocator, lu: *const SparseLu, col_ptr: []const u32, growth: f64, opt: Options) !Tables {
+    var out: std.ArrayList(u32) = .empty;
+    errdefer out.deinit(gpa);
+    const tab = try buildInto(gpa, &out, lu, col_ptr, growth, opt);
+    const idx = try out.toOwnedSlice(gpa);
+    assert(idx.len == tab.n_idx);
+    return .{ .idx = idx, .tab = tab };
+}
+
+/// Builds the tables for `lu`'s current factor into `out`, replacing its
+/// items (`n_idx` words, laid out as the returned `Tab` says) and growing
+/// its capacity with `gpa` only when they do not fit: a caller that keeps
+/// `out` across pivot epochs pays for its pages once (#219: 8.4M page
+/// faults over logic_bsim4_10k's 19 operating-point epochs, 12 s of
+/// system time). O(F + nnz(L+U)) time; the narrow columns' `dmap` is 2
+/// bytes per flop when every column has fewer than 65,535 slots, else 4.
+/// Asserts a successful `factor` and a tail of at most `tail_max` steps.
+/// `OutOfMemory` also means the tables passed u32 offsets; `out` is then
+/// empty but keeps its capacity. A later `factor` of `lu` (new
+/// `pattern_epoch`) makes them stale.
+pub fn buildInto(gpa: std.mem.Allocator, out: *std.ArrayList(u32), lu: *const SparseLu, col_ptr: []const u32, growth: f64, opt: Options) !klu.Tab {
     const lanes = klu.refactor_block;
     assert(lu.factored);
     assert(col_ptr.len == @as(usize, lu.n) + 1);
@@ -117,8 +133,9 @@ pub fn build(gpa: std.mem.Allocator, lu: *const SparseLu, col_ptr: []const u32, 
     var widest: u32 = 0;
     for (0..n) |k| widest = @max(widest, coff[k + 1] - coff[k]);
     const dmap16 = opt.dmap16 and widest < klu.narrow_discard;
-    var dmap: std.ArrayList(u32) = .empty;
-    errdefer dmap.deinit(gpa);
+    const dmap = out;
+    dmap.clearRetainingCapacity();
+    errdefer dmap.clearRetainingCapacity();
     try dmap.ensureTotalCapacityPrecise(gpa, if (dmap16) (flops + 1) / 2 else flops);
     // Entries written; the words behind them are `dmap`'s capacity.
     var nd: usize = 0;
@@ -337,10 +354,9 @@ pub fn build(gpa: std.mem.Allocator, lu: *const SparseLu, col_ptr: []const u32, 
     inline for (parts, 0..) |part, i| {
         if (i != 0) @memcpy(dmap.items[@field(tab, part[0])..][0..part[1].len], part[1]);
     }
-    const idx = try dmap.toOwnedSlice(gpa);
-    assert(idx.len == tab.n_idx);
+    assert(dmap.items.len == tab.n_idx);
     assert(tab.coff == dwords);
-    return .{ .idx = idx, .tab = tab };
+    return tab;
 }
 
 // ---- private ----

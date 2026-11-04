@@ -75,11 +75,15 @@ pub const GpuLu = struct {
     /// `ESPICE_GPU_LU=1`: skip the `min_per_col` bar.
     forced: bool = false,
     tab: K.Tab = undefined,
-    d_idx: Buffer = undefined,
-    d_val: Buffer = undefined,
-    d_sync: Buffer = undefined,
-    /// Host copy of the tables, kept for `ESPICE_GPU_LU_BENCH`'s host runs.
-    idx: []u32 = &.{},
+    /// The device tables. Grow-only across epochs, as `host`: each holds
+    /// at least the current epoch's bytes once one is admitted.
+    d_idx: Buffer = no_buffer,
+    d_val: Buffer = no_buffer,
+    d_sync: Buffer = no_buffer,
+    /// The host build of the tables (`K.buildInto`), kept across epochs so
+    /// each later epoch reuses its pages; `ESPICE_GPU_LU_BENCH`'s host runs
+    /// read the current epoch's from it.
+    host: std.ArrayList(u32) = .empty,
     flops: u64 = 0,
     /// Done-stamp value of the next launch; grows by one per call.
     stamp: u32 = 0,
@@ -95,8 +99,9 @@ pub const GpuLu = struct {
     /// `d_a`: `slv.vcopy` is stale while `slv.gen` still equals `gen`
     /// (`flushVcopy`).
     stale: ?struct { slv: *direct.Solver, gen: u32 } = null,
-    /// `load_ns`: host time building and uploading epoch tables.
-    st: struct { calls: u64 = 0, resident: u64 = 0, refactors: u64 = 0, peels: u64 = 0, epochs: u64 = 0, mismatches: u64 = 0, load_ns: u64 = 0 } = .{},
+    /// `load_ns`: host time building and uploading epoch tables, of which
+    /// `build_ns` building them.
+    st: struct { calls: u64 = 0, resident: u64 = 0, refactors: u64 = 0, peels: u64 = 0, epochs: u64 = 0, mismatches: u64 = 0, load_ns: u64 = 0, build_ns: u64 = 0 } = .{},
 
     const Res = struct { combine: Raw, scatter: Raw, pin_ov: []f64, d_ov: Buffer };
 
@@ -194,13 +199,14 @@ pub const GpuLu = struct {
     pub fn deinit(self: *Self) void {
         if (comptime backend == null) return;
         if (self.knobs.gpu_stats != .off or self.knobs.gpu_lu_check or self.benchOf() != null) std.debug.print(
-            "gpu-lu: calls={d} resident={d} refactors={d} peels={d} epochs={d} load_ms={d} F={d} check_mismatches={d}{s}\n",
-            .{ self.st.calls, self.st.resident, self.st.refactors, self.st.peels, self.st.epochs, self.st.load_ns / std.time.ns_per_ms, self.flops, self.st.mismatches, if (self.knobs.gpu_lu_check) "" else " (unchecked)" },
+            "gpu-lu: calls={d} resident={d} refactors={d} peels={d} epochs={d} load_ms={d} build_ms={d} F={d} check_mismatches={d}{s}\n",
+            .{ self.st.calls, self.st.resident, self.st.refactors, self.st.peels, self.st.epochs, self.st.load_ns / std.time.ns_per_ms, self.st.build_ns / std.time.ns_per_ms, self.flops, self.st.mismatches, if (self.knobs.gpu_lu_check) "" else " (unchecked)" },
         );
         if (self.benchOf()) |b| b.deinit(self);
         // The solver outlives this context; its copy must not stay stale.
         self.flushVcopy() catch {};
-        self.dropTables();
+        self.freeTables();
+        self.host.deinit(self.gpa);
         const k = &self.k_ref;
         if (self.res) |*r| {
             freePinnedF64(k, r.pin_ov);
@@ -214,16 +220,6 @@ pub const GpuLu = struct {
         self.stream.deinit();
         for ([_]*Raw{ &self.k_uh, &self.k_lp, &self.k_up, &self.k_lh, &self.k_ref16, &self.k_ref }) |kern| kern.deinit();
         self.gpa.destroy(self);
-    }
-
-    fn dropTables(self: *Self) void {
-        if (self.epoch != 0 and !self.declined) {
-            self.d_idx.free();
-            self.d_val.free();
-            self.d_sync.free();
-        }
-        self.gpa.free(self.idx);
-        self.idx = &.{};
     }
 
     /// `Circuit.deviceSolve`'s body: dx = -A^-1 rhs on the device. Null
@@ -473,7 +469,6 @@ pub const GpuLu = struct {
     /// under either `min_per_col` flops per column or `min_call_flops`.
     fn load(self: *Self, slv: *direct.Solver) !void {
         const lu = slv.sparse().?;
-        self.dropTables();
         self.epoch = lu.pattern_epoch;
         self.declined = true;
         self.dev_gen = null;
@@ -491,7 +486,9 @@ pub const GpuLu = struct {
         self.st.epochs += 1;
     }
 
-    /// `load`'s table build and upload; frees what it made on failure.
+    /// `load`'s table build and upload, into the grow-only `host` and
+    /// device buffers; on failure the epoch is declined and they keep
+    /// whatever capacity they have.
     fn upload(self: *Self, slv: *direct.Solver) !void {
         const lu = slv.sparse().?;
         // E2 calibration knobs: ESPICE_GPU_LU_TAIL=m fixes the solves' tail
@@ -499,19 +496,43 @@ pub const GpuLu = struct {
         // order.
         var opt: K.Options = .{ .gather = !self.knobs.gpu_lu_nogather };
         if (self.knobs.gpu_lu_tail) |m| opt.tail = lu.n - @min(lu.n, m);
-        var tb = try K.build(self.gpa, lu, slv.col_ptr, slv.params.refactor_growth_limit, opt);
-        defer tb.deinit(self.gpa);
-        self.tab = tb.tab;
-        self.d_idx = try self.k_ref.alloc(@as(usize, tb.tab.n_idx) * 4);
-        errdefer self.d_idx.free();
-        try self.d_idx.upload(tb.idx.ptr, @as(usize, tb.tab.n_idx) * 4);
-        self.d_val = try self.k_ref.alloc(@as(usize, tb.tab.n_val) * 8);
-        errdefer self.d_val.free();
-        self.d_sync = try self.k_ref.alloc(@as(usize, tb.tab.syncLen()) * 4);
-        errdefer self.d_sync.free();
-        try self.d_sync.fillAsync(0, @as(usize, tb.tab.syncLen()) * 4, &self.stream);
+        const t = nowNs();
+        const tab = try K.buildInto(self.gpa, &self.host, lu, slv.col_ptr, slv.params.refactor_growth_limit, opt);
+        self.st.build_ns += nowNs() - t;
+        assert(self.host.items.len == tab.n_idx);
+        self.tab = tab;
+        const sizes = [3]usize{ @as(usize, tab.n_idx) * 4, @as(usize, tab.n_val) * 8, @as(usize, tab.syncLen()) * 4 };
+        // A grow that fails beside the others' old capacity retries with
+        // all three freed, the room a fresh epoch always had.
+        self.fit(sizes) catch |e| switch (e) {
+            error.AllocFailed => {
+                self.freeTables();
+                try self.fit(sizes);
+            },
+            else => return e,
+        };
+        try self.d_idx.upload(self.host.items.ptr, sizes[0]);
+        try self.d_sync.fillAsync(0, sizes[2], &self.stream);
         self.stamp = 0;
-        if (self.benchOf() != null) self.idx = try self.gpa.dupe(u32, tb.idx);
+    }
+
+    /// Grows `d_idx`, `d_val` and `d_sync` to at least `bytes` each (at
+    /// least one), dropping a grown buffer's contents; keeps each that
+    /// already fits. A failed grow leaves that buffer freed.
+    fn fit(self: *Self, bytes: [3]usize) !void {
+        for ([_]*Buffer{ &self.d_idx, &self.d_val, &self.d_sync }, bytes) |buf, b| {
+            // A freed or never-made buffer has 0 bytes.
+            const want = @max(b, 1);
+            if (buf.bytes >= want) continue;
+            buf.free();
+            assert(buf.bytes == 0);
+            buf.* = try self.k_ref.alloc(want);
+            assert(buf.bytes >= want);
+        }
+    }
+
+    fn freeTables(self: *Self) void {
+        for ([_]*Buffer{ &self.d_idx, &self.d_val, &self.d_sync }) |b| b.free();
     }
 
     /// Whether an epoch of `flops` over `n` columns goes to the device. An
@@ -604,6 +625,8 @@ pub const GpuLu = struct {
 const Raw = if (backend) |be| gompute.RawByName(be) else void;
 const Buffer = if (backend != null) Raw.Buffer else void;
 const Stream = if (backend != null) Raw.Stream else void;
+/// A buffer with no device memory (0 bytes), which `free` leaves too.
+const no_buffer: Buffer = if (backend != null) .{} else {};
 
 /// `lu_device.zig`'s `gc_block`.
 const gc_block: u32 = 256;

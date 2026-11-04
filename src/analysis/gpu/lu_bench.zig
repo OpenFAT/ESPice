@@ -90,7 +90,7 @@ pub const Bench = struct {
         t1 = nowNs();
         try b.s[4].append(gpa, @as(f64, @floatFromInt(t1 - t0)) * 1e-3);
         slv.host_stale = false; // the refactor above brought lu to vcopy
-        const bufs: K.HostBufs = .{ .idx = lu_ctx.idx, .val = b.val, .a = vals, .rhs = rhs, .y = b.y, .dx = b.dx, .sync = b.sync };
+        const bufs: K.HostBufs = .{ .idx = lu_ctx.host.items, .val = b.val, .a = vals, .rhs = rhs, .y = b.y, .dx = b.dx, .sync = b.sync };
         for ([_]u32{ 1, b.threads }, 5..) |th, slot| {
             b.stamp += 1;
             t0 = nowNs();
@@ -103,7 +103,7 @@ pub const Bench = struct {
     fn report(b: *Bench, lu_ctx: *GpuLu) void {
         const names = [_][]const u8{ "dev_refactor", "dev_solves", "dev_call_wall", "host_refactor", "host_solve", "kern_1thr", "kern_nthr", "dev_lsolve" };
         const t = lu_ctx.tab;
-        const x = lu_ctx.idx;
+        const x = lu_ctx.host.items;
         var wide: u32 = 0;
         for (0..t.n) |k| wide += @intFromBool(x[t.wlev + k] != x[t.wlev + k + 1]);
         // Head span: per level, the longest row list.
