@@ -13,6 +13,7 @@
 //! - `InternPool.intern(p: *InternPool, gpa: Allocator, s: []const u8) Allocator.Error!Name`
 //! - `InternPool.reserve(p: *InternPool, gpa: Allocator, names: u32) Allocator.Error!void`
 //! - `InternPool.find(p: *const InternPool, s: []const u8) ?Name`
+//! - `InternPool.prefetch(p: *const InternPool, s: []const u8) void`
 //! - `InternPool.str(p: *const InternPool, n: Name) []const u8`
 //! - `Context.hash`, `Context.eql`, `Adapter.hash`, `Adapter.eql`: the set's hooks
 
@@ -99,6 +100,14 @@ pub const InternPool = struct {
         return n;
     }
 
+    /// Starts loading the set slot `intern(s)` probes first, so a caller
+    /// that knows its next names overlaps their cache misses with other
+    /// work. A hint: it changes nothing, and does nothing on an empty pool.
+    pub fn prefetch(p: *const InternPool, s: []const u8) void {
+        const meta = p.map.metadata orelse return;
+        @prefetch(&meta[p.homeSlot(s)], .{});
+    }
+
     /// Returns the bytes of `n`. Valid until the next `intern` that adds a
     /// name. Asserts that `n` is an id this pool handed out.
     pub fn str(p: *const InternPool, n: Name) []const u8 {
@@ -110,6 +119,14 @@ pub const InternPool = struct {
     }
 
     // ---- private ----
+
+    /// The slot the std set probes first for `s`: `hash & (capacity - 1)`
+    /// (std/hash_map.zig). Asserts the set has slots.
+    fn homeSlot(p: *const InternPool, s: []const u8) usize {
+        const cap = p.map.capacity();
+        assert(std.math.isPowerOfTwo(cap));
+        return @as(usize, @truncate(std.hash_map.hashString(s))) & (cap - 1);
+    }
 
     /// Hashes a stored name through the offsets, so a key is just its id.
     const Context = struct {
@@ -210,4 +227,22 @@ test "reserve sizes every column, so interning that much never reallocates" {
     try std.testing.expectEqual(bytes, p.bytes.items.ptr);
     try std.testing.expectEqual(offs, p.offs.items.ptr);
     try std.testing.expectEqualStrings("n07", p.str(p.find("n07").?));
+}
+
+test "prefetch names the slot a new name lands in" {
+    // Oracle: the std set's own placement. A name interned into an empty set
+    // takes the slot it probes first, so that slot's metadata is in use.
+    const gpa = std.testing.allocator;
+    for (0..200) |i| {
+        var p: InternPool = .{};
+        defer p.deinit(gpa);
+        p.prefetch("x"); // no slots yet: nothing to load
+        try p.reserve(gpa, 64);
+        var buf: [24]u8 = undefined;
+        const s = try std.fmt.bufPrint(&buf, "x{d}.n{d}", .{ i, i * 7 });
+        p.prefetch(s);
+        try std.testing.expectEqual(@as(u32, 0), p.map.count());
+        _ = try p.intern(gpa, s);
+        try std.testing.expect(p.map.metadata.?[p.homeSlot(s)].isUsed());
+    }
 }

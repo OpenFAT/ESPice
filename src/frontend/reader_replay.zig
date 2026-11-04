@@ -30,6 +30,15 @@ const ParseOptions = reader_frame.ParseOptions;
 const scan_threads_max = reader_frame.scan_threads_max;
 const bTransformationWanted = card_table.bTransformationWanted;
 
+comptime {
+    // `scan` lays a Replay, its nodes and its fields end to end in one
+    // block aligned for a Replay: each part starts aligned for its type.
+    std.debug.assert(@alignOf([]const u8) <= @alignOf(Replay));
+    std.debug.assert(@alignOf(ReplayField) <= @alignOf(Replay));
+    std.debug.assert(@sizeOf(Replay) % @alignOf([]const u8) == 0);
+    std.debug.assert(@sizeOf([]const u8) % @alignOf(ReplayField) == 0);
+}
+
 /// The stage's `Reader` methods over dialect syntax `S`; `Reader(S)`
 /// aliases each one as its own decl.
 pub fn Methods(comptime S: type) type {
@@ -183,12 +192,18 @@ pub fn Methods(comptime S: type) type {
             const model = r.cardNodes(a, &f, letter, false, nodes) catch return null;
             if (model) |m| if (r.operatorLed(m)) return null;
             readFields(true, r, a, line, letter, &f, {}, fields, {}) catch return null;
-            const rp = a.create(Replay) catch return null;
-            rp.* = .{
-                .nodes = a.dupe([]const u8, nodes.items) catch return null,
-                .model = model,
-                .fields = a.dupe(ReplayField, fields.items) catch return null,
-            };
+            // One block holds the record and both lists: each arena
+            // allocation costs two locked instructions (Zig 0.18's arena is
+            // thread-safe), and three per card were most of a scan thread.
+            const node_bytes = nodes.items.len * @sizeOf([]const u8);
+            const field_bytes = fields.items.len * @sizeOf(ReplayField);
+            const block = a.alignedAlloc(u8, .of(Replay), @sizeOf(Replay) + node_bytes + field_bytes) catch return null;
+            const node_copy: [][]const u8 = @alignCast(std.mem.bytesAsSlice([]const u8, block[@sizeOf(Replay)..][0..node_bytes]));
+            const field_copy: []ReplayField = @alignCast(std.mem.bytesAsSlice(ReplayField, block[@sizeOf(Replay) + node_bytes ..]));
+            @memcpy(node_copy, nodes.items);
+            @memcpy(field_copy, fields.items);
+            const rp: *Replay = @ptrCast(block.ptr);
+            rp.* = .{ .nodes = node_copy, .model = model, .fields = field_copy };
             return rp;
         }
 

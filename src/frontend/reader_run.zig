@@ -44,6 +44,10 @@ const seedOption = card_table.seedOption;
 const analysisOf = card_table.analysisOf;
 const setsKey = card_table.setsKey;
 
+/// Cards between a scanned card's name prefetch and its read: far enough
+/// that a DRAM miss lands before the read, near enough to stay in cache.
+const prefetch_ahead = 8;
+
 /// The stage's `Reader` methods over dialect syntax `S`; `Reader(S)`
 /// aliases each one as its own decl.
 pub fn Methods(comptime S: type) type {
@@ -192,7 +196,20 @@ pub fn Methods(comptime S: type) type {
             var scan_arenas: [scan_threads_max]std.heap.ArenaAllocator = undefined;
             const scanned = try r.scanCards(top_devices.items, opts, &scan_arenas);
             defer for (scan_arenas[0..scanned]) |s| s.deinit();
-            for (top_devices.items) |i| try r.readDevice(r.lines.items[i], r.kindOf(i), &top, if (scanned > 0) i else null);
+            for (top_devices.items, 0..) |i, k| {
+                // A new name's intern misses the pool's set: the names of
+                // the card `prefetch_ahead` on (its head and scanned nodes)
+                // load while this one is read.
+                if (scanned > 0 and k + prefetch_ahead < top_devices.items.len) {
+                    const ahead = top_devices.items[k + prefetch_ahead];
+                    if (r.replays[ahead]) |rp| {
+                        var f = S.Split.init(r.lines.items[ahead]);
+                        if (f.next()) |head| r.pool.prefetch(head);
+                        for (rp.nodes) |n| r.pool.prefetch(n);
+                    }
+                }
+                try r.readDevice(r.lines.items[i], r.kindOf(i), &top, if (scanned > 0) i else null);
+            }
             // The passes below read no one card.
             r.card = "";
             try r.shunts();
