@@ -858,6 +858,7 @@ PASS	conformance/tests/netlist/tran/bench_tran_sffm_source.sp
 PASS	conformance/tests/netlist/tran/cpl_tran_even_mode.sp
 PASS	conformance/tests/netlist/tran/cpl_tran_history_past_2048.sp
 PASS	conformance/tests/netlist/tran/cpl_tran_odd_mode.sp
+PASS	conformance/tests/netlist/tran/cpl_tran_sine_past_2048.sp
 PASS	conformance/tests/netlist/tran/dc_only.sp
 PASS	conformance/tests/netlist/tran/device_coupled_tlines.sp
 PASS	conformance/tests/netlist/tran/device_cswitch.sp
@@ -889,6 +890,7 @@ PASS	conformance/tests/netlist/tran/island_series_short.sp
 PASS	conformance/tests/netlist/tran/jitter_sffm.sp
 PASS	conformance/tests/netlist/tran/lc_energy_gear.sp
 PASS	conformance/tests/netlist/tran/lc_energy_trap.sp
+PASS	conformance/tests/netlist/tran/ltra_tran_edge_past_8192.sp
 PASS	conformance/tests/netlist/tran/ltra_tran_long_run_past_8192.sp
 PASS	conformance/tests/netlist/tran/ltra_tran_mismatched_load.sp
 PASS	conformance/tests/netlist/tran/ltra_tran_rejected_step_retry.sp
@@ -924,6 +926,7 @@ PASS	conformance/tests/netlist/tran/tstart_tmax_ngspice.sp
 PASS	conformance/tests/netlist/tran/txl_tran_long_run_past_2048.sp
 PASS	conformance/tests/netlist/tran/txl_tran_matched_step.sp
 PASS	conformance/tests/netlist/tran/txl_tran_mismatched_load.sp
+PASS	conformance/tests/netlist/tran/txl_tran_sine_past_2048.sp
 PASS	conformance/tests/netlist/tran/txl_wide_batch_1000.sp
 PASS	conformance/tests/netlist/tran/uic_t0_row.sp
 PASS	conformance/tests/netlist/tran/zero_abstol_vntol.sp
