@@ -39,9 +39,12 @@ const devices = @import("devices.zig");
 const context = @import("context.zig");
 const ctx_cost = @import("context_cost.zig");
 const gpu_lu = @import("lu.zig");
+const ctx_batch = @import("context_batch.zig");
 
 const backend = devices.backend;
 const nowNs = context.nowNs;
+const Raw = ctx_batch.Raw;
+const Buffer = ctx_batch.Buffer;
 
 pub const Error = error{
     /// This build carries no kernel images: there is nothing to calibrate.
@@ -154,7 +157,7 @@ pub fn device() !Device {
     var alpha: f64 = 0;
     const args = [_]gompute.interface.Arg{ gompute.interface.arg(&n), gompute.interface.arg(&alpha), d.argPtr(), d.argPtr(), d.argPtr() };
     var launch = struct {
-        k: *@TypeOf(k),
+        k: *Raw,
         args: []const gompute.interface.Arg,
         failed: bool = false,
         fn run(s: *@This()) void {
@@ -176,7 +179,7 @@ pub fn device() !Device {
         var ts: [sizes.len]f64 = undefined;
         for (sizes, &ts) |size, *t| {
             var copy = struct {
-                d: *@TypeOf(d),
+                d: *Buffer,
                 pin: []u8,
                 size: usize,
                 up: bool,
@@ -194,9 +197,9 @@ pub fn device() !Device {
         f.* = leastSquares(&sizes, &ts);
     }
     var dd = struct {
-        k: *@TypeOf(k),
-        dst: *@TypeOf(d),
-        src: *@TypeOf(d),
+        k: *Raw,
+        dst: *Buffer,
+        src: *Buffer,
         failed: bool = false,
         fn run(s: *@This()) void {
             s.dst.copyFrom(s.src, 0, 0, big) catch {
@@ -240,8 +243,8 @@ pub fn sample(gpa: Allocator, io: std.Io, template: *const Prepared, knobs: Knob
     assert(lanes >= 1);
     var c = try Circuit.instantiate(template, gpa);
     defer c.deinit();
-    const b = for (c.batches) |b| {
-        if (b.hooks.gpu_payload != null) break b;
+    const b = for (c.batches) |each| {
+        if (each.hooks.gpu_payload != null) break each;
     } else return Error.CircuitNotEligible;
     const p = b.hooks.gpu_payload.?(b.ctx);
     const image = ctx_cost.imageOf(p.kernel) orelse return Error.CircuitNotEligible;
@@ -320,7 +323,7 @@ pub fn lu(gpa: Allocator, grid: Grid, knobs: Knobs) !machine.Lu {
     if (comptime backend == null) return Error.NoGpuArtifacts;
     assert(grid.dims >= 2 and grid.dims <= 3);
     assert(grid.side >= 2);
-    const n: u32 = std.math.pow(u32, grid.side, grid.dims);
+    const n: u32 = std.math.pow(u32, grid.side, @as(u32, grid.dims));
     const col_ptr = try gpa.alloc(u32, n + 1);
     defer gpa.free(col_ptr);
     const row_idx = try gpa.alloc(u32, n * (2 * @as(u32, grid.dims) + 1));
@@ -466,7 +469,7 @@ fn setAffinity(set: linux.cpu_set_t) void {
 /// returns its entry count.
 fn laplacian(grid: Grid, col_ptr: []u32, row_idx: []u32) u32 {
     const n: u32 = @intCast(col_ptr.len - 1);
-    var strides: [3]u32 = .{ 1, grid.side, grid.side * grid.side };
+    const strides: [3]u32 = .{ 1, grid.side, grid.side * grid.side };
     var q: u32 = 0;
     for (0..n) |jj| {
         const j: u32 = @intCast(jj);
