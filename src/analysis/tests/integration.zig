@@ -11,6 +11,7 @@ const converger = @import("solver").converger;
 const D = @import("limiter_device");
 const Crawl = @import("crawl_device");
 const models = @import("models");
+const contract = @import("contract");
 const t = std.testing;
 const GROUND = analysis.GROUND;
 
@@ -300,4 +301,64 @@ test "OPtran: the published x satisfies KCL at the device state the operating po
     ckt.clearLimits();
     ckt.eval(x, 0);
     for (ckt.rhs[0..ckt.n]) |ri| try t.expect(@abs(ri) <= 1e-9);
+}
+
+test "Newton publishes $simparam(\"iteration\") 1, 2, ... and the step's dt to every limit call" {
+    // Oracle: VAMS-2023 §9.15, "iteration" counts the Newton iterates of
+    // the current solve from 1, so limit call k reads k. The device's root
+    // sits 5 V up and its limit admits 1 V per iterate, so a solve from 0 V
+    // takes at least five limit calls, each at the dt its `setSimState`
+    // published. Both publish routes must give the same sequence: the store
+    // at `Batch.sim_offset` and, with that offset cleared, the old route,
+    // `Hooks.set_sim_state`.
+    const Rec = struct {
+        pub const vera_version = contract.vera_version;
+        pub const U = enum(u8) { p, n };
+        pub const num_ports: usize = 2;
+        pub const Model = struct {};
+        pub const Instance = struct {};
+        var seen: [32]contract.SimState = undefined;
+        var len: usize = 0;
+        pub fn eval(comptime S: type, xv: *const [2]S.V, _: *const Model, _: *const Instance, _: contract.SimState) contract.Rows(@This(), S) {
+            const x = contract.probes(@This(), S, xv);
+            const current = x[0].sub(x[1]).sub(S.con(5));
+            return contract.rows(@This(), S, .{ current, current.neg() });
+        }
+        pub fn limit(comptime _: type, _: *const Model, _: *const Instance, cur: [2]f64, old: [2]f64, sim: contract.SimState) contract.LimitResult(2) {
+            seen[len] = sim;
+            len += 1;
+            return .{ .x = .{ @min(cur[0], old[0] + 1), cur[1] }, .converged = cur[0] <= old[0] + 1 };
+        }
+    };
+    var lib = try Library.init(t.allocator);
+    defer lib.deinit();
+    var prepared = try single(Rec, "iteration_recorder", &lib);
+    defer prepared.deinit();
+    var ckt = try analysis.Circuit.instantiate(&prepared, t.allocator);
+    defer ckt.deinit();
+    try ckt.computeBaseline();
+    var ws = try converger.Workspace.init(t.allocator, ckt.n, ckt.col_ptr, ckt.row_idx, ckt.bbd, .{}, .{});
+    defer ws.deinit(t.allocator);
+    const x = try t.allocator.alloc(f64, ckt.n);
+    defer t.allocator.free(x);
+    try t.expectEqual(@as(usize, 1), ckt.batches.len);
+    try t.expect(ckt.batches[0].sim_offset != @TypeOf(ckt.batches[0]).sim_none);
+    var calls: ?usize = null;
+    for ([_]f64{ 1, 0.5, 0.25 }) |dt| {
+        if (dt == 0.25) ckt.batches[0].sim_offset = @TypeOf(ckt.batches[0]).sim_none;
+        @memset(x, 0);
+        Rec.len = 0;
+        // Else the limiter steps from the last solve's root, not from 0 V.
+        ckt.clearLimits();
+        ckt.setSimState(.{ .t = dt, .dt = dt, .kind = .tran });
+        const r = try converger.newton(&ckt, &ws, x, dt, .{ .gmin = 0, .max_iter = 100 }, analysis.EvalHook{});
+        try t.expect(r.converged);
+        try t.expect(Rec.len >= 5);
+        try t.expectEqual(calls orelse Rec.len, Rec.len);
+        calls = Rec.len;
+        for (Rec.seen[0..Rec.len], 1..) |sim, k| {
+            try t.expectEqual(dt, sim.dt);
+            try t.expectEqual(k, sim.iteration);
+        }
+    }
 }
