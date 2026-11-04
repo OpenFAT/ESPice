@@ -417,14 +417,15 @@ comptime {
 /// `cuda`/`hip` does unless `ESPICE_LANES=0`; `auto` only on a device whose
 /// FP64 rate is at least a quarter of FP32 (datacenter parts report 2; the
 /// RTX 4060 Laptop 64, where E1 measured the GPU at 1.4-2x the 24-core CPU,
-/// so `auto` keeps the CPU there).
+/// so `auto` keeps the CPU there). The rate is the calibrated machine's
+/// (`config.machine`), so the policy never starts the driver; no machine
+/// keeps the CPU.
 pub fn policy(config: anytype) bool {
     if (config.knobs.lanes) |on| if (!on) return false;
     return switch (config.backend) {
         .cpu => false,
         .cuda, .hip => available,
-        // An unknown ratio (HIP, no driver) keeps the CPU.
-        .auto => available and (lanes_batch.fp64Ratio() orelse return false) <= 4,
+        .auto => available and (config.machine orelse return false).c.fp64_ratio <= 4,
     };
 }
 
@@ -451,8 +452,8 @@ pub fn share(cpus: usize) f64 {
 pub fn staticPolicy(config: anytype, cpus: usize) bool {
     if (@import("builtin").is_test) return test_access.static;
     if (config.backend != .auto) return true;
-    const ratio = lanes_batch.fp64Ratio() orelse return false;
-    return 13.0 * 64.0 / @as(f64, @floatFromInt(@max(ratio, 1))) > @as(f64, @floatFromInt(@max(cpus, 1)));
+    const ratio = (config.machine orelse return false).c.fp64_ratio;
+    return 13.0 * 64.0 / @max(ratio, 1) > @as(f64, @floatFromInt(@max(cpus, 1)));
 }
 
 /// Why `ckt`'s pattern cannot solve operating points or `.dc` points as

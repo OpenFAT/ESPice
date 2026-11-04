@@ -6,7 +6,7 @@
 //! Cites #13 (diagnostics channel), #138, #211; dev/analysis/refactoring.md.
 //!
 //! Contents:
-//! - `pub const Config = struct` (`Backend`)
+//! - `pub const Config = struct` (`Backend`, `gpuPriced`)
 //! - `pub const ThreadPool = struct` (`per_query`, `init`, `take`, `give`)
 //! - `pub const lane_width`
 //! - `pub fn validateBackend(config: Config) error{GpuBackendUnavailable, InvalidThreadCount}!void`
@@ -20,6 +20,7 @@ const assert = std.debug.assert;
 const requests = @import("core").query;
 const types = @import("types.zig");
 const gpu = @import("gpu/context.zig");
+const Machine = @import("machine.zig").Machine;
 
 /// Per-problem execution settings, shared by every query.
 pub const Config = struct {
@@ -76,6 +77,11 @@ pub const Config = struct {
     /// Operating points and `.dc` sweeps batch as GPU lanes too (06 6.9);
     /// the facade sets it from `gpu_lanes.staticPolicy` under `gpu_lanes`.
     gpu_static: bool = false,
+    /// This machine's calibration (`machine.zig`), which `auto` prices the
+    /// GPU with; null keeps every part of an `auto` query on the CPU and
+    /// the driver unloaded. Read-only, shared by every query; the facade
+    /// owns it. Explicit `cuda`/`hip` runs never place by it.
+    machine: ?*const Machine = null,
 
     /// The facade's record of whether the GPU driver is up, shared by every
     /// query of the Problem; null prices the driver setup in every query.
@@ -84,6 +90,14 @@ pub const Config = struct {
     /// Each accepted point's lines arrive in one `writeAll` from the thread
     /// running the query, so concurrent queries write concurrently.
     display: ?*std.Io.Writer = null,
+
+    /// Whether a query may place any part on the GPU at all: the user
+    /// named it, or `auto` has a calibrated `machine` to price it with.
+    /// False keeps the driver unloaded (price plan sec. 4).
+    pub fn gpuPriced(config: Config) bool {
+        if (config.backend == .cpu) return false;
+        return config.gpu_explicit or config.backend != .auto or config.machine != null;
+    }
 };
 
 /// Threads a Problem lends its queries beyond each worker's own. A query
