@@ -1679,6 +1679,41 @@ fn checkBypassReplay(tied: bool) !void {
     try std.testing.expectEqualSlices(f64, &plain0.g, &got.g);
     try std.testing.expectEqualSlices(f64, &plain0.c, &got.c);
     try std.testing.expectEqualSlices(f64, &plain1.q, &got.q);
+    // ParEval's twin (`Hooks.stage`): the same recording and replay, staged
+    // per tape position and summed into each cell in tape order (ParEval's
+    // reduce), is the serial replay bit for bit. While the serial recording
+    // credited a tied gate's source residual to the gate row and the staged
+    // one to the source row, tran/device_mos6_inverter differed between 1
+    // and 2 device threads.
+    const tapes = b.hooks.scatter_tapes(b.ctx);
+    const ns = tapes.slots.len;
+    const nr = tapes.rows.len;
+    const stage = try a.alloc(f64, 2 * ns + 2 * nr);
+    defer a.free(stage);
+    const sg = stage[0..ns];
+    const sc = stage[ns..][0..ns];
+    const sr = stage[2 * ns ..][0..nr];
+    const sq = stage[2 * ns + nr ..][0..nr];
+    var staged: Planes = .{};
+    for ([_]*const [m]f64{ &x0, &x1 }) |xs| {
+        @memset(stage, -0.0);
+        b.hooks.stage(b.ctx, &.{ .g_vals = sg, .c_vals = sc, .rhs = sr, .q_vec = sq }, 0, 1, xs, 0, .newton);
+        staged = .{};
+        for (tapes.slots, sg, sc) |slot, gv, cv| {
+            staged.g[slot] += gv;
+            staged.c[slot] += cv;
+        }
+        for (tapes.rows, sr, sq) |row, rv, qv| {
+            staged.rhs[row] += rv;
+            staged.q[row] += qv;
+        }
+    }
+    // The staged planes key their own recording: one more miss, one more hit.
+    try std.testing.expectEqual(@as(usize, 2), store.bypass.?.hits.load(.monotonic));
+    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&got.g), std.mem.asBytes(&staged.g));
+    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&got.c), std.mem.asBytes(&staged.c));
+    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&got.rhs), std.mem.asBytes(&staged.rhs));
+    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&got.q), std.mem.asBytes(&staged.q));
     // Row r moves by sum_c G0[r][c] (x1[c] - x0[c]); slot c * m + r.
     var moved: [m]f64 = @splat(0);
     var largest: f64 = 0;

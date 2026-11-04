@@ -1423,6 +1423,9 @@ test "same deck, same bytes: run twice, any solver_threads, any device_threads" 
         "tests/conformance/tests/netlist/stress/scaling_inverter_chain_256.sp",
         "tests/conformance/tests/netlist/stress/sweep_opamp_wl_200.sp",
         "tests/conformance/tests/netlist/stress/vacask_ring.sp",
+        // mos6 with gate, source and bulk tied (MP11-MP13): 1 device
+        // thread differed from 2..8 in i(vdd).
+        "tests/conformance/tests/netlist/tran/device_mos6_inverter.sp",
     };
     try t.expectEqual(@as(c_int, 0), setenv("ESPICE_LU_PAR", "1", 1));
     defer _ = unsetenv("ESPICE_LU_PAR");
