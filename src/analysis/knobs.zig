@@ -33,6 +33,13 @@ pub const Knobs = struct {
     /// lane (which never bypasses) equals its scalar run within tolerance,
     /// not bitwise. Off only in tests whose oracle is the plain scalar run.
     bypass: bool = true,
+    /// `ESPICE_PAREVAL_SPIN`: ParEval's waiting lanes spin as before parking
+    /// existed on the barriers (4096 pauses and 64 yields on the doorbell,
+    /// barriers that never park), for A/B runs (`par_eval.Options`).
+    pareval_spin: bool = false,
+    /// `ESPICE_PAREVAL_NU_WEIGHT`: every model weighs `16 * n_u^2`, mos1
+    /// included, for A/B runs of the lane gate (`par_eval.instanceWeight`).
+    pareval_nu_weight: bool = false,
     /// `ZP_TRAN_LTE_TRACE`: diagnose the first 16 rejected LTE estimates
     /// from captured history, without evaluating devices or changing steps.
     tran_lte_trace: bool = false,

@@ -214,7 +214,7 @@ test "threaded stamps equal serial" {
     // 0 asks for one lane; 24 is more lanes than the 19 instances. Every
     // pass twice, so a position left stale by the last pass would show.
     for ([_]u32{ 0, 1, 2, 3, 5, 8, 24 }) |lanes| {
-        var par = try ParEval.init(t.allocator, t.io, ckt.batches, nnz, n, ckt.has_charge, lanes);
+        var par = try ParEval.init(t.allocator, t.io, ckt.batches, nnz, n, ckt.has_charge, lanes, .{});
         defer par.deinit();
         ckt.par_eval = &par;
         defer ckt.par_eval = null;
@@ -394,7 +394,7 @@ fn setUpEverything(gpa: std.mem.Allocator, prepared: *const Prepared) !void {
     _ = try ckt.collectParams();
     const saved = try ckt.saveState(gpa);
     saved.deinit(gpa);
-    var par = try ParEval.init(gpa, t.io, ckt.batches, ckt.nnz, ckt.n, ckt.has_charge, 3);
+    var par = try ParEval.init(gpa, t.io, ckt.batches, ckt.nnz, ckt.n, ckt.has_charge, 3, .{});
     par.deinit();
     var copy = try types.Circuit.fromSnapshot(prepared, &ckt, gpa);
     copy.deinit();

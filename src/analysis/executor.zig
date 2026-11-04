@@ -362,7 +362,10 @@ pub const Executor = struct {
         defer if (self.config.thread_pool) |pool| pool.give(borrowed);
         var par: ?ParEval = null;
         if (eval_lanes > 1) {
-            par = try ParEval.init(self.allocator, self.io, self.circuit.batches, self.circuit.nnz, self.circuit.n, self.circuit.has_charge, eval_lanes);
+            par = try ParEval.init(self.allocator, self.io, self.circuit.batches, self.circuit.nnz, self.circuit.n, self.circuit.has_charge, eval_lanes, .{
+                .spin = self.circuit.knobs.pareval_spin,
+                .nu_weight = self.circuit.knobs.pareval_nu_weight,
+            });
             self.circuit.par_eval = &par.?;
         }
         defer {
@@ -608,7 +611,7 @@ pub fn lanePlan(weight: u64, nnz: u32) LanePlan {
 /// `ckt`'s device weight: `par_eval.instanceWeight` over its instances.
 fn deviceWeight(ckt: *const types.Circuit) u64 {
     var weight: u64 = 0;
-    for (ckt.batches) |b| weight += @as(u64, b.count) * par_eval.instanceWeight(b);
+    for (ckt.batches) |b| weight += @as(u64, b.count) * par_eval.instanceWeight(b, ckt.knobs.pareval_nu_weight);
     return weight;
 }
 
