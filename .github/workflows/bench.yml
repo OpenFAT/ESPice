@@ -1,7 +1,8 @@
 name: bench
 
 # On every release tag: time the fixture corpus in ESPice, ngspice and VACASK
-# (`zig build bench`) and attach the charts, summary and report to the release.
+# (`zig build bench`), attach the charts, summary and report to the release, and
+# append the run to the performance history (tools/bench_history.py).
 # ponytail: a shared 4-vCPU hosted runner, so absolute times are noisy; the
 # speedups are ratios of runs on the same machine. Self-host when they wobble.
 on:
@@ -20,6 +21,8 @@ jobs:
   corpus:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -35,33 +38,58 @@ jobs:
           name: omarsiwy
           skipPush: true
 
+      # The graph and history scripts on a fixture, before an hour of benching.
+      - name: Test the plot scripts
+        run: nix develop .#benchmarking -c python3 -m unittest discover -s tools -p 'test_bench*.py'
+
       # The shipped build (release.yml's kernels) in the benchmarking shell,
-      # GPU toolchain included; the runner has no GPU, so decks run on the CPU.
+      # GPU toolchain included; the runner has no GPU, so the one ESPice column is
+      # the CPU backend. A GPU machine adds `--espice espice-cuda=--backend=cuda`.
       - name: Bench
         run: >
           nix develop .#benchmarking -c zig build bench
           -Doptimize=ReleaseFast -Dcuda-arch=sm_75 -Dhip-arch=gfx1100
-          -- --iters 3
+          -- --iters 3 --espice espice-cpu=--backend=cpu
 
       # Generated files stay off main: the charts ship as a release asset (or a
       # run artifact for a manual run):
       #   gh release download vX -p bench-corpus.tar.gz && tar xzf bench-corpus.tar.gz
+      # The dashed GPU lines are a model fed by docs/performance/gpu-phases.tsv,
+      # measured on a GPU machine with tools/gpu_phases.py and committed by a PR.
       - name: Plot
         run: |
           out=bench-corpus
           rm -rf "$out"
+          phases=()
+          if [ -f docs/performance/gpu-phases.tsv ]; then phases=(--gpu-phases docs/performance/gpu-phases.tsv); fi
           nix develop .#benchmarking -c python3 tools/bench_plot.py \
-            zig-out/benchmark-results.md tests/conformance/tests/netlist "$out"
+            zig-out/benchmark-results.md tests/conformance/tests/netlist "$out" "${phases[@]}"
           cp zig-out/benchmark-results.md "$out/results.md"
-          tar czf bench-corpus.tar.gz "$out"
+
+      # history.tsv lives on the rolling `bench-history` release, never on main.
+      # A missing release or asset starts a new history; any other download
+      # failure fails the step, so a re-upload never replaces it with one row.
+      - name: History
+        run: |
+          names=$(gh release view bench-history --json assets -q '.assets[].name' 2>gh.err) || grep -q "release not found" gh.err
+          if grep -qx history.tsv <<<"$names"; then
+            gh release download bench-history -p history.tsv --clobber
+          fi
+          nix develop .#benchmarking -c python3 tools/bench_history.py append zig-out/benchmark-results.md history.tsv
+          nix develop .#benchmarking -c python3 tools/bench_history.py plot history.tsv bench-corpus
+          cp history.tsv bench-corpus/
+          tar czf bench-corpus.tar.gz bench-corpus
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: bench-corpus
           path: bench-corpus.tar.gz
 
-      - name: Attach to the release
+      - name: Attach to the release, update the history
         if: github.ref_type == 'tag'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$GITHUB_REF_NAME" bench-corpus.tar.gz --clobber
+        run: |
+          gh release upload "$GITHUB_REF_NAME" bench-corpus.tar.gz --clobber
+          gh release view bench-history >/dev/null 2>&1 || gh release create bench-history --prerelease \
+            --target "$GITHUB_SHA" --title "Benchmark history" \
+            --notes "Rolling: history.tsv and its charts, appended by .github/workflows/bench.yml on each v* tag. Not a release."
+          gh release upload bench-history history.tsv bench-corpus/history-performance.png bench-corpus/history-size.png --clobber

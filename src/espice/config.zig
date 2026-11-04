@@ -17,6 +17,7 @@
 //! - `pub fn toolchainFromEnv(arena: Allocator, given: HdlToolchain) Allocator.Error!HdlToolchain`
 //! - `pub fn dupeAll(arena: Allocator, items: []const []const u8) Allocator.Error![]const []const u8`
 //! - `pub fn parseFromEnv() frontend.ParseOptions`
+//! - `pub fn loadMachine(arena: Allocator) ?analysis.Machine`
 //! - `pub fn likelyGpu(options: Options) bool`
 //! - `pub fn raiseJitCache() void`
 
@@ -103,6 +104,8 @@ pub const HdlToolchain = frontend.Library.Toolchain;
 /// null unless `Options.auto_threads` made one.
 pub const Shared = struct {
     gpu_driver: *analysis.GpuDriver,
+    /// `loadMachine`'s result; null keeps `auto` on the CPU.
+    machine: ?*const analysis.Machine,
     threads: *analysis.Threads,
     ws_pool: *analysis.WsPool,
     thread_pool: ?*analysis.ThreadPool,
@@ -116,8 +119,8 @@ const likely_gpu_bytes = 1 << 20;
 
 /// Returns the config every session of the Problem runs with: `options`'
 /// backend with the environment's knobs, the shared state, and the GPU lane
-/// policy. Under a bare `auto` the lane policy asks the driver for the FP64
-/// rate, a driver start (~250 ms), so only a deck that can batch pays it.
+/// policy. Under `auto` the lane policy reads the card's FP64 rate from
+/// `shared.machine`, never the driver.
 /// A deck asking for `--emir` runs on the CPU; `error.EmirNeedsCpu` when the
 /// caller asked for a GPU explicitly.
 pub fn execution(options: Options, prepared: *const frontend.Prepared, shared: Shared) error{EmirNeedsCpu}!analysis.ExecutionConfig {
@@ -132,6 +135,7 @@ pub fn execution(options: Options, prepared: *const frontend.Prepared, shared: S
     // A test whose oracle is the plain scalar run turns the bypass off.
     config.knobs.bypass = options.backend.knobs.bypass;
     config.gpu_driver = shared.gpu_driver;
+    config.machine = shared.machine;
     config.threads = shared.threads;
     config.ws_pool = shared.ws_pool;
     if (shared.thread_pool) |pool| config.thread_pool = pool;
@@ -261,6 +265,22 @@ pub fn parseFromEnv() frontend.ParseOptions {
 /// size where `auto`'s cost model starts admitting post-layout decks.
 // ponytail: the top file's size only; a small deck that includes a large
 // netlist starts the driver with its first query, as before 05 5.12.
+/// This machine's calibration (`analysis.machine`): the file under
+/// `$XDG_CACHE_HOME` (else `$HOME/.cache`), checked against the identity
+/// sysfs and procfs show, without the driver. Null in a build without
+/// kernels, and when the file is missing or stale, which keeps `auto` on
+/// the CPU and prints `noteUncalibrated`'s note once per process. The
+/// model rows live in `arena`.
+pub fn loadMachine(arena: Allocator) ?analysis.Machine {
+    const m = analysis.machine;
+    const v = m.vendor orelse return null;
+    const live = m.identity("", v);
+    return m.load(arena, .{ .xdg_cache_home = env("XDG_CACHE_HOME"), .home = env("HOME") }, &live) orelse {
+        m.noteUncalibrated(&live);
+        return null;
+    };
+}
+
 pub fn likelyGpu(options: Options) bool {
     if (options.backend.gpu_explicit or options.backend.backend != .auto) return true;
     const path = switch (options.source) {

@@ -634,3 +634,28 @@ const old_newton = struct {
         return result;
     }
 };
+
+// ---- Circuit's sim-state broadcast (`Batch.publishSim`): a store at the
+// batch's `sim_offset`, keeping its `analog_initial`, instead of a
+// `set_sim_state` call; a batch without one still calls. Against the same
+// loop written out with the branch, the address and the field copy. ----
+
+const PubBatch = eval.Batch;
+const PubSim = @FieldType(ResBatch, "sim");
+
+export fn gen_publish_sim(batches: [*]const PubBatch, n: u32, sim: *const PubSim) void {
+    for (batches[0..n]) |b| b.publishSim(sim.*);
+}
+
+export fn hand_publish_sim(batches: [*]const PubBatch, n: u32, sim: *const PubSim) void {
+    for (batches[0..n]) |b| {
+        if (b.sim_offset == std.math.maxInt(u16)) {
+            b.hooks.set_sim_state(b.ctx, sim.*);
+        } else {
+            const cell: *PubSim = @ptrCast(@alignCast(@as([*]u8, @ptrCast(b.ctx)) + b.sim_offset));
+            const ai = cell.analog_initial;
+            cell.* = sim.*;
+            cell.analog_initial = ai;
+        }
+    }
+}

@@ -354,9 +354,10 @@ fn acceptStates(self: *Circuit, x: []const f64) ?f64 {
     return min_reject;
 }
 
-/// Copies `sim` into every batch: one store each.
+/// Copies `sim` into every batch (`Batch.publishSim`): a store each, a
+/// call for a bypassable type.
 fn publishSim(self: *const Circuit) void {
-    for (self.batches) |b| b.hooks.set_sim_state(b.ctx, self.sim);
+    for (self.batches) |b| b.publishSim(self.sim);
 }
 
 fn markGpuDirty(self: *Circuit) void {
