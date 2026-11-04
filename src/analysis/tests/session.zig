@@ -172,7 +172,7 @@ test "lane gate by deck: parallel_inverters_2000 stamps serially, inverter_chain
             b.type_name = k.name;
             b.n_u = k.n_u;
             b.has_const_jacobian = k.linear;
-            weight += k.count * instanceWeight(b);
+            weight += k.count * instanceWeight(b, false);
         }
         try t.expectEqual(deck.eval, executor.lanePlan(weight, 0).eval);
     }

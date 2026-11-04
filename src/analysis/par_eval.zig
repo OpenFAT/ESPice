@@ -26,8 +26,8 @@
 //! - `pub const Mode`, `stampRange`, `limitBatches`, `seedBatches`,
 //!   `clearLimitBatches`, `updateBatches`, `stateCtlBatches`, `minReject`
 //!   (re-exports of `host_walks.zig`)
-//! - `pub const ParEval = struct` (`Base`, `init`, `deinit`, `run`, `limit`, `update`)
-//! - `pub fn instanceWeight(b: Batch) u64`, `pub const mos1_weight: u64`
+//! - `pub const ParEval = struct` (`Base`, `Options`, `init`, `deinit`, `run`, `limit`, `update`)
+//! - `pub fn instanceWeight(b: Batch, nu_weight: bool) u64`, `pub const mos1_weight: u64`
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -81,19 +81,21 @@ pub const ParEval = struct {
     nnz: u32,
     n: u32,
     has_charge: bool,
+    /// `Options.spin`: wait as before parking reached the barriers.
+    spin: bool,
 
     threads: []std.Thread,
-    started: bool,
+    started: bool = false,
     /// Each counter a lane writes while others read sits alone on its line,
     /// apart from the read-only `job_*` arguments and from each other, so a
     /// claim or barrier increment invalidates only that counter's line (#172).
-    wake: Wake,
-    next_task: Counter,
-    next_block: Counter,
+    wake: Wake = .{},
+    next_task: Counter = .{},
+    next_block: Counter = .{},
     /// Lanes, lane 0 included, finished stamping the current pass.
-    stamped: Arrivals,
+    stamped: Arrivals = .{},
     /// Workers finished with the current pass, reduce included.
-    done: Arrivals,
+    done: Arrivals = .{},
     /// The current pass's arguments, published before `epoch` is bumped.
     job_batches: []const Batch,
     job_planes: Planes,
@@ -117,7 +119,7 @@ pub const ParEval = struct {
     /// A u32 counter padded to a whole cache line: the struct's size rounds
     /// up to its alignment, so no other field shares the line.
     const Counter = struct {
-        v: std.atomic.Value(u32) align(std.atomic.cache_line),
+        v: std.atomic.Value(u32) align(std.atomic.cache_line) = .init(0),
     };
 
     /// A barrier's arrival count with its parked waiters, on one line of its
@@ -125,8 +127,8 @@ pub const ParEval = struct {
     /// arrival that reaches the target wakes them only when `sleepers` is
     /// nonzero (`arrive`).
     const Arrivals = struct {
-        v: std.atomic.Value(u32) align(std.atomic.cache_line),
-        sleepers: std.atomic.Value(u32),
+        v: std.atomic.Value(u32) align(std.atomic.cache_line) = .init(0),
+        sleepers: std.atomic.Value(u32) = .init(0),
     };
 
     /// The pass doorbell, on its own line. `epoch` is bumped once per pass;
@@ -135,9 +137,9 @@ pub const ParEval = struct {
     /// when it is nonzero. `quit` is read right after `epoch` changes. All
     /// three are written about once per pass, so they share one line.
     const Wake = struct {
-        epoch: std.atomic.Value(u32) align(std.atomic.cache_line),
-        sleepers: std.atomic.Value(u32),
-        quit: std.atomic.Value(bool),
+        epoch: std.atomic.Value(u32) align(std.atomic.cache_line) = .init(0),
+        sleepers: std.atomic.Value(u32) = .init(0),
+        quit: std.atomic.Value(bool) = .init(false),
     };
 
     comptime {
@@ -153,10 +155,22 @@ pub const ParEval = struct {
         c: []const f64 = &.{},
     };
 
+    /// Developer switches (`Knobs.pareval_spin`, `Knobs.pareval_nu_weight`)
+    /// for A/B runs; neither moves a result.
+    pub const Options = struct {
+        /// Waiting lanes spin 4096 pauses and 64 yields on the doorbell
+        /// before parking, and spin and yield on the barriers without ever
+        /// parking: the schedule before `park_spins`.
+        spin: bool = false,
+        /// Chunks weigh every model `16 * n_u^2` (`instanceWeight`).
+        nu_weight: bool = false,
+    };
+
     /// Builds the staging for `batches` and splits the instances into
     /// chunks of roughly equal `count * instanceWeight` work, about eight
     /// per lane, so a fast lane can take a slow lane's share. Threads start
-    /// lazily on the first `run`. `batches` must outlive it; free it with
+    /// lazily on the first `run`; `options` picks the A/B switches.
+    /// `batches` must outlive it; free it with
     /// `deinit`. Plane index `nnz` is the trash slot (`Circuit.trash_slot`),
     /// whose stamps are dropped. Fails with
     /// `error.OutOfMemory` on allocation or when the tapes hold more than
@@ -169,6 +183,7 @@ pub const ParEval = struct {
         n: u32,
         has_charge: bool,
         n_lanes_req: u32,
+        options: Options,
     ) !ParEval {
         // Single-threaded (wasm): one lane whatever `n_lanes_req` asks.
         const n_lanes: u32 = if (builtin.single_threaded) 1 else @max(n_lanes_req, 1);
@@ -214,7 +229,7 @@ pub const ParEval = struct {
         errdefer gpa.free(q_stage);
         for ([_][]f64{ g_stage, rhs_stage, c_stage, q_stage }) |st| @memset(st, -0.0);
 
-        const tasks = try chunkTasks(gpa, batches, n_lanes);
+        const tasks = try chunkTasks(gpa, batches, n_lanes, options.nu_weight);
         errdefer gpa.free(tasks);
         const cuts = try cutBlocks(gpa, slots.seg, rows.seg, n_lanes);
         errdefer gpa.free(cuts);
@@ -239,13 +254,8 @@ pub const ParEval = struct {
             .nnz = nnz,
             .n = n,
             .has_charge = has_charge,
+            .spin = options.spin,
             .threads = threads,
-            .started = false,
-            .wake = .{ .epoch = .init(0), .sleepers = .init(0), .quit = .init(false) },
-            .next_task = .{ .v = .init(0) },
-            .next_block = .{ .v = .init(0) },
-            .stamped = .{ .v = .init(0), .sleepers = .init(0) },
-            .done = .{ .v = .init(0), .sleepers = .init(0) },
             .job_batches = batches,
             .job_planes = undefined,
             .job_base = .{},
@@ -408,12 +418,13 @@ pub const ParEval = struct {
     fn workerMain(self: *ParEval, epoch0: u32) void {
         pinToPerformanceCores();
         var last: u32 = epoch0;
+        const spin_limit: u32 = if (self.spin) spin_pauses + spin_yields else park_spins;
         while (true) {
             var spins: u32 = 0;
             var e = self.wake.epoch.load(.acquire);
             while (e == last) : (e = self.wake.epoch.load(.acquire)) {
-                if (spins < park_spins) {
-                    std.atomic.spinLoopHint();
+                if (spins < spin_limit) {
+                    if (spins < spin_pauses) std.atomic.spinLoopHint() else std.Thread.yield() catch {};
                     spins += 1;
                     continue;
                 }
@@ -476,17 +487,19 @@ pub const ParEval = struct {
             self.io.futexWake(u32, &a.v.raw, std.math.maxInt(u32));
     }
 
-    /// Spins `park_spins` pauses, then parks, until `a` reaches `target`.
-    /// A waiter woken by an arrival short of `target` parks again. Asserts
-    /// on exit that `a` reached `target`.
+    /// Spins `park_spins` pauses, then parks, until `a` reaches `target`
+    /// (`spin`: pauses, yielding past `spin_pauses`, and never parks). A
+    /// waiter woken by an arrival short of `target` parks again. Asserts on
+    /// exit that `a` reached `target`.
     fn awaitCount(self: *ParEval, a: *Arrivals, target: u32) void {
         var spins: u32 = 0;
         var v = a.v.load(.acquire);
         while (v < target) : (v = a.v.load(.acquire)) {
             // Single-threaded never waits here: one lane is every arrival.
-            if (builtin.single_threaded or spins < park_spins) {
+            if (builtin.single_threaded or spins < park_spins or self.spin) {
                 std.atomic.spinLoopHint();
-                spins += 1;
+                spins +|= 1;
+                if (!builtin.single_threaded and spins > spin_pauses) std.Thread.yield() catch {};
                 continue;
             }
             _ = a.sleepers.fetchAdd(1, .seq_cst);
@@ -598,16 +611,21 @@ const block_align = 16;
 /// (scaling_parallel_inverters_2000 at 8 forced lanes: 0.79 s at 256,
 /// 0.65 s at 4096, 0.88 s serial), which is below the lane gate.
 const park_spins: u32 = 256;
+/// `Options.spin`'s schedule: pauses on any wait, then yields on the
+/// doorbell before it parks.
+const spin_pauses: u32 = 4096;
+const spin_yields: u32 = 64;
 
 /// An instance's eval cost estimate: its stamp count `n_u^2`, times 16 for
-/// a nonlinear model, unless a measured weight overrides it (`mos1_weight`).
+/// a nonlinear model, unless a measured weight overrides it (`mos1_weight`;
+/// `nu_weight` keeps `16 * n_u^2` for every model).
 /// With `n_u^2` alone, chain_psp103_10k's lane 0 got all 64,244 capacitors
 /// and 241 ms of an eval pass that took the PSP103 lanes 5-7 s: a PSP103
 /// instance costs about 1,000 capacitors, not 36. The chunk sizes and the
 /// executor's lane gate (`executor.lanePlan`) depend on it, never the
 /// results.
-pub fn instanceWeight(b: Batch) u64 {
-    if (std.mem.eql(u8, b.type_name, "mos1")) return mos1_weight;
+pub fn instanceWeight(b: Batch, nu_weight: bool) u64 {
+    if (!nu_weight and std.mem.eql(u8, b.type_name, "mos1")) return mos1_weight;
     // At least 1: the chunking divides by it, and an instance with no
     // unknowns still costs a call.
     const stamps = @max(@as(u64, b.n_u) * b.n_u, 1);
@@ -632,14 +650,14 @@ fn sumCells(gather: Gather, lo: u32, hi: u32, plane: []f64, stage: []f64, base: 
 
 /// Chunks of about `total / (8 * n_lanes)` instance weight, cut at instance
 /// boundaries in ascending order. Caller frees.
-fn chunkTasks(gpa: std.mem.Allocator, batches: []const Batch, n_lanes: u32) ![]EvalTask {
+fn chunkTasks(gpa: std.mem.Allocator, batches: []const Batch, n_lanes: u32, nu_weight: bool) ![]EvalTask {
     var w_total: u64 = 0;
-    for (batches) |b| w_total += @as(u64, b.count) * instanceWeight(b);
+    for (batches) |b| w_total += @as(u64, b.count) * instanceWeight(b, nu_weight);
     const target = @max(w_total / (@as(u64, chunks_per_lane) * n_lanes), 1);
     var tasks: std.ArrayList(EvalTask) = .empty;
     errdefer tasks.deinit(gpa);
     for (batches, 0..) |b, bi| {
-        const w = instanceWeight(b);
+        const w = instanceWeight(b, nu_weight);
         const per: u32 = @intCast(@min(@max(target / w, 1), b.count));
         var pos: u32 = 0;
         while (pos < b.count) : (pos += per)
@@ -762,7 +780,7 @@ test "chunkTasks covers every instance once, in order" {
         b.has_const_jacobian = n_u == 2;
     }
     for ([_]u32{ 1, 2, 8, 24 }) |lanes| {
-        const tasks = try chunkTasks(gpa, &bs, lanes);
+        const tasks = try chunkTasks(gpa, &bs, lanes, false);
         defer gpa.free(tasks);
         var next = [_]u32{ 0, 0, 0 };
         for (tasks) |task| {
@@ -780,13 +798,14 @@ test instanceWeight {
     b.type_name = "capacitor";
     b.n_u = 0;
     b.has_const_jacobian = true;
-    try std.testing.expectEqual(@as(u64, 1), instanceWeight(b));
+    try std.testing.expectEqual(@as(u64, 1), instanceWeight(b, false));
     b.n_u = 3;
-    try std.testing.expectEqual(@as(u64, 9), instanceWeight(b));
+    try std.testing.expectEqual(@as(u64, 9), instanceWeight(b, false));
     b.has_const_jacobian = false;
-    try std.testing.expectEqual(@as(u64, 144), instanceWeight(b));
+    try std.testing.expectEqual(@as(u64, 144), instanceWeight(b, false));
     // mos1 weighs its measured cost, whatever its unknowns.
     b.type_name = "mos1";
     b.n_u = 8;
-    try std.testing.expectEqual(mos1_weight, instanceWeight(b));
+    try std.testing.expectEqual(mos1_weight, instanceWeight(b, false));
+    try std.testing.expectEqual(@as(u64, 1024), instanceWeight(b, true));
 }

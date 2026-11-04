@@ -343,6 +343,8 @@ fn knobsFromEnv() analysis.Knobs {
     k.no_qtape = isSet("ZP_NO_QTAPE");
     k.tran_stats = isSet("ZP_TRAN_STATS");
     k.tran_lte_trace = isSet("ZP_TRAN_LTE_TRACE");
+    k.pareval_spin = isSet("ESPICE_PAREVAL_SPIN");
+    k.pareval_nu_weight = isSet("ESPICE_PAREVAL_NU_WEIGHT");
     k.no_tangents = isSet("ZP_NO_TANGENTS");
     if (env("ESPICE_GPU_LU")) |v| k.gpu_lu = std.mem.eql(u8, v, "1");
     k.gpu_lu_check = isSet("ESPICE_GPU_LU_CHECK");
