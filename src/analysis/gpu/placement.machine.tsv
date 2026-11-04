@@ -59,3 +59,6 @@ bus_lat_us	5.6
 bus_up_gbs	12.4
 bus_down_gbs	13.2
 lu_table_ns_per_flop	14
+# E-core over P-core host time of one probe (chain_bsim4_1k: 1074 against 439 us,
+# price plan sec. 0).
+pe_ratio	2.4

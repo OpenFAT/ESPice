@@ -6,6 +6,7 @@
 //!
 //! Contents:
 //! - `pub const Problem = @import("espice/Problem.zig")`
+//! - `pub const calibrate = @import("espice/calibrate.zig")`
 //! - `pub const Options = config.Options`
 //! - `pub const MeasureWriters = config.MeasureWriters`
 //! - `pub const HdlToolchain = config.HdlToolchain`
@@ -44,6 +45,8 @@ const publish = @import("espice/publish.zig");
 
 /// A prepared circuit, its query DAG and the output its results go to.
 pub const Problem = @import("espice/Problem.zig");
+/// `espice calibrate`: measures this machine for `auto`'s price.
+pub const calibrate = @import("espice/calibrate.zig");
 /// Everything `Problem.init` needs. Its slices are copied during init.
 pub const Options = config.Options;
 /// `Options.measures`: the `.meas` values and the cards' error lines.

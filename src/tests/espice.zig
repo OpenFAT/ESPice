@@ -476,6 +476,23 @@ test {
     _ = @import("analyses.zig");
 }
 
+test "calibrate: no driver, no file" {
+    // Oracle: a sysfs/procfs root with no driver and no card. `run` must
+    // refuse before measuring and leave the cache root without a file.
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buf: [128]u8 = undefined;
+    const root = try std.fmt.bufPrint(&root_buf, ".zig-cache/tmp/{s}", .{&tmp.sub_path});
+    var discard_buf: [64]u8 = undefined;
+    var discard: std.Io.Writer.Discarding = .init(&discard_buf);
+    const got = api.calibrate.run(t.allocator, t.io, .{ .sys_root = root, .knobs = .{ .xdg_cache_home = root }, .version = "test" }, &discard.writer);
+    const machine = @import("analysis").machine;
+    try t.expectError(if (machine.vendor == null) error.NoGpuArtifacts else error.NoGpuDriver, got);
+    var buf: [512]u8 = undefined;
+    const path = machine.filePath(&buf, .{ .xdg_cache_home = root }) orelse return;
+    try t.expect(std.c.access(path, 0) != 0);
+}
+
 test "Problem: .lin format=touchstone writes <deck>.s2p beside the deck with the noise block" {
     var tmp = t.tmpDir(.{});
     defer tmp.cleanup();

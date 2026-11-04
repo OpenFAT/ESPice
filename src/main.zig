@@ -38,6 +38,9 @@ const backends = blk: {
 
 const help =
     \\Usage: espice [OPTION]... FILE...
+    \\       espice calibrate [--compile-all]
+    \\                              Measure this machine's GPU and CPU for --backend auto (~25 s) and write
+    \\                              the calibration file; --compile-all also compiles heavy models (minutes)
     \\  -b, --batch                 Run all queries (default)
     \\  -r, --rawfile=FILE          Result destination
     \\      --format=FMT            binary|ascii|csv|touchstone|psf|fsdb|sst2|citi|print
@@ -129,6 +132,11 @@ pub fn main(init: std.process.Init) !u8 {
     defer cli.deinit(init.gpa);
     var args = init.minimal.args.iterate();
     _ = args.skip();
+    {
+        var peek = init.minimal.args.iterate();
+        _ = peek.skip();
+        if (peek.next()) |first| if (std.mem.eql(u8, first, "calibrate")) return calibrate(init, &peek);
+    }
     switch (try parse(init.gpa, &args, &cli)) {
         .run => {},
         .help => {
@@ -468,6 +476,36 @@ fn optionValue(arg: []const u8, short: []const u8, long: []const u8, args: anyty
             return if (arg.len == name.len + 1) @as(?[]const u8, null) else arg[name.len + 1 ..];
     }
     return null;
+}
+
+/// `espice calibrate [--compile-all]`, and its start probes' children
+/// (`--probe-start`, `--probe-none`): 0 when the file was written, 1 with
+/// the reason on stderr and nothing written, 2 on a usage error.
+fn calibrate(init: std.process.Init, args: anytype) !u8 {
+    var opts: problem.calibrate.Options = .{ .version = version };
+    while (args.next()) |arg| {
+        const which: ?problem.calibrate.Probe = if (std.mem.eql(u8, arg, "--probe-start")) .start else if (std.mem.eql(u8, arg, "--probe-none")) .none else null;
+        if (which) |w| {
+            var out: std.Io.File.Writer = .initStreaming(.stdout(), init.io, &.{});
+            problem.calibrate.probe(w, &out.interface) catch |err| {
+                std.debug.print("Error: calibrate: {s}\n", .{@errorName(err)});
+                return 1;
+            };
+            return 0;
+        }
+        if (!std.mem.eql(u8, arg, "--compile-all")) return usageFail();
+        opts.compile_all = true;
+    }
+    if (std.c.getenv("XDG_CACHE_HOME")) |v| opts.knobs.xdg_cache_home = std.mem.span(v);
+    if (std.c.getenv("HOME")) |v| opts.knobs.home = std.mem.span(v);
+    var err_buf: [1024]u8 = undefined;
+    var stderr: std.Io.File.Writer = .initStreaming(.stderr(), init.io, &err_buf);
+    problem.calibrate.run(init.gpa, init.io, opts, &stderr.interface) catch |err| {
+        stderr.interface.flush() catch {};
+        std.debug.print("Error: calibrate: {s}\n", .{@errorName(err)});
+        return 1;
+    };
+    return 0;
 }
 
 fn usageFail() u8 {

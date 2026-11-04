@@ -16,6 +16,7 @@
 //! - `pub const Identity = struct` (`cardsKey`)
 //! - `pub const Constants = struct`
 //! - `pub const Model = struct`
+//! - `pub const Lu = struct`
 //! - `pub const Machine = struct`
 //! - `pub const ParseError`, `pub const WriteError`
 //! - `pub const test_hooks` (`notes`, `fixture`)
@@ -25,6 +26,7 @@
 //! - `pub fn parse(arena: Allocator, text: []const u8) ParseError!Machine`
 //! - `pub fn format(m: *const Machine, w: *std.Io.Writer) std.Io.Writer.Error!void`
 //! - `pub fn write(gpa: Allocator, m: *const Machine, knobs: Knobs) WriteError!void`
+//! - `pub fn filePath(buf: []u8, knobs: Knobs) ?[:0]const u8`
 //! - `pub fn noteUncalibrated(live: *const Identity) void`
 //! - `pub fn cachePath(buf: []u8, comptime dir: []const u8, key: u64, comptime ext: []const u8, knobs: Knobs) ?[:0]const u8`
 //! - `pub fn makeParents(buf: []u8, path: []const u8) bool`
@@ -146,6 +148,9 @@ pub const Constants = struct {
     bus_down_gbs: f64,
     /// Device-LU host table build per pivot epoch, ns per LU flop.
     lu_table_ns_per_flop: f64,
+    /// One eval's host time on an efficiency core over a performance core
+    /// (the price plan's P/E ratio; 1 on a uniform CPU).
+    pe_ratio: f64,
 };
 
 /// One kernel image's measured row, keyed by the image's Wyhash, so a
@@ -160,8 +165,23 @@ pub const Model = struct {
     host_e_us: [4]f64,
     /// The image's first module load (its JIT), ms; 0 when SASS fits.
     jit_ms: f64,
-    /// ParEval's gain at `Identity.threads` over one thread.
+    /// ParEval's gain on the lanes a query borrows (`ThreadPool.per_query`)
+    /// over one lane, at the widest size.
     lane_gain: f64,
+};
+
+/// One generated matrix's measured LU, raw: the price fits its rates over
+/// these rows (flops per column `flops / n` is the axis).
+pub const Lu = struct {
+    n: u32,
+    /// Flops of one refactor (`GpuLu.flops`).
+    flops: u64,
+    /// One device refactor and both solves, upload to download, us.
+    dev_us: f64,
+    /// One host refactor and solve (`SparseLu`, one thread), us.
+    host_us: f64,
+    /// The device tables' build and upload for the pivot epoch, us.
+    table_us: f64,
 };
 
 /// The calibration file, parsed. Immutable after `load`; every query of a
@@ -172,6 +192,7 @@ pub const Machine = struct {
     espice: Text = .{},
     c: Constants,
     models: []const Model = &.{},
+    lus: []const Lu = &.{},
 };
 
 pub const ParseError = error{
@@ -244,7 +265,7 @@ pub fn stale(file: *const Identity, live: *const Identity) bool {
 /// `models` and the file's bytes live in `arena`.
 pub fn load(arena: Allocator, knobs: Knobs, live: *const Identity) ?Machine {
     var buf: [512]u8 = undefined;
-    const p = path(&buf, knobs) orelse return null;
+    const p = filePath(&buf, knobs) orelse return null;
     const fd = std.c.open(p, .{ .ACCMODE = .RDONLY }, @as(c_uint, 0));
     if (fd < 0) return null;
     defer _ = std.c.close(fd);
@@ -270,6 +291,7 @@ pub fn parse(arena: Allocator, text: []const u8) ParseError!Machine {
     var seen: std.StaticBitSet(names.len) = .empty;
     var have_driver = false;
     var models: std.ArrayList(Model) = .empty;
+    var lus: std.ArrayList(Lu) = .empty;
     var lines = std.mem.splitScalar(u8, text, '\n');
     while (lines.next()) |raw| {
         const line = std.mem.trimEnd(u8, raw, "\r");
@@ -294,6 +316,8 @@ pub fn parse(arena: Allocator, text: []const u8) ParseError!Machine {
             m.espice = Text.init(value) orelse return error.Malformed;
         } else if (std.mem.eql(u8, key, "model")) {
             try models.append(arena, try parseModel(value));
+        } else if (std.mem.eql(u8, key, "lu")) {
+            try lus.append(arena, try parseLu(value));
         } else inline for (names, 0..) |name, i| {
             if (std.mem.eql(u8, key, name)) {
                 @field(m.c, name) = try parseNumber(value);
@@ -303,6 +327,7 @@ pub fn parse(arena: Allocator, text: []const u8) ParseError!Machine {
     }
     if (seen.count() != names.len or !have_driver or m.id.threads == 0) return error.Malformed;
     m.models = try models.toOwnedSlice(arena);
+    m.lus = try lus.toOwnedSlice(arena);
     assert(m.id.cards <= cards_max);
     return m;
 }
@@ -314,7 +339,7 @@ pub fn format(m: *const Machine, w: *std.Io.Writer) std.Io.Writer.Error!void {
     try w.writeAll(
         \\# espice machine calibration (price plan sec. 4): one value per row, tab-separated.
         \\# model: image Wyhash, then dev_us, host_p_us and host_e_us at 1, 64, 1024 and 16384
-        \\# instances, jit_ms, lane_gain.
+        \\# instances, jit_ms, lane_gain. lu: n, flops, dev_us, host_us, table_us.
         \\
     );
     try w.print("driver\t{s}\n", .{m.id.driver.slice()});
@@ -341,13 +366,17 @@ pub fn format(m: *const Machine, w: *std.Io.Writer) std.Io.Writer.Error!void {
         }
         try w.writeByte('\n');
     }
+    for (m.lus) |*row| {
+        assert(row.n > 0);
+        try w.print("lu\t{d}\t{d}\t{d}\t{d}\t{d}\n", .{ row.n, row.flops, row.dev_us, row.host_us, row.table_us });
+    }
 }
 
 /// Writes `m` to its path under `knobs`' cache root: a `.tmp` beside it,
 /// then a rename, so a reader sees the old file or the new one, never half.
 pub fn write(gpa: Allocator, m: *const Machine, knobs: Knobs) WriteError!void {
     var buf: [512]u8 = undefined;
-    const p = path(&buf, knobs) orelse return if (machineId() == null) error.NoMachineId else error.NoCacheDir;
+    const p = filePath(&buf, knobs) orelse return if (machineId() == null) error.NoMachineId else error.NoCacheDir;
     if (!makeParents(&buf, p)) return error.NoCacheDir;
     var tmp_buf: [520]u8 = undefined;
     const tmp = std.mem.printSentinel(&tmp_buf, "{s}.tmp", .{p}, 0) catch return error.NoCacheDir;
@@ -370,6 +399,13 @@ pub fn write(gpa: Allocator, m: *const Machine, knobs: Knobs) WriteError!void {
         return error.WriteFailed;
     }
     assert(done == bytes.len);
+}
+
+/// This machine's file in `buf`: `cachePath` keyed by `/etc/machine-id`'s
+/// first 16 hex digits, so an NFS home shared by several machines keeps one
+/// each. Null without a machine id or a cache root.
+pub fn filePath(buf: []u8, knobs: Knobs) ?[:0]const u8 {
+    return cachePath(buf, "machine", machineId() orelse return null, ".tsv", knobs);
 }
 
 /// Prints, once per process, why `auto` runs on the CPU: no calibration
@@ -414,12 +450,6 @@ pub fn makeParents(buf: []u8, path_: []const u8) bool {
 
 fn trim(t: []const u8) []const u8 {
     return std.mem.trim(u8, t, " \t\r\n");
-}
-
-/// This machine's file: `cachePath` keyed by `/etc/machine-id`'s first 16
-/// hex digits, so an NFS home shared by several machines keeps one each.
-fn path(buf: []u8, knobs: Knobs) ?[:0]const u8 {
-    return cachePath(buf, "machine", machineId() orelse return null, ".tsv", knobs);
 }
 
 /// `/etc/machine-id`'s first 16 hex digits, or null.
@@ -543,6 +573,17 @@ fn parseModel(value: []const u8) ParseError!Model {
     return row;
 }
 
+/// An `lu` row's value: n, flops, then `Lu`'s three times.
+fn parseLu(value: []const u8) ParseError!Lu {
+    var cols = std.mem.splitScalar(u8, value, '\t');
+    var row: Lu = undefined;
+    row.n = std.fmt.parseInt(u32, cols.next() orelse return error.Malformed, 10) catch return error.Malformed;
+    row.flops = std.fmt.parseInt(u64, cols.next() orelse return error.Malformed, 10) catch return error.Malformed;
+    inline for (.{ "dev_us", "host_us", "table_us" }) |name| @field(row, name) = try parseNumber(cols.next() orelse return error.Malformed);
+    if (cols.next() != null or row.n == 0) return error.Malformed;
+    return row;
+}
+
 test "machine: format then parse is bit-exact, and parse refuses a short file" {
     // Oracle: the round trip itself (format -> parse -> format), on values
     // chosen to need all 17 digits, and the fixture's own bytes.
@@ -557,11 +598,14 @@ test "machine: format then parse is bit-exact, and parse refuses a short file" {
     m.c.cc = 1e300;
     const models = [_]Model{.{ .image = 0xdeadbeef00c0ffee, .dev_us = .{ 1.0 / 3.0, 2, 3e-9, 4 }, .host_p_us = @splat(0.7), .host_e_us = @splat(1.9), .jit_ms = 15000, .lane_gain = 3.3 }};
     m.models = &models;
+    const lus = [_]Lu{.{ .n = 4096, .flops = 734_000_001, .dev_us = 0.1 + 0.7, .host_us = 1e-7, .table_us = 123456.789 }};
+    m.lus = &lus;
     var w1: std.Io.Writer.Allocating = .init(a);
     try format(&m, &w1.writer);
     const back = try parse(a, w1.written());
     try std.testing.expectEqual(std.mem.toBytes(m.c), std.mem.toBytes(back.c));
     try std.testing.expectEqual(std.mem.toBytes(models[0]), std.mem.toBytes(back.models[0]));
+    try std.testing.expectEqual(std.mem.toBytes(lus[0]), std.mem.toBytes(back.lus[0]));
     try std.testing.expectEqual(m.id.cardsKey(), back.id.cardsKey());
     try std.testing.expect(!stale(&m.id, &back.id));
     var w2: std.Io.Writer.Allocating = .init(a);
@@ -664,7 +708,7 @@ test "machine: write then load, a stale identity loads nothing, an empty cache r
     try write(std.testing.allocator, &m, knobs);
     try std.testing.expectEqual(@as(f64, 7), (load(a, knobs, &live) orelse return error.TestUnexpectedResult).c.slowdown);
     var buf: [512]u8 = undefined;
-    const p = path(&buf, knobs).?;
+    const p = filePath(&buf, knobs).?;
     var tmp_buf: [520]u8 = undefined;
     try std.testing.expect(std.c.access(try std.mem.printSentinel(&tmp_buf, "{s}.tmp", .{p}, 0), 0) != 0);
     var moved = live;
