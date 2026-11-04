@@ -77,7 +77,7 @@ pub const CostCache = struct {
 
     pub fn key(host: Host, threads: u32, evals: f64) u64 {
         var h = std.hash.Wyhash.init(0x5e1ce);
-        const cards = if (machine.vendor) |v| machine.identity("", v).cardsKey() else 0;
+        const cards: u64 = if (machine.vendor) |v| machine.identity("", v).cardsKey() else 0;
         h.update(std.mem.asBytes(&cards));
         for ([_]u64{ host.n, host.planes.g_vals.len, @intFromBool(host.has_charge), threads, @bitCast(evals) }) |v| h.update(std.mem.asBytes(&v));
         for (host.batches) |b| {

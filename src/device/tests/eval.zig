@@ -1749,6 +1749,7 @@ test "a TXL step dirties only the history elements it stores" {
         _ = b.hooks.state_ctl.?(b.ctx, .commit);
     }
     try std.testing.expectEqual(@as(i64, 29), store.instances[0].txl__held__nh);
+}
 
 /// One recorded sink write: what it addressed and the value's bits.
 const Write = struct { tag: u8, id: u32, a: u32, b: u32, bits: u64 };
