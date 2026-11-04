@@ -163,7 +163,7 @@ pub fn SmallSignal(comptime D: type) type {
             for ([_][]f64{ out.f, out.q, out.g, out.c }) |p| @memset(p, 0);
             var inst = self.instances[id];
             var sink: LocalSink(D) = .{ .batch = self, .xs = x, .inst_ = &inst, .out = out };
-            stamp.evalRange(D, false, stamp.host_pad, &sink, id, id + 1, self.sim, false);
+            stamp.evalRange(D, false, stamp.host_pad, 1, &sink, id, id + 1, self.sim, false);
             out.x[0..n_u].* = self.localX(x, id);
             if (comptime @hasDecl(D, "opVars")) {
                 assert(out.vars.len == D.op_vars.len);

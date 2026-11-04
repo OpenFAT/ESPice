@@ -359,6 +359,7 @@ fn knobsFromEnv() analysis.Knobs {
     if (env("ESPICE_LU_PAR")) |v| k.lu.par = v.len > 0 and v[0] == '1';
     k.lu.par_stats = isSet("ESPICE_LU_PAR_STATS");
     if (env("ESPICE_LANES")) |v| k.lanes = !std.mem.eql(u8, v, "0");
+    if (env("ESPICE_LANE_EVAL")) |v| k.lane_eval = !std.mem.eql(u8, v, "0");
     k.hb_trace = isSet("ESPICE_HB_TRACE");
     k.no_qtape = isSet("ZP_NO_QTAPE");
     k.tran_stats = isSet("ZP_TRAN_STATS");

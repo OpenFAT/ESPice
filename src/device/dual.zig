@@ -13,7 +13,8 @@
 //! - per family: `collapse_applied`, `V`, `lanes`, `Of`, `con`, `probe`, `sel`,
 //!   `to`, `val`, `ddxAt`, `grad`, `add`, `sub`, `neg`, `mul`, `div`,
 //!   `scale`, `addC`, `exp`, `log`, `expm1`, `log1p`, `sqrt`, `sin`, `cos`,
-//!   `tanh`, `pow`, `atan`, `sinh`, `cosh`, `lt`, `le`, `eq`
+//!   `tanh`, `pow`, `atan`, `sinh`, `cosh`, `lt`, `le`, `eq`; a `DualFor`
+//!   value also `map`, `powFrom`
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -161,7 +162,10 @@ pub fn DualFor(comptime lane: []const u8, comptime pad: bool, comptime collapsed
                 inline fn k(c: f64) Lanes {
                     return @splat(c);
                 }
-                inline fn map(a: T, v: f64, c: f64) T {
+                /// `v` with every lane scaled by the slope `c`: the tail of
+                /// each unary primitive, so a family that computes `v` for
+                /// several points at once (`points.zig`) keeps these lanes.
+                pub inline fn map(a: T, v: f64, c: f64) T {
                     return .{ .v = v, .d = a.d * k(c) };
                 }
                 /// These lanes laid out as `to_ls`'s. New and pad lanes are +0.
@@ -278,7 +282,10 @@ pub fn DualFor(comptime lane: []const u8, comptime pad: bool, comptime collapsed
                 /// a second `pow` because `c·p/x` is 0/0 there and c == 1
                 /// must still give slope 1. A non-finite slope becomes 0.
                 pub fn pow(a: T, c: f64) T {
-                    const p = dmath.pow(a.v, c);
+                    return a.powFrom(c, dmath.pow(a.v, c));
+                }
+                /// `pow` given its value `p = dmath.pow(a.v, c)`.
+                pub inline fn powFrom(a: T, c: f64, p: f64) T {
                     const slope = if (a.v != 0.0) c * p / a.v else c * dmath.pow(a.v, c - 1.0);
                     return map(a, p, if (std.math.isFinite(slope)) slope else 0.0);
                 }

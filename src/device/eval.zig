@@ -12,7 +12,7 @@
 //! - `pub const vera_validate_contract: bool`
 //! - `pub const device_object_root`
 //! - `pub const NoiseSource`, `NoiseGen`, `PsdTerm`, `Planes`, `Batch`, `Proto` (abi)
-//! - `pub const Dual`, `DeviceBatch`, `ProtoStore`, `permuteInPlace`,
+//! - `pub const Dual`, `PointFamily`, `DeviceBatch`, `ProtoStore`, `permuteInPlace`,
 //!   `snapLimited`, `checkHost`, `exportDevice`, `deviceVtable`
 //! - `pub const test_access`
 
@@ -25,6 +25,7 @@ const dual = @import("dual.zig");
 const kernels = @import("kernels.zig");
 const lane_kernels = @import("lane_kernels.zig");
 const layout = @import("layout.zig");
+const points = @import("points.zig");
 const proto_store = @import("proto_store.zig");
 const stamp = @import("stamp.zig");
 const traits = @import("traits.zig");
@@ -80,6 +81,8 @@ pub const Proto = abi.Proto;
 
 /// Returns a `Dual` family over lanes `0..N`, unknown u on lane u.
 pub const Dual = dual.Dual;
+/// Returns the W-point batch family over a `Dual` family (`points.zig`).
+pub const PointFamily = points.PointFamily;
 /// Returns the frozen per-type batch of device type `D`.
 pub const DeviceBatch = batch.DeviceBatch;
 /// Returns the construction-time store of device type `D`.
@@ -108,6 +111,9 @@ pub const test_access = if (builtin.is_test) .{
     // Three lanes pad to four: the shuffle path with a pad lane.
     .Sparse3 = dual.DualFor(&.{ 0, 1, 2 }, stamp.host_pad, false),
     .anyNonzero = stamp.anyNonzero,
+    .evalRange = stamp.evalRange,
+    .ground = abi.GROUND,
+    .point_width = traits.point_width,
     .segmentSum = kernels.segmentSum,
     .repMask = layout.repMask,
     .spicePulseBreak = breakpoints.spicePulseBreak,

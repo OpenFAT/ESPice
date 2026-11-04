@@ -38,6 +38,57 @@ export fn hand_dual_mul(a: *const [3]f64, b: *const [3]f64, out: *[3]f64) void {
     out.* = .{ v, d[0], d[1] };
 }
 
+// ---- device PointFamily exp and pow (lane-wide eval): four points' exp
+// and pow through the W-point family against the same four scalar-family
+// values given one gompute vector call by hand, then each point's own
+// `map`/`powFrom`. A residue here is the cost of the point wrapper. ----
+
+const P4 = eval.PointFamily(D2, 4, u8);
+const gmath = @import("gompute").math;
+
+fn points4(a: *const [4][3]f64) P4.Of(0b11) {
+    var x: P4.Of(0b11) = undefined;
+    inline for (0..4) |w| x.l[w] = .{ .v = a[w][0], .d = .{ a[w][1], a[w][2] } };
+    return x;
+}
+
+export fn gen_points_exp(a: *const [4][3]f64, out: *[4][3]f64) void {
+    const r = points4(a).exp();
+    inline for (0..4) |w| out[w] = .{ r.l[w].v, r.l[w].d[0], r.l[w].d[1] };
+}
+
+/// The four points as plain scalar-family values, without `PointFamily`.
+fn scalars4(a: *const [4][3]f64) [4]Val2 {
+    var x: [4]Val2 = undefined;
+    inline for (0..4) |w| x[w] = .{ .v = a[w][0], .d = .{ a[w][1], a[w][2] } };
+    return x;
+}
+
+fn store4(r: [4]Val2, out: *[4][3]f64) void {
+    inline for (0..4) |w| out[w] = .{ r[w].v, r[w].d[0], r[w].d[1] };
+}
+
+export fn hand_points_exp(a: *const [4][3]f64, out: *[4][3]f64) void {
+    const x = scalars4(a);
+    const e = gmath.exp(@Vector(4, f64){ x[0].v, x[1].v, x[2].v, x[3].v });
+    var r: [4]Val2 = undefined;
+    inline for (0..4) |w| r[w] = x[w].map(e[w], e[w]);
+    store4(r, out);
+}
+
+export fn gen_points_pow(a: *const [4][3]f64, c: f64, out: *[4][3]f64) void {
+    const r = points4(a).pow(c);
+    inline for (0..4) |w| out[w] = .{ r.l[w].v, r.l[w].d[0], r.l[w].d[1] };
+}
+
+export fn hand_points_pow(a: *const [4][3]f64, c: f64, out: *[4][3]f64) void {
+    const x = scalars4(a);
+    const p = gmath.pow(@Vector(4, f64){ x[0].v, x[1].v, x[2].v, x[3].v }, @splat(c));
+    var r: [4]Val2 = undefined;
+    inline for (0..4) |w| r[w] = x[w].powFrom(c, p[w]);
+    store4(r, out);
+}
+
 // ---- device hook context: every hook body reaches its batch through
 // `DeviceBatch(D).of(ctx)`, a `@ptrCast(@alignCast)` of the type-erased
 // context. A real hook (`scatter_tapes`) through it against the same body

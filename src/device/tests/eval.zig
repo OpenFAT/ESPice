@@ -1749,4 +1749,128 @@ test "a TXL step dirties only the history elements it stores" {
         _ = b.hooks.state_ctl.?(b.ctx, .commit);
     }
     try std.testing.expectEqual(@as(i64, 29), store.instances[0].txl__held__nh);
+
+/// One recorded sink write: what it addressed and the value's bits.
+const Write = struct { tag: u8, id: u32, a: u32, b: u32, bits: u64 };
+
+/// A host sink over `n` instances of `D` that logs every write in order, so
+/// two evaluations compare write for write, bit for bit.
+fn LogSink(comptime D: type) type {
+    const n_u = contract.nU(D);
+    return struct {
+        xs: []const f64,
+        lims: []const f64,
+        gath_: []const u32,
+        model_of: []const u32,
+        models: []const D.Model,
+        insts: []const D.Instance,
+        log: *std.ArrayList(Write),
+        gpa: std.mem.Allocator,
+
+        pub const skip_g = false;
+        pub const skip_c = false;
+        pub const on_device = false;
+        const Ls = @This();
+
+        fn put(s: *const Ls, tag: u8, id: u32, a: u32, b: u32, v: f64) void {
+            s.log.append(s.gpa, .{ .tag = tag, .id = id, .a = a, .b = b, .bits = @bitCast(v) }) catch @panic("OOM");
+        }
+        pub fn x(s: *const Ls, gi: u32) f64 {
+            return if (gi == impl.test_access.ground) 0.0 else s.xs[gi];
+        }
+        pub fn gath(s: *const Ls, id: u32, u: usize) u32 {
+            return s.gath_[id * n_u + u];
+        }
+        pub fn lim(s: *const Ls, id: u32, comptime u: usize) f64 {
+            return s.lims[id * n_u + u];
+        }
+        pub fn model(s: *const Ls, id: u32) *const D.Model {
+            return &s.models[s.model_of[id]];
+        }
+        pub fn inst(s: *const Ls, id: u32) *const D.Instance {
+            return &s.insts[id];
+        }
+        pub fn rhsRow(_: *const Ls, id: u32, ru: usize) u32 {
+            return @intCast(id * n_u + ru);
+        }
+        pub fn scatterRes(s: *const Ls, row: u32, v: f64) void {
+            s.put(0, 0, row, 0, v);
+        }
+        pub fn scatterJac(s: *const Ls, id: u32, comptime ru: usize, comptime cu: usize, v: f64) void {
+            s.put(1, id, ru, cu, v);
+        }
+        pub fn scatterQ(s: *const Ls, row: u32, v: f64) void {
+            s.put(2, 0, row, 0, v);
+        }
+        pub fn scatterQJac(s: *const Ls, id: u32, comptime ru: usize, comptime cu: usize, v: f64) void {
+            s.put(3, id, ru, cu, v);
+        }
+        pub fn tapeQ(s: *const Ls, id: u32, j: usize, v: f64) void {
+            s.put(4, id, @intCast(j), 0, v);
+        }
+    };
+}
+
+/// Evaluates `n` random instances of `D` at one point per call (the scalar
+/// oracle) and at `point_width`, and expects the same writes in the same
+/// order with the same bits. The instances span NaN and overflowing biases,
+/// limited and unlimited unknowns, grounded terminals, two Model rows and
+/// per-instance `mfactor`, so batches diverge, runs end short of a full
+/// batch, and a lane leaking into its neighbour moves a write.
+fn expectPointsMatchScalar(comptime D: type, seed: u64) !void {
+    const gpa = std.testing.allocator;
+    const n_u = contract.nU(D);
+    const n = 23;
+    const Real0 = impl.test_access.Real;
+    var models: [2]D.Model = .{ .{}, .{} };
+    for (&models) |*m| {
+        if (comptime @hasDecl(D, "derive")) D.derive(Real0, m);
+        if (comptime @hasDecl(D, "setup")) D.setup(Real0, m);
+    }
+    var prng = std.Random.DefaultPrng.init(seed);
+    const r = prng.random();
+    var insts: [n]D.Instance = @splat(.{});
+    var model_of: [n]u32 = undefined;
+    var gath: [n * n_u]u32 = undefined;
+    var xs: [n * n_u]f64 = undefined;
+    var lims: [n * n_u]f64 = undefined;
+    for (0..n) |i| {
+        // Runs of 1, 2, 5 and 7 instances on one row, then the other.
+        model_of[i] = if (i < 1 or (i >= 3 and i < 8) or i >= 15) 0 else 1;
+        if (comptime @hasField(D.Instance, "mfactor")) insts[i].mfactor = @floatFromInt(1 + i % 3);
+        if (comptime @hasDecl(D, "setupInstance")) D.setupInstance(&models[model_of[i]], &insts[i]);
+        for (0..n_u) |u| {
+            const k = i * n_u + u;
+            gath[k] = if (u == n_u - 1 and i % 4 == 0) impl.test_access.ground else @intCast(k);
+            xs[k] = switch (r.uintLessThan(u8, 16)) {
+                0 => std.math.nan(f64),
+                1 => 60.0 * (r.float(f64) - 0.5),
+                else => 3.0 * (r.float(f64) - 0.5),
+            };
+            lims[k] = if (r.boolean()) xs[k] else xs[k] - 0.1 * r.float(f64);
+        }
+    }
+    var sim: SimState = .{};
+    sim.iteration = 2;
+    var logs: [2]std.ArrayList(Write) = .{ .empty, .empty };
+    defer for (&logs) |*l| l.deinit(gpa);
+    inline for (.{ 1, impl.test_access.point_width }, 0..) |pw, j| {
+        const sink: LogSink(D) = .{ .xs = &xs, .lims = &lims, .gath_ = &gath, .model_of = &model_of, .models = &models, .insts = &insts, .log = &logs[j], .gpa = gpa };
+        impl.test_access.evalRange(D, false, true, pw, &sink, 0, n, sim, true);
+    }
+    try std.testing.expect(logs[0].items.len > n);
+    try std.testing.expectEqual(logs[0].items.len, logs[1].items.len);
+    for (logs[0].items, logs[1].items, 0..) |a, b, k| {
+        if (std.meta.eql(a, b)) continue;
+        std.debug.print("{s}: write {d}: scalar {any} vs points {any}\n", .{ @typeName(D), k, a, b });
+        return error.PointLaneDiffers;
+    }
+}
+
+test "W-point evaluation equals the one-point run, write for write and bit for bit" {
+    const models = @import("models");
+    for (0..4) |seed| {
+        try expectPointsMatchScalar(models.mesa, seed);
+        try expectPointsMatchScalar(models.diode, seed);
+    }
 }

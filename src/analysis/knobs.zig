@@ -40,6 +40,10 @@ pub const Knobs = struct {
     /// `ESPICE_PAREVAL_NU_WEIGHT`: every model weighs `16 * n_u^2`, mos1
     /// included, for A/B runs of the lane gate (`par_eval.instanceWeight`).
     pareval_nu_weight: bool = false,
+    /// `ESPICE_LANE_EVAL`: `0` evaluates every `traits.point_models`
+    /// instance alone (`Hooks.set_point_eval`), the bitwise W == 1 oracle
+    /// for the default W-point evaluation.
+    lane_eval: bool = true,
     /// `ZP_TRAN_LTE_TRACE`: diagnose the first 16 rejected LTE estimates
     /// from captured history, without evaluating devices or changing steps.
     tran_lte_trace: bool = false,

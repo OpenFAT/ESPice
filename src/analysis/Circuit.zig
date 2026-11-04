@@ -361,12 +361,14 @@ pub const Circuit = struct {
     }
 
     /// Installs the query's solver threading and the facade's developer
-    /// switches. Touches no plane or parameter, so `lin` stays. Asserts that
+    /// switches, and each batch's W-point evaluation (`Knobs.lane_eval`).
+    /// Touches no plane or parameter, so `lin` stays. Asserts that
     /// `workspace` has not run yet, since it reads `knobs`.
     pub fn configure(self: *Circuit, execution: numerics.Execution, k: Knobs) void {
         assert(self.ws == null);
         self.solver_execution = execution;
         self.knobs = k;
+        for (self.batches) |b| if (b.hooks.set_point_eval) |f| f(b.ctx, k.lane_eval);
     }
 
     /// Evaluates the resident batches through `g` from now on and moves the
