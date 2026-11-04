@@ -161,7 +161,7 @@ pub fn LaneEvalKernel(comptime D: type, comptime block_size: u32) type {
                 .q_vec = q_vec,
                 .lim_ = lim,
             };
-            stamp.evalRange(D, false, false, &sink, r.first, r.last, sims[l], limiting[l] != 0);
+            stamp.evalRange(D, false, false, 1, &sink, r.first, r.last, sims[l], limiting[l] != 0);
         }
     };
 }

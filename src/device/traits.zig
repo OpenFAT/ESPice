@@ -7,7 +7,8 @@
 //! hfet1 rules, and dev/devices/gpu-evaluation.md for the GPU rules.
 //!
 //! Contents:
-//! - `pub const bypass_models`, `pub const load_check`
+//! - `pub const bypass_models`, `pub const load_check`, `pub const point_models`
+//! - `pub const point_width: usize`, `pub fn pointWidth(comptime D: type) usize`
 //! - `pub const GpuRefusal = enum`
 //! - `pub fn skipsTimerState(comptime D: type) bool`, `hasSpiceBreaks`,
 //!   `predictsOverDeltaOld2`, `hasAbsdelayState`, `walksPending`,
@@ -41,6 +42,20 @@ pub const bypass_models = std.StaticStringMap(void).initComptime(.{
     .{"vbic13_4t"},      .{"vdmos"},        .{"mos1"},        .{"mos2"},           .{"mos3"},
     .{"mos6"},           .{"mos9"},
 });
+
+/// Models the host evaluates `point_width` instances per call
+/// (`points.zig`), each a VerA `batch_ok` device. Opt-in per model: a call
+/// over W points instantiates the whole eval body again, and a batch whose
+/// points branch apart (`batch_lead`) runs once per path, so only a model
+/// measured faster is listed.
+// ponytail: hand-kept list; drop it when every batch_ok model measures a win.
+pub const point_models = std.StaticStringMap(void).initComptime(.{
+    .{"mesa"}, .{"diode"},
+});
+
+/// The points per batched call: AVX2's four f64 lanes. VerA measured W = 8
+/// spilling and diverging more (docs/host/batching.md).
+pub const point_width: usize = 4;
 
 /// Models whose ngspice load flags non-convergence itself when a branch
 /// current misses its linear prediction from the previous iterate
@@ -288,6 +303,13 @@ pub fn hasStateKernel(comptime D: type) bool {
 /// Instance/State blobs, which the host cannot reach.
 pub fn hasCtlKernel(comptime D: type) bool {
     return hasStateKernel(D) and @hasDecl(D, "stateCtl");
+}
+
+/// How many instances of `D` one host eval call takes: `point_width` for a
+/// listed `batch_ok` model, else 1.
+pub fn pointWidth(comptime D: type) usize {
+    const ok = @hasDecl(D, "batch_ok") and D.batch_ok;
+    return if (ok and point_models.has(comptime baseName(D))) point_width else 1;
 }
 
 /// D's type name without its namespace (`vsource.Vsource` gives `Vsource`).

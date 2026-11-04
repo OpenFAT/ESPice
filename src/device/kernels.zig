@@ -85,7 +85,7 @@ pub fn DeviceKernel(comptime D: type, comptime block_size: u32, comptime skip_co
             // Always the wide basis here: the kernel arguments carry no
             // `narrow_count`, and they are part of the frozen GPU boundary.
             // ponytail: pass `narrow_count` once narrowing is measured on a GPU.
-            stamp.evalRange(D, false, false, &sink, id, id + 1, sim, limiting != 0);
+            stamp.evalRange(D, false, false, 1, &sink, id, id + 1, sim, limiting != 0);
         }
     };
 }

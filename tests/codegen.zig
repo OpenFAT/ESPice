@@ -38,6 +38,59 @@ export fn hand_dual_mul(a: *const [3]f64, b: *const [3]f64, out: *[3]f64) void {
     out.* = .{ v, d[0], d[1] };
 }
 
+// ---- device PointFamily exp and pow (lane-wide eval): four points' exp
+// and pow through the W-point family against one gompute vector call and
+// each point's slope written out. A residue here would be four scalar calls
+// where the hand version has one. ----
+
+const P4 = eval.PointFamily(D2, 4, u8);
+const gmath = @import("gompute").math;
+
+fn points4(a: *const [4][3]f64) P4.Of(0b11) {
+    var x: P4.Of(0b11) = undefined;
+    inline for (0..4) |w| x.l[w] = .{ .v = a[w][0], .d = .{ a[w][1], a[w][2] } };
+    return x;
+}
+
+export fn gen_points_exp(a: *const [4][3]f64, out: *[4][3]f64) void {
+    const r = points4(a).exp();
+    inline for (0..4) |w| out[w] = .{ r.l[w].v, r.l[w].d[0], r.l[w].d[1] };
+}
+
+/// Every input is read before the vector call, as in a device body, where
+/// the slopes are values in registers, not loads from memory.
+fn inputs4(a: *const [4][3]f64) struct { v: @Vector(4, f64), d: [4]@Vector(2, f64) } {
+    var d: [4]@Vector(2, f64) = undefined;
+    inline for (0..4) |w| d[w] = .{ a[w][1], a[w][2] };
+    return .{ .v = .{ a[0][0], a[1][0], a[2][0], a[3][0] }, .d = d };
+}
+
+export fn hand_points_exp(a: *const [4][3]f64, out: *[4][3]f64) void {
+    const in = inputs4(a);
+    const e = gmath.exp(in.v);
+    inline for (0..4) |w| {
+        const d = in.d[w] * @as(@Vector(2, f64), @splat(e[w]));
+        out[w] = .{ e[w], d[0], d[1] };
+    }
+}
+
+export fn gen_points_pow(a: *const [4][3]f64, c: f64, out: *[4][3]f64) void {
+    const r = points4(a).pow(c);
+    inline for (0..4) |w| out[w] = .{ r.l[w].v, r.l[w].d[0], r.l[w].d[1] };
+}
+
+export fn hand_points_pow(a: *const [4][3]f64, c: f64, out: *[4][3]f64) void {
+    const in = inputs4(a);
+    const p = gmath.pow(in.v, @splat(c));
+    inline for (0..4) |w| {
+        const x = in.v[w];
+        const slope = if (x != 0.0) c * p[w] / x else c * gmath.pow(x, c - 1.0);
+        const s = if (std.math.isFinite(slope)) slope else 0.0;
+        const d = in.d[w] * @as(@Vector(2, f64), @splat(s));
+        out[w] = .{ p[w], d[0], d[1] };
+    }
+}
+
 // ---- device hook context: every hook body reaches its batch through
 // `DeviceBatch(D).of(ctx)`, a `@ptrCast(@alignCast)` of the type-erased
 // context. A real hook (`scatter_tapes`) through it against the same body

@@ -10,7 +10,7 @@
 //! - `pub const host_pad: bool`
 //! - `pub inline fn mfactorOf(comptime D: type, inst: anytype) f64`
 //! - `pub fn NoiseFamily(comptime D: type) type`
-//! - `pub fn evalRange(comptime D: type, comptime narrow: bool, comptime pad: bool, sink: anytype, first: u32, end: u32, sim: SimState, limiting: bool) void`
+//! - `pub fn evalRange(comptime D: type, comptime narrow: bool, comptime pad: bool, comptime pw: usize, sink: anytype, first: u32, end: u32, sim: SimState, limiting: bool) void`
 //! - `pub fn evalQRange(comptime D: type, comptime S: type, sink: anytype, first: u32, end: u32, sim: SimState, batch: anytype) void`
 //! - `pub inline fn snapLimited(comptime n_u: usize, comptime reads: Mask(n_u), comptime writes: Mask(n_u), lx: *[n_u]f64, cur: [n_u]f64) void`
 //! - `pub fn limitRange(comptime D: type, sink: anytype, first: u32, end: u32, lim_active: bool, sim: SimState) f64`
@@ -22,6 +22,7 @@ const contract = @import("contract");
 const abi = @import("device_abi");
 const dual = @import("dual.zig");
 const layout = @import("layout.zig");
+const points = @import("points.zig");
 const GROUND = abi.GROUND;
 const SimState = abi.SimState;
 const Mask = layout.Mask;
@@ -65,146 +66,54 @@ pub fn NoiseFamily(comptime D: type) type {
 /// only on maximally collapsed instances, which `ProtoStore.finalize` sorts to
 /// `[0, narrow_count)`. `pad` is `host_pad` on the host and false in
 /// `DeviceKernel`, where pad lanes cost registers.
-pub fn evalRange(comptime D: type, comptime narrow: bool, comptime pad: bool, sink: anytype, first: u32, end: u32, sim: SimState, limiting: bool) void {
+///
+/// `pw` is how many instances one device call evaluates (`points.zig`; 1 on
+/// the GPU). Up to `pw` consecutive instances sharing a Model row (VerA's
+/// batch key) run as one call, and each is then stamped in id order, so
+/// every plane cell sums the same values in the same order as at `pw` 1.
+/// Asserts that `pw` > 1 only for a host sink and a `batch_ok` device.
+pub fn evalRange(comptime D: type, comptime narrow: bool, comptime pad: bool, comptime pw: usize, sink: anytype, first: u32, end: u32, sim: SimState, limiting: bool) void {
     @setEvalBranchQuota(1_000_000);
-    const SinkT = @typeInfo(@TypeOf(sink)).pointer.child;
-    // Strict float mode, as everywhere here: `.optimized` grants `nnan`,
-    // which would make the `* mf` of a NaN residual poison before
-    // SparseLu's isFinite check sees it (see `fma_ok`).
-    const n_u = comptime contract.nU(D);
-    const has_limit = comptime @hasDecl(D, "limit");
-    const reads = comptime layout.widen(n_u, contract.derivReads(D));
-    const jac_pat = comptime layout.rowPattern(D, "jac_pattern");
-    const q_pat = comptime layout.rowPattern(D, "q_pattern");
-    const jac_row = comptime layout.writtenRows(D, "jac_rows");
-    const q_row = comptime layout.writtenRows(D, "q_rows");
-
-    const B = comptime layout.basisOf(D, narrow);
-    const W = B.w;
-    const lane = comptime B.lane[0..n_u].*;
-    const alias = comptime blk: {
-        var a: [n_u]bool = @splat(false);
-        if (narrow) for (&a, D.collapse_full) |*o, c| {
-            o.* = c != null;
-        };
-        break :blk a;
-    };
-    const jac_rep = comptime layout.repMask(n_u, lane, alias, jac_pat);
-    const q_rep = comptime layout.repMask(n_u, lane, alias, q_pat);
-    const S = DualFor(&lane, pad, @hasDecl(D, "collapse"));
-    // Every lane of the basis: the layout the limiting correction sums in.
-    const full = comptime S.Of(reads).lanes;
-    const use_lim = if (comptime has_limit) limiting else false;
-    const lim_writes = comptime if (has_limit) layout.limitWritesOf(D) else 0;
-    const has_q = comptime @hasDecl(D, "q");
-    // `evalQ` computes both halves from one call into the model core; calling
-    // `eval` and `q` separately runs the core twice.
-    const fuse = comptime has_q and @hasDecl(D, "evalQ");
-    // Ground predicates only on the GPU. On the host a ground stamp lands in
-    // the shared trash slot/row, so the add is cheaper than the test. On the
-    // GPU that add is a contended write on one address, measured 2x on 40,000
-    // instances (dev/devices/gpu-evaluation.md, "One eval").
-    const mask_ground = comptime SinkT.on_device;
-
+    const Ev = Eval(D, narrow, pad);
+    const use_lim = if (comptime Ev.has_limit) limiting else false;
+    assert(first <= end);
     var id: u32 = first;
-    while (id < end) : (id += 1) {
-        var lx: [n_u]f64 = undefined;
-        var active: [n_u]bool = undefined;
-        // x minus its limited image, per lane. `canNarrow` guarantees no two
-        // corrected unknowns share a lane.
-        var corr: @Vector(W, f64) = @splat(0);
-        inline for (0..n_u) |u| {
-            const gi = sink.gath(id, u);
-            active[u] = gi != GROUND;
-            const xg = sink.x(gi);
-            lx[u] = xg;
-            // Only unknowns `limit` writes have a limited image; the other
-            // lanes of `corr` stay zero.
-            if (comptime layout.has(lim_writes, u)) if (use_lim) {
-                const l = sink.lim(id, u);
-                lx[u] = l;
-                corr[lane[u]] = xg - l;
-            };
-        }
-        // Near convergence the limiter leaves almost every instance alone, so
-        // one test skips the correction dot products.
-        const corr_live = use_lim and anyNonzero(W, corr);
-        const model = sink.model(id);
-        const mf = mfactorOf(D, sink.inst(id));
-
-        // `q` returns one charge per ddt site. The planes take the rows
-        // (`qRows`); the host `q_tape` takes the LTE sites.
-        var out: contract.Rows(D, S) = undefined;
-        var qs: if (has_q) contract.Sites(D, S) else void = undefined;
-        if (comptime fuse) {
-            const both = @call(.always_inline, D.evalQ, .{ S, &lx, model, sink.inst(id), sim });
-            out = both.res;
-            qs = both.q;
-        } else {
-            out = D.eval(S, &lx, model, sink.inst(id), sim);
-            if (comptime has_q) qs = D.q(S, &lx, model, sink.inst(id), sim);
-        }
-        const qo = if (comptime has_q) contract.qRows(D, S, qs) else {};
-
-        // Rows the device never writes (`jac_row`) and entries it can never
-        // fill (`jac_pat`) are dropped at comptime; the planes start at +0.0,
-        // so a skipped `+= 0.0` cannot even change a sign bit. Resistive and
-        // reactive halves stay in separate passes: fusing them measured
-        // slower on the mos1 kernel from register pressure. A column without
-        // a lane stamps its `jac_const` partial in the same (row, column)
-        // order, so a shared slot sums as the tape orders it.
-        inline for (0..n_u) |ru| if (comptime jac_row[ru]) if (!mask_ground or active[ru]) {
-            const row = sink.rhsRow(id, ru);
-            var val = out[ru].v;
-            if (comptime has_limit and @TypeOf(out[ru]).lanes != 0) {
-                // The correction lands on the f64 residual. A row without
-                // lanes has zero gradient, so it has no correction either.
-                if (corr_live) val += @reduce(.Add, head(W, out[ru].toLanes(full).grad()) * corr);
+    if (comptime pw > 1) {
+        comptime assert(!@typeInfo(@TypeOf(sink)).pointer.child.on_device);
+        comptime assert(D.batch_ok);
+        const F = points.PointFamily(Ev.S, pw, D.Instance);
+        while (end - id >= 2) {
+            const model = sink.model(id);
+            var k: u32 = 1;
+            while (k < pw and id + k < end and sink.model(id + k) == model) k += 1;
+            if (k == 1) {
+                Ev.one(sink, id, sim, use_lim);
+                id += 1;
+                continue;
             }
-            sink.scatterRes(row, val * mf);
-            if (comptime !SinkT.skip_g and jac_pat[ru] != 0) {
-                inline for (0..n_u) |cu| if (!mask_ground or active[cu]) {
-                    if (comptime layout.has(jac_rep[ru], cu)) {
-                        sink.scatterJac(id, ru, cu, out[ru].ddxAt(cu) * mf);
-                    } else if (comptime layout.constEntry(D, ru, cu)) |e| {
-                        if (comptime e.g != 0) if (contract.jacConstApplies(D, e, model, S.collapse_applied)) sink.scatterJac(id, ru, cu, e.g * mf);
-                    }
-                };
+            // A short run repeats its last instance in the spare points:
+            // same inputs, same path, so they add no lead-protocol run.
+            var g: [pw]Ev.Gathered = undefined;
+            var insts: [pw]*const D.Instance = undefined;
+            for (&g, &insts, 0..) |*gw, *iw, w| {
+                const src = id + @min(@as(u32, @intCast(w)), k - 1);
+                gw.* = Ev.gather(sink, src, use_lim);
+                iw.* = sink.inst(src);
             }
-        };
-
-        if (comptime has_q) {
-            // Gated on `q_row`, never on `q_pat`: a `ddt()` of something that
-            // varies in t but not in x has a clear pattern row and a live
-            // charge.
-            inline for (0..n_u) |ru| if (comptime q_row[ru]) {
-                const row = sink.rhsRow(id, ru);
-                var qv = qo[ru].v;
-                if (comptime has_limit and @TypeOf(qo[ru]).lanes != 0) {
-                    if (corr_live) qv += @reduce(.Add, head(W, qo[ru].toLanes(full).grad()) * corr);
-                }
-                sink.scatterQ(row, qv * mf);
-                if (comptime !SinkT.skip_c and q_pat[ru] != 0) {
-                    if (!mask_ground or active[ru]) {
-                        inline for (0..n_u) |cu| if (!mask_ground or active[cu]) {
-                            if (comptime layout.has(q_rep[ru], cu)) {
-                                sink.scatterQJac(id, ru, cu, qo[ru].ddxAt(cu) * mf);
-                            } else if (comptime layout.constEntry(D, ru, cu)) |e| {
-                                if (comptime e.c != 0) if (contract.jacConstApplies(D, e, model, S.collapse_applied)) sink.scatterQJac(id, ru, cu, e.c * mf);
-                            }
-                        };
-                    }
-                }
-            };
-            if (comptime !SinkT.on_device and !(@hasDecl(SinkT, "skip_tape") and SinkT.skip_tape)) inline for (comptime layout.lteSites(D), 0..) |k, j| {
-                var qv = qs[k].v;
-                if (comptime has_limit and @TypeOf(qs[k]).lanes != 0) {
-                    if (corr_live) qv += @reduce(.Add, head(W, qs[k].toLanes(full).grad()) * corr);
-                }
-                sink.tapeQ(id, j, qv * mf);
-            };
+            var xv: [Ev.n_u]F.V = undefined;
+            inline for (0..Ev.n_u) |u| {
+                var pts: [pw]f64 = undefined;
+                for (&pts, &g) |*p, gw| p.* = gw.lx[u];
+                xv[u] = pts;
+            }
+            F.bind(insts);
+            const r = Ev.compute(F, &xv, model, sink.inst(id), sim);
+            for (0..k) |w| Ev.stamp(sink, id + @as(u32, @intCast(w)), Ev.pointOf(F, &r, w), &g[w], model, use_lim);
+            id += k;
         }
+        assert(id <= end);
     }
+    while (id < end) : (id += 1) Ev.one(sink, id, sim, use_lim);
 }
 
 /// Restamps `q_vec` and `q_tape` for instances `[first, end)` and leaves the
@@ -308,6 +217,180 @@ pub inline fn anyNonzero(comptime w: usize, v: @Vector(w, f64)) bool {
 }
 
 // ---- private ----
+
+/// `evalRange`'s steps for device `D` on one basis: the comptime facts, then
+/// gather one instance, run the device, take one point of a batched run,
+/// and stamp one instance.
+fn Eval(comptime D: type, comptime narrow: bool, comptime pad: bool) type {
+    @setEvalBranchQuota(1_000_000);
+    return struct {
+        const n_u = contract.nU(D);
+        const has_limit = @hasDecl(D, "limit");
+        const reads = q: { @setEvalBranchQuota(1_000_000); break :q layout.widen(n_u, contract.derivReads(D)); };
+        const jac_pat = q: { @setEvalBranchQuota(1_000_000); break :q layout.rowPattern(D, "jac_pattern"); };
+        const q_pat = q: { @setEvalBranchQuota(1_000_000); break :q layout.rowPattern(D, "q_pattern"); };
+        const jac_row = q: { @setEvalBranchQuota(1_000_000); break :q layout.writtenRows(D, "jac_rows"); };
+        const q_row = q: { @setEvalBranchQuota(1_000_000); break :q layout.writtenRows(D, "q_rows"); };
+        const B = q: { @setEvalBranchQuota(1_000_000); break :q layout.basisOf(D, narrow); };
+        const W = B.w;
+        const lane = B.lane[0..n_u].*;
+        const alias = blk: {
+            var a: [n_u]bool = @splat(false);
+            if (narrow) for (&a, D.collapse_full) |*o, c| {
+                o.* = c != null;
+            };
+            break :blk a;
+        };
+        const jac_rep = q: { @setEvalBranchQuota(1_000_000); break :q layout.repMask(n_u, lane, alias, jac_pat); };
+        const q_rep = q: { @setEvalBranchQuota(1_000_000); break :q layout.repMask(n_u, lane, alias, q_pat); };
+        const S = DualFor(&lane, pad, @hasDecl(D, "collapse"));
+        // Every lane of the basis: the layout the limiting correction sums in.
+        const full = q: { @setEvalBranchQuota(1_000_000); break :q S.Of(reads).lanes; };
+        const lim_writes = q: { @setEvalBranchQuota(1_000_000); break :q if (has_limit) layout.limitWritesOf(D) else 0; };
+        const has_q = @hasDecl(D, "q");
+        // `evalQ` computes both halves from one call into the model core;
+        // calling `eval` and `q` separately runs the core twice.
+        const fuse = has_q and @hasDecl(D, "evalQ");
+
+        /// One instance's gathered unknowns.
+        const Gathered = struct {
+            lx: [n_u]f64,
+            active: [n_u]bool,
+            /// x minus its limited image, per lane. `canNarrow` guarantees
+            /// no two corrected unknowns share a lane.
+            corr: @Vector(W, f64),
+        };
+
+        fn Result(comptime F: type) type {
+            return struct {
+                out: contract.Rows(D, F),
+                qs: if (has_q) contract.Sites(D, F) else void,
+            };
+        }
+
+        inline fn one(sink: anytype, id: u32, sim: SimState, use_lim: bool) void {
+            const g = gather(sink, id, use_lim);
+            const model = sink.model(id);
+            stamp(sink, id, compute(S, &g.lx, model, sink.inst(id), sim), &g, model, use_lim);
+        }
+
+        inline fn gather(sink: anytype, id: u32, use_lim: bool) Gathered {
+            var g: Gathered = .{ .lx = undefined, .active = undefined, .corr = @splat(0) };
+            inline for (0..n_u) |u| {
+                const gi = sink.gath(id, u);
+                g.active[u] = gi != GROUND;
+                const xg = sink.x(gi);
+                g.lx[u] = xg;
+                // Only unknowns `limit` writes have a limited image; the
+                // other lanes of `corr` stay zero.
+                if (comptime layout.has(lim_writes, u)) if (use_lim) {
+                    const l = sink.lim(id, u);
+                    g.lx[u] = l;
+                    g.corr[lane[u]] = xg - l;
+                };
+            }
+            return g;
+        }
+
+        inline fn compute(comptime F: type, x: *const [n_u]F.V, model: anytype, inst: anytype, sim: SimState) Result(F) {
+            // `q` returns one charge per ddt site. The planes take the rows
+            // (`qRows`); the host `q_tape` takes the LTE sites.
+            if (comptime fuse) {
+                const both = @call(.always_inline, D.evalQ, .{ F, x, model, inst, sim });
+                return .{ .out = both.res, .qs = both.q };
+            }
+            return .{ .out = D.eval(F, x, model, inst, sim), .qs = if (comptime has_q) D.q(F, x, model, inst, sim) else {} };
+        }
+
+        /// Point `w` of a batched result, as the scalar family's values.
+        inline fn pointOf(comptime F: type, r: *const Result(F), w: usize) Result(S) {
+            var o: Result(S) = undefined;
+            inline for (0..n_u) |ru| o.out[ru] = r.out[ru].l[w];
+            if (comptime has_q) inline for (0..contract.nQ(D)) |k| {
+                o.qs[k] = r.qs[k].l[w];
+            };
+            return o;
+        }
+
+        inline fn stamp(sink: anytype, id: u32, r: Result(S), g: *const Gathered, model: anytype, use_lim: bool) void {
+            const SinkT = @typeInfo(@TypeOf(sink)).pointer.child;
+            // Ground predicates only on the GPU. On the host a ground stamp
+            // lands in the shared trash slot/row, so the add is cheaper than
+            // the test. On the GPU that add is a contended write on one
+            // address, measured 2x on 40,000 instances
+            // (dev/devices/gpu-evaluation.md, "One eval").
+            const mask_ground = comptime SinkT.on_device;
+            const active = g.active;
+            // Near convergence the limiter leaves almost every instance
+            // alone, so one test skips the correction dot products.
+            const corr_live = use_lim and anyNonzero(W, g.corr);
+            const mf = mfactorOf(D, sink.inst(id));
+            const out = r.out;
+            const qs = r.qs;
+            const qo = if (comptime has_q) contract.qRows(D, S, qs) else {};
+
+            // Rows the device never writes (`jac_row`) and entries it can
+            // never fill (`jac_pat`) are dropped at comptime; the planes start
+            // at +0.0, so a skipped `+= 0.0` cannot even change a sign bit.
+            // Resistive and reactive halves stay in separate passes: fusing
+            // them measured slower on the mos1 kernel from register pressure.
+            // A column without a lane stamps its `jac_const` partial in the
+            // same (row, column) order, so a shared slot sums as the tape
+            // orders it.
+            inline for (0..n_u) |ru| if (comptime jac_row[ru]) if (!mask_ground or active[ru]) {
+                const row = sink.rhsRow(id, ru);
+                var val = out[ru].v;
+                if (comptime has_limit and @TypeOf(out[ru]).lanes != 0) {
+                    // The correction lands on the f64 residual. A row without
+                    // lanes has zero gradient, so it has no correction either.
+                    if (corr_live) val += @reduce(.Add, head(W, out[ru].toLanes(full).grad()) * g.corr);
+                }
+                sink.scatterRes(row, val * mf);
+                if (comptime !SinkT.skip_g and jac_pat[ru] != 0) {
+                    inline for (0..n_u) |cu| if (!mask_ground or active[cu]) {
+                        if (comptime layout.has(jac_rep[ru], cu)) {
+                            sink.scatterJac(id, ru, cu, out[ru].ddxAt(cu) * mf);
+                        } else if (comptime layout.constEntry(D, ru, cu)) |e| {
+                            if (comptime e.g != 0) if (contract.jacConstApplies(D, e, model, S.collapse_applied)) sink.scatterJac(id, ru, cu, e.g * mf);
+                        }
+                    };
+                }
+            };
+
+            if (comptime has_q) {
+                // Gated on `q_row`, never on `q_pat`: a `ddt()` of something
+                // that varies in t but not in x has a clear pattern row and a
+                // live charge.
+                inline for (0..n_u) |ru| if (comptime q_row[ru]) {
+                    const row = sink.rhsRow(id, ru);
+                    var qv = qo[ru].v;
+                    if (comptime has_limit and @TypeOf(qo[ru]).lanes != 0) {
+                        if (corr_live) qv += @reduce(.Add, head(W, qo[ru].toLanes(full).grad()) * g.corr);
+                    }
+                    sink.scatterQ(row, qv * mf);
+                    if (comptime !SinkT.skip_c and q_pat[ru] != 0) {
+                        if (!mask_ground or active[ru]) {
+                            inline for (0..n_u) |cu| if (!mask_ground or active[cu]) {
+                                if (comptime layout.has(q_rep[ru], cu)) {
+                                    sink.scatterQJac(id, ru, cu, qo[ru].ddxAt(cu) * mf);
+                                } else if (comptime layout.constEntry(D, ru, cu)) |e| {
+                                    if (comptime e.c != 0) if (contract.jacConstApplies(D, e, model, S.collapse_applied)) sink.scatterQJac(id, ru, cu, e.c * mf);
+                                }
+                            };
+                        }
+                    }
+                };
+                if (comptime !SinkT.on_device and !(@hasDecl(SinkT, "skip_tape") and SinkT.skip_tape)) inline for (comptime layout.lteSites(D), 0..) |k, j| {
+                    var qv = qs[k].v;
+                    if (comptime has_limit and @TypeOf(qs[k]).lanes != 0) {
+                        if (corr_live) qv += @reduce(.Add, head(W, qs[k].toLanes(full).grad()) * g.corr);
+                    }
+                    sink.tapeQ(id, j, qv * mf);
+                };
+            }
+        }
+    };
+}
 
 /// The first `w` lanes of `v`: the unpadded basis, so the correction dot
 /// product sums exactly the lanes it sums without padding.

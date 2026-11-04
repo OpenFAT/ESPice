@@ -46,6 +46,8 @@ pub fn DeviceBatch(comptime D: type) type {
     const has_q = @hasDecl(D, "q");
     const has_limit = @hasDecl(D, "limit");
     const narrowable = layout.canNarrow(D);
+    // Instances per host eval call (`traits.pointWidth`).
+    const pw = traits.pointWidth(D);
     // Only timer-only models: their breakpoints are pure in (model, t).
     // Native lines rewrite `Model.brk` as they step, so theirs are not.
     const has_bp = @hasDecl(D, "nextBreakpoint") and traits.skipsTimerState(D);
@@ -292,10 +294,10 @@ pub fn DeviceBatch(comptime D: type) type {
         pub inline fn evalSplit(self: *const Self, sink: anytype, first: u32, last: u32, sim: SimState, limiting: bool) void {
             if (comptime narrowable) {
                 const split = std.math.clamp(self.narrow_count, first, last);
-                if (split > first) stamp.evalRange(D, true, stamp.host_pad, sink, first, split, sim, limiting);
-                if (last > split) stamp.evalRange(D, false, stamp.host_pad, sink, split, last, sim, limiting);
+                if (split > first) stamp.evalRange(D, true, stamp.host_pad, pw, sink, first, split, sim, limiting);
+                if (last > split) stamp.evalRange(D, false, stamp.host_pad, pw, sink, split, last, sim, limiting);
             } else {
-                stamp.evalRange(D, false, stamp.host_pad, sink, first, last, sim, limiting);
+                stamp.evalRange(D, false, stamp.host_pad, pw, sink, first, last, sim, limiting);
             }
         }
 
