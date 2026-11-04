@@ -91,9 +91,9 @@ pub const ParEval = struct {
     next_task: Counter,
     next_block: Counter,
     /// Lanes, lane 0 included, finished stamping the current pass.
-    stamped: Counter,
+    stamped: Arrivals,
     /// Workers finished with the current pass, reduce included.
-    done: Counter,
+    done: Arrivals,
     /// The current pass's arguments, published before `epoch` is bumped.
     job_batches: []const Batch,
     job_planes: Planes,
@@ -120,8 +120,17 @@ pub const ParEval = struct {
         v: std.atomic.Value(u32) align(std.atomic.cache_line),
     };
 
+    /// A barrier's arrival count with its parked waiters, on one line of its
+    /// own. Waiters spin briefly, then park on `v` (`awaitCount`); the
+    /// arrival that reaches the target wakes them only when `sleepers` is
+    /// nonzero (`arrive`).
+    const Arrivals = struct {
+        v: std.atomic.Value(u32) align(std.atomic.cache_line),
+        sleepers: std.atomic.Value(u32),
+    };
+
     /// The pass doorbell, on its own line. `epoch` is bumped once per pass;
-    /// workers spin on it, then park on it. `sleepers` counts workers parked
+    /// workers spin on it briefly, then park on it. `sleepers` counts workers parked
     /// (or about to park) on `epoch`: `run` pays for the wake syscall only
     /// when it is nonzero. `quit` is read right after `epoch` changes. All
     /// three are written about once per pass, so they share one line.
@@ -133,6 +142,7 @@ pub const ParEval = struct {
 
     comptime {
         assert(@sizeOf(Counter) == std.atomic.cache_line);
+        assert(@sizeOf(Arrivals) == std.atomic.cache_line);
         assert(@sizeOf(Wake) == std.atomic.cache_line);
     }
 
@@ -234,8 +244,8 @@ pub const ParEval = struct {
             .wake = .{ .epoch = .init(0), .sleepers = .init(0), .quit = .init(false) },
             .next_task = .{ .v = .init(0) },
             .next_block = .{ .v = .init(0) },
-            .stamped = .{ .v = .init(0) },
-            .done = .{ .v = .init(0) },
+            .stamped = .{ .v = .init(0), .sleepers = .init(0) },
+            .done = .{ .v = .init(0), .sleepers = .init(0) },
             .job_batches = batches,
             .job_planes = undefined,
             .job_base = .{},
@@ -292,7 +302,7 @@ pub const ParEval = struct {
         self.done.v.store(0, .monotonic);
         self.ring();
         self.pass();
-        waitCount(&self.done.v, self.n_lanes - 1);
+        self.awaitCount(&self.done, self.n_lanes - 1);
         // The trash cells take no stamps here; give them their initial value.
         switch (mode) {
             .charge => planes.q_vec[self.n] = 0,
@@ -337,7 +347,7 @@ pub const ParEval = struct {
         self.done.v.store(0, .monotonic);
         self.ring();
         self.walkPass();
-        waitCount(&self.done.v, self.n_lanes - 1);
+        self.awaitCount(&self.done, self.n_lanes - 1);
     }
 
     /// Starts the workers on first use, then bumps `epoch` so they run the
@@ -401,28 +411,23 @@ pub const ParEval = struct {
         while (true) {
             var spins: u32 = 0;
             var e = self.wake.epoch.load(.acquire);
-            while (e == last) {
+            while (e == last) : (e = self.wake.epoch.load(.acquire)) {
                 if (spins < park_spins) {
                     std.atomic.spinLoopHint();
                     spins += 1;
-                } else if (spins < park_spins + park_yields) {
-                    std.Thread.yield() catch {};
-                    spins += 1;
-                } else {
-                    // Spinning (or `yield`, which returns at once on an idle
-                    // core) through the host solve kept every worker at
-                    // 100% CPU. The futex rechecks `epoch == last` itself.
-                    _ = self.wake.sleepers.fetchAdd(1, .seq_cst);
-                    if (self.wake.epoch.load(.seq_cst) == last)
-                        self.io.futexWaitUncancelable(u32, &self.wake.epoch.raw, last);
-                    _ = self.wake.sleepers.fetchSub(1, .seq_cst);
+                    continue;
                 }
-                e = self.wake.epoch.load(.acquire);
+                // Spinning through the host solve kept every worker at 100%
+                // CPU. The futex rechecks `epoch == last` itself.
+                _ = self.wake.sleepers.fetchAdd(1, .seq_cst);
+                if (self.wake.epoch.load(.seq_cst) == last)
+                    self.io.futexWaitUncancelable(u32, &self.wake.epoch.raw, last);
+                _ = self.wake.sleepers.fetchSub(1, .seq_cst);
             }
             last = e;
             if (self.wake.quit.load(.acquire)) return;
             if (self.job_kind == .stamp) self.pass() else self.walkPass();
-            _ = self.done.v.fetchAdd(1, .release);
+            self.arrive(&self.done, self.n_lanes - 1);
         }
     }
 
@@ -445,8 +450,8 @@ pub const ParEval = struct {
             };
             b.hooks.stage(b.ctx, &pl, task.first, task.last, self.job_x, self.job_t, mode);
         }
-        _ = self.stamped.v.fetchAdd(1, .acq_rel);
-        waitCount(&self.stamped.v, self.n_lanes);
+        self.arrive(&self.stamped, self.n_lanes);
+        self.awaitCount(&self.stamped, self.n_lanes);
         const n_blocks = self.cuts.len - 1;
         while (true) {
             const j = self.next_block.v.fetchAdd(1, .monotonic);
@@ -457,6 +462,40 @@ pub const ParEval = struct {
                 inline else => |m| self.reduceBlock(lo, hi, m),
             }
         }
+    }
+
+    /// Counts one arrival at `a`. The arrival that brings it to `target`
+    /// wakes the waiters parked on it, paying the syscall only when one is.
+    /// Asserts that `a` has not passed `target`.
+    fn arrive(self: *ParEval, a: *Arrivals, target: u32) void {
+        // seq_cst pairs with the waiter's `sleepers` increment and recheck
+        // (`awaitCount`): either it sees `target` or this sees it parking.
+        const v = a.v.fetchAdd(1, .seq_cst) + 1;
+        assert(v <= target);
+        if (v == target and a.sleepers.load(.seq_cst) != 0)
+            self.io.futexWake(u32, &a.v.raw, std.math.maxInt(u32));
+    }
+
+    /// Spins `park_spins` pauses, then parks, until `a` reaches `target`.
+    /// A waiter woken by an arrival short of `target` parks again. Asserts
+    /// on exit that `a` reached `target`.
+    fn awaitCount(self: *ParEval, a: *Arrivals, target: u32) void {
+        var spins: u32 = 0;
+        var v = a.v.load(.acquire);
+        while (v < target) : (v = a.v.load(.acquire)) {
+            // Single-threaded never waits here: one lane is every arrival.
+            if (builtin.single_threaded or spins < park_spins) {
+                std.atomic.spinLoopHint();
+                spins += 1;
+                continue;
+            }
+            _ = a.sleepers.fetchAdd(1, .seq_cst);
+            const seen = a.v.load(.seq_cst);
+            // The futex sleeps only while `v` still holds `seen`.
+            if (seen < target) self.io.futexWaitUncancelable(u32, &a.v.raw, seen);
+            _ = a.sleepers.fetchSub(1, .seq_cst);
+        }
+        assert(v >= target);
     }
 
     /// Reduces cells `[lo, hi)` of the combined slot-then-row index.
@@ -539,11 +578,18 @@ const chunks_per_lane = 8;
 /// x86_64 (adjacent-line prefetch pairs 64-byte lines).
 const block_align = 16;
 
-/// Pause-loop iterations a worker spins on `epoch` before it parks: long
-/// enough to catch the next pass across a short solve, short enough that a
-/// long LU solve does not burn the cores.
-const park_spins: u32 = 4096;
-const park_yields: u32 = 64;
+/// Pause-loop iterations a waiting lane spins (on `epoch` or a barrier)
+/// before it parks on a futex: about 15 us on a Raptor Lake P-core (a
+/// pause is ~127 TSC ticks there), enough to catch a lane finishing its
+/// last chunk, so a lane idle through a host solve costs no cycles. The
+/// previous 4096 pauses (~220 us) and 64 yields before parking, and
+/// barriers that never parked, kept idle lanes on the cores: at 8 corpus
+/// jobs scaling_inverter_chain_4k took 11.8-14.2 s against 7.6-10.7 s
+/// parked, at equal wall alone (4.4 s) and 39% fewer user cycles. A
+/// longer spin buys wall only where passes come closer than ~200 us apart
+/// (scaling_parallel_inverters_2000 at 8 forced lanes: 0.79 s at 256,
+/// 0.65 s at 4096, 0.88 s serial), which is below the lane gate.
+const park_spins: u32 = 256;
 
 /// An instance's eval cost estimate: its stamp count `n_u^2`, times 16 for
 /// a nonlinear model. With `n_u^2` alone, chain_psp103_10k's lane 0 got all
@@ -651,19 +697,6 @@ fn pinToPerformanceCores() void {
         any = true;
     }
     if (any) linux.sched_setaffinity(0, &set) catch {};
-}
-
-/// Spins, then yields, until `counter` reaches `target`. `pause` frees
-/// issue slots for the SMT sibling that may be running the lane this waits
-/// on.
-fn waitCount(counter: *std.atomic.Value(u32), target: u32) void {
-    var spins: u32 = 0;
-    while (counter.load(.acquire) < target) {
-        std.atomic.spinLoopHint();
-        spins +%= 1;
-        // Single-threaded never waits here (wasm32-wasi has no sched_yield).
-        if (!builtin.single_threaded and spins > 4096) std.Thread.yield() catch {};
-    }
 }
 
 test "Gather lists each cell's positions in tape order, ground dropped" {
