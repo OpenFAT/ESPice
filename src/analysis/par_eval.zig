@@ -27,7 +27,7 @@
 //!   `clearLimitBatches`, `updateBatches`, `stateCtlBatches`, `minReject`
 //!   (re-exports of `host_walks.zig`)
 //! - `pub const ParEval = struct` (`Base`, `init`, `deinit`, `run`, `limit`, `update`)
-//! - `pub fn instanceWeight(b: Batch) u64`
+//! - `pub fn instanceWeight(b: Batch) u64`, `pub const mos1_weight: u64`
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -519,6 +519,14 @@ pub const ParEval = struct {
     }
 };
 
+/// A mos1 instance's weight, at BSIM4's measured rate: 16 * 18^2 = 5184
+/// per 1.27 us of serial eval (chain_bsim4_10k), 4.07 per ns, times mos1's
+/// 206 ns (scaling_inverter_chain_4k). `16 * n_u^2` gave 1024: its rd/rs
+/// branch flows make n_u 8, which put scaling_parallel_inverters_2000 (79
+/// ns an instance) past the lane gate, where its lanes lose to the serial
+/// stamp under load.
+pub const mos1_weight: u64 = 840;
+
 /// Instances [first, last) of batch `batch`.
 const EvalTask = struct {
     batch: u32,
@@ -592,11 +600,14 @@ const block_align = 16;
 const park_spins: u32 = 256;
 
 /// An instance's eval cost estimate: its stamp count `n_u^2`, times 16 for
-/// a nonlinear model. With `n_u^2` alone, chain_psp103_10k's lane 0 got all
-/// 64,244 capacitors and 241 ms of an eval pass that took the PSP103 lanes
-/// 5-7 s: a PSP103 instance costs about 1,000 capacitors, not 36. Only the
-/// chunk sizes depend on it, never the results.
+/// a nonlinear model, unless a measured weight overrides it (`mos1_weight`).
+/// With `n_u^2` alone, chain_psp103_10k's lane 0 got all 64,244 capacitors
+/// and 241 ms of an eval pass that took the PSP103 lanes 5-7 s: a PSP103
+/// instance costs about 1,000 capacitors, not 36. The chunk sizes and the
+/// executor's lane gate (`executor.lanePlan`) depend on it, never the
+/// results.
 pub fn instanceWeight(b: Batch) u64 {
+    if (std.mem.eql(u8, b.type_name, "mos1")) return mos1_weight;
     // At least 1: the chunking divides by it, and an instance with no
     // unknowns still costs a call.
     const stamps = @max(@as(u64, b.n_u) * b.n_u, 1);
@@ -745,6 +756,7 @@ test "chunkTasks covers every instance once, in order" {
     const gpa = std.testing.allocator;
     var bs: [3]Batch = undefined;
     for (&bs, [_]u32{ 1000, 0, 7 }, [_]u32{ 2, 3, 12 }) |*b, count, n_u| {
+        b.type_name = "fake";
         b.count = count;
         b.n_u = n_u;
         b.has_const_jacobian = n_u == 2;
@@ -765,6 +777,7 @@ test "chunkTasks covers every instance once, in order" {
 test instanceWeight {
     // A zero-unknown batch still weighs 1, so the chunking never divides by 0.
     var b: Batch = undefined;
+    b.type_name = "capacitor";
     b.n_u = 0;
     b.has_const_jacobian = true;
     try std.testing.expectEqual(@as(u64, 1), instanceWeight(b));
@@ -772,4 +785,8 @@ test instanceWeight {
     try std.testing.expectEqual(@as(u64, 9), instanceWeight(b));
     b.has_const_jacobian = false;
     try std.testing.expectEqual(@as(u64, 144), instanceWeight(b));
+    // mos1 weighs its measured cost, whatever its unknowns.
+    b.type_name = "mos1";
+    b.n_u = 8;
+    try std.testing.expectEqual(mos1_weight, instanceWeight(b));
 }
