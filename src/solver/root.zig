@@ -49,6 +49,7 @@ test {
     _ = @import("lane/solver.zig");
     _ = @import("lane/system.zig");
     _ = @import("kernels/lane.zig");
+    _ = @import("kernels/lane_lu.zig");
     _ = @import("kernels/frequency.zig");
     _ = @import("kernels/gmres.zig");
     _ = @import("kernels/periodic.zig");
