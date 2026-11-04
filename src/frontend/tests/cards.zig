@@ -405,3 +405,26 @@ fn parseDialects(gpa: std.mem.Allocator) !void {
 test "HSPICE and Spectre decks: every allocation failure surfaces as OutOfMemory" {
     try std.testing.checkAllAllocationFailures(@import("core").testing.fixed_growth, parseDialects, .{});
 }
+
+test "HSPICE: a quoted expression broken by backslashes inside a `+` line keeps its plus signs" {
+    // A `+` line's quoted sum broken with `\\` (UG08 p. 40: no blank
+    // joins), each next line indented then `+`, the expression's own
+    // plus. By hand: 2u*1*(1 - 0) = 2u, and 3u*1*(1 - 0) + 1u*1 = 4u.
+    const indent = "\t   ";
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_][]const u8{ "\\\\", "\\" }) |brk| for ([_][2]f64{ .{ 1, 0 }, .{ 0, 1 } }, [_]f64{ 2e-6, 4e-6 }) |sel, want| {
+        const src = try std.fmt.allocPrint(arena.allocator(),
+            \\t
+            \\.param a={d} b={d}
+            \\+ x =  '2u*a*(1 - b) {s}
+            \\{s}+ 3u*b*(1 - a) {s}
+            \\{s}+ 1u*b'   $ trailing comment
+            \\+ y = 'x*2'
+            \\r1 n 0 'x'
+            \\
+        , .{ sel[0], sel[1], brk, indent, brk, indent });
+        const nl = try netlist.parse(arena.allocator(), src, .hspice);
+        try std.testing.expectApproxEqRel(want, (try device(nl, "r1")).positional[0].number().?, 1e-12);
+    };
+}
