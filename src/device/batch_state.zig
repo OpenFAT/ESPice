@@ -199,8 +199,12 @@ pub fn State(comptime D: type) type {
                 // 2 x 96 KB per TXL line per step. Dropped (NaN, which no
                 // time equals), the statement reruns in place from the held
                 // state and SimState the cached eval read, so the same
-                // values, and dirties only the elements it stores.
-                inline for (tp_keys) |f| @field(self.instances[id], f) = std.math.nan(f64);
+                // values, and dirties only the elements it stores. A rerun
+                // that shifts most of a full history costs more than the two
+                // copies, so `updateDone` turns it off then.
+                if (self.tp_rerun) inline for (tp_keys) |f| {
+                    @field(self.instances[id], f) = std.math.nan(f64);
+                };
                 const lx = self.localX(x, id);
                 switch (D.updateState(Real, self.model(id), &self.instances[id], lx, &self.states[id], self.sim)) {
                     .ok => {},
@@ -216,6 +220,7 @@ pub fn State(comptime D: type) type {
             const self = Batch.of(ctx);
             self.held_initial = true;
             self.sim.analog_initial = false;
+            if (comptime tp_keys.len != 0) decideRerun(self);
         }
 
         pub fn clearLimits(ctx: *anyopaque) void {
@@ -408,6 +413,39 @@ pub fn State(comptime D: type) type {
             };
             if (comptime has_bp) self.bp = .{ .lo = t, .hi = best };
             return if (best == std.math.inf(f64)) null else best;
+        }
+
+        // ---- private ----
+
+        /// Keeps `tp_rerun` while the reruns of one accepted solve stored at
+        /// most 1/8 of the tracked held elements (a TXL line appending a
+        /// point stores 1 of 2048; one at capacity shifts about half), and
+        /// reruns again 64 solves after turning it off. Serial (`updateDone`).
+        // ponytail: one flag per batch from its summed spans; per instance
+        // if one batch ever holds lines on both sides.
+        fn decideRerun(self: *Batch) void {
+            assert(tp_keys.len != 0);
+            if (!self.tp_rerun) {
+                self.tp_idle += 1;
+                if (self.tp_idle == 64) self.tp_rerun = true;
+                return;
+            }
+            var stored: u64 = 0;
+            var tracked: u64 = 0;
+            for (self.instances[0..self.count]) |*inst| inline for (comptime @typeInfo(D.Instance).@"struct".field_names) |f| {
+                if (comptime std.mem.endsWith(u8, f, "__dirty")) {
+                    const d = @field(inst.*, f);
+                    const len = @field(inst.*, f[0 .. f.len - "__dirty".len]).len;
+                    // Whole: a fresh or restarted history (`initState`), not
+                    // a rerun's stores; it says nothing about the next step.
+                    if (d[0] == 0 and d[1] == len - 1) return;
+                    if (d[0] <= d[1]) stored += @intCast(d[1] - d[0] + 1);
+                    tracked += len;
+                }
+            };
+            assert(stored <= tracked);
+            self.tp_rerun = stored * 8 <= tracked;
+            self.tp_idle = 0;
         }
     };
 }
