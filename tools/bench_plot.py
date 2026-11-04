@@ -1,7 +1,8 @@
 """Plot `zig build bench` medians against circuit size, per simulator.
 
     nix develop .#benchmarking --command python3 tools/bench_plot.py \
-        [zig-out/benchmark-results.md] [tests/conformance/tests/netlist] [zig-out/bench-plots]
+        [zig-out/benchmark-results.md] [tests/conformance/tests/netlist] [zig-out/bench-plots] \
+        [--gpu-phases docs/performance/gpu-phases.tsv]
 
 Writes all.png (every fixture), one <analysis>.png per analysis type, and
 summary.md: the speedup and agreement table per reference simulator and the
@@ -11,13 +12,19 @@ and zig-out/postlayout; groups are then family_model (chain_bsim4, ...).
 x is the device count after subcircuit expansion, y the median wall time;
 both axes log. The analysis comes from the deck's .expected.json, else
 its top-level directory.
+Every column whose label starts with "espice" (`bench -- --espice espice-cpu=--backend=cpu
+--espice espice-cuda=--backend=cuda`) is an ESPice series; speedups are against the first.
 Reference-adapter columns are dropped unless `--vendor` is given.
+`--gpu-phases FILE` (tools/gpu_phases.py's output, measured on one GPU) adds, per GPU in
+EXTRAPOLATE, tools/gpu_extrapolate.py's roofline prediction: hollow markers on a dashed
+line through the middle of its optimistic..conservative band. Measured series are filled
+markers. The footnote names the machine, commit and date of both.
 Also writes headline.svg: per-deck speedups with the average per decade of size.
 `--readme README.md` rewrites that file's <!-- bench:start/end --> block
 with headline.svg, the speedup table and where the numbers were measured
 (run it in the PR that brings a release's bench-corpus.tar.gz into docs/).
 """
-import json, math, re, sys
+import datetime, json, math, os, platform, re, statistics, subprocess, sys
 from collections import defaultdict
 from pathlib import Path
 
@@ -26,16 +33,75 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.ticker
 
-vendor = "--vendor" in sys.argv
-argv = [a for a in sys.argv if a != "--vendor"]
-readme = None
-if "--readme" in argv:
-    i = argv.index("--readme")
-    readme = Path(argv[i + 1])
-    del argv[i : i + 2]
-report = Path(argv[1] if len(argv) > 1 else "zig-out/benchmark-results.md")
-fixtures = Path(argv[2] if len(argv) > 2 else "tests/conformance/tests/netlist")
-out = Path(argv[3] if len(argv) > 3 else "zig-out/bench-plots")
+# The GPUs the roofline model extrapolates to: label -> key of tools/gpu_devices.json.
+EXTRAPOLATE = {"RTX A6000": "rtx_a6000", "A100 80GB SXM": "a100_80_sxm", "H100 SXM": "h100_sxm"}
+# The dataviz reference palette (light): categorical slots in fixed order. Measured
+# columns take slots in header order, the extrapolated GPUs the last three; a
+# marker shape per series carries identity too (scatter of more than three series).
+# ponytail: past five measured columns (--vendor) they share slots with the GPUs.
+SLOTS = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948")
+MARKERS = "os^Dv<>p"
+# The rolling release bench.yml keeps history.tsv and its charts on (tools/bench_history.py).
+HISTORY = "https://github.com/OpenFAT/ESPice/releases/download/bench-history"
+STYLE = {"figure.facecolor": "#fcfcfb", "axes.facecolor": "#fcfcfb", "axes.edgecolor": "#c3c2b7",
+         "grid.color": "#e1e0d9", "grid.linewidth": 0.6, "text.color": "#0b0b0b",
+         "axes.labelcolor": "#52514e", "xtick.color": "#898781", "ytick.color": "#898781",
+         "axes.spines.top": False, "axes.spines.right": False, "legend.frameon": False}
+
+
+def read_report(report: Path, vendor: bool = False):
+    """The bench report as (header, rows, verdict_cols, verdicts); a row is
+    (deck, [median ms or None per column]). HSPICE/Spectre go unless `vendor`."""
+    header, rows, verdict_cols, verdicts = None, [], [], {}
+    for line in report.read_text().splitlines():
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if cells[0] == "Fixture":
+            header = [c.removesuffix(" ms") for c in cells if c.endswith(" ms")]
+            verdict_cols = cells[1 + len(header) :]
+        elif header and line.startswith("| ") and not line.startswith("|---"):
+            times = [float(c) if re.fullmatch(r"[\d.]+", c) else None for c in cells[1 : 1 + len(header)]]
+            rows.append((cells[0], times))
+            verdicts[cells[0]] = dict(zip(verdict_cols, cells[1 + len(header) :]))
+    if not rows:
+        sys.exit(f"no rows in {report}")
+    if not vendor:
+        keep = [i for i, h in enumerate(header) if not re.match(r"(HSPICE|Spectre)\b", h)]
+        header = [header[i] for i in keep]
+        rows = [(rel, [t[i] for i in keep]) for rel, t in rows]
+    return header, rows, verdict_cols, verdicts
+
+
+def espice_columns(header) -> int:
+    """How many leading columns are ESPice; the rest are references."""
+    return max(1, sum(h.lower().startswith("espice") for h in header))
+
+
+def provenance():
+    """(machine, commit, date) of this run."""
+    cpu = next((l.split(":", 1)[1].strip() for l in Path("/proc/cpuinfo").read_text().splitlines()
+                if l.startswith("model name")), platform.machine())
+    sha = os.environ.get("GITHUB_SHA") or subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    return f"{os.cpu_count()} x {cpu}", sha[:8], datetime.date.today().isoformat()
+
+
+def extrapolate(phases: Path):
+    """Per deck of `phases` with a counted kernel and per GPU of EXTRAPOLATE, (analysis,
+    devices, gpu, opt ms, cons ms); and the footnote naming where the input was measured.
+    A deck with time-only kernels is left out: the model has no work to scale."""
+    import gpu_extrapolate as gx
+    meta, devs = gx.meta(phases), gx.devices()
+    ref = devs[meta["ref"]]
+    pts = []
+    for d in gx.load(phases).values():
+        if not any(k["warp_inst"] for k in d["kernels"]):
+            continue
+        for gpu, key in EXTRAPOLATE.items():
+            opt, cons = gx.predict(d, devs[key], ref)
+            assert 0 < opt <= cons, (d["deck"], gpu, opt, cons)
+            pts.append((d["analysis"], int(d["devices"]), gpu, opt * 1e3, cons * 1e3))
+    note = (f"Dashed: a roofline model scaled from {meta.get('gpu', '?')} runs (driver {meta.get('driver', '?')}, "
+            f"commit {meta.get('commit', '?')[:8]}, {meta.get('date', '?')}), not measurements; band: optimistic..conservative.")
+    return pts, note
 
 
 def devices(deck: Path) -> int:
@@ -74,7 +140,7 @@ def devices(deck: Path) -> int:
     return max(count(lines), 1)
 
 
-def analysis(rel: str) -> str:
+def analysis(rel: str, fixtures: Path) -> str:
     exp = (fixtures / rel).with_suffix(".expected.json")
     try:
         a = json.loads(exp.read_text())["analysis"]
@@ -85,46 +151,40 @@ def analysis(rel: str) -> str:
         return rel.split("/")[0] if "/" in rel else rel.rsplit("_", 1)[0]
 
 
-header, rows, verdict_cols, verdicts = None, [], [], {}
-for line in report.read_text().splitlines():
-    cells = [c.strip() for c in line.strip().strip("|").split("|")]
-    if cells[0] == "Fixture":
-        header = [c.removesuffix(" ms") for c in cells if c.endswith(" ms")]
-        verdict_cols = cells[1 + len(header) :]
-    elif header and line.startswith("| ") and not line.startswith("|---"):
-        times = [float(c) if re.fullmatch(r"[\d.]+", c) else None for c in cells[1 : 1 + len(header)]]
-        rows.append((cells[0], times))
-        verdicts[cells[0]] = dict(zip(verdict_cols, cells[1 + len(header) :]))
-if not rows:
-    sys.exit(f"no rows in {report}")
-if not vendor:
-    keep = [i for i, h in enumerate(header) if not re.match(r"(HSPICE|Spectre)\b", h)]
-    header = [header[i] for i in keep]
-    rows = [(rel, [t[i] for i in keep]) for rel, t in rows]
-
-points = []  # (analysis, size, times)
-rows_used = []
-for rel, times in rows:
-    deck = fixtures / rel
-    if deck.exists():
-        points.append((analysis(rel), devices(deck), times))
-        rows_used.append((rel, times))
-
-out.mkdir(parents=True, exist_ok=True)
-
-
-def plot(name, pts):
-    fig, ax = plt.subplots(figsize=(9, 5.5))
+def plot(name, pts, model=()):
+    """<name>.png: median wall against devices, a filled-marker series per
+    measured column and a dashed band per extrapolated GPU in `model`."""
+    fig, ax = plt.subplots(figsize=(9, 5.8))
     for i, sim in enumerate(header):
         xy = sorted((s, t[i]) for _, s, t in pts if t[i] is not None)
         if xy:
-            ax.plot(*zip(*xy), marker="o", ms=4, ls="none", alpha=0.6, label=f"{sim} ({len(xy)})")
+            ax.plot(*zip(*xy), marker=MARKERS[i % len(MARKERS)], ms=5, ls="none", alpha=0.75,
+                    color=SLOTS[i % len(SLOTS)], label=f"{sim} ({len(xy)})")
+    for k, gpu in enumerate(EXTRAPOLATE):
+        by = defaultdict(list)
+        for _, s, g, lo, hi in model:
+            if g == gpu:
+                by[s].append((lo, hi))
+        if not by:
+            continue
+        xs = sorted(by)
+        lo = [statistics.geometric_mean(l for l, _ in by[s]) for s in xs]
+        hi = [statistics.geometric_mean(h for _, h in by[s]) for s in xs]
+        color = SLOTS[len(SLOTS) - len(EXTRAPOLATE) + k]
+        ax.fill_between(xs, lo, hi, color=color, alpha=0.15, lw=0)
+        ax.plot(xs, [math.sqrt(a * b) for a, b in zip(lo, hi)], ls="--", lw=1.5, marker="o", ms=5,
+                mfc="none", color=color, label=f"{gpu} (extrapolated)")
     ax.set(xscale="log", yscale="log", xlabel="devices (subcircuits expanded)",
            ylabel="median wall time, ms", title=f"{name}: {len(pts)} decks")
-    ax.grid(True, which="both", alpha=0.3)
+    ax.grid(True, which="major")
     if ax.lines:
-        ax.legend()
-    fig.tight_layout()
+        ax.legend(fontsize=9)
+    machine, sha, day = prov
+    foot = f"Measured (filled): median of the bench runs, {machine}, commit {sha}, {day}."
+    if model:
+        foot += " " + model_note
+    fig.text(0.01, 0.01, foot, fontsize=7.5, color="#52514e", wrap=True)
+    fig.tight_layout(rect=(0, 0.06, 1, 1))
     fig.savefig(out / f"{name}.png", dpi=130)
     plt.close(fig)
 
@@ -132,15 +192,16 @@ def plot(name, pts):
 def speedup(pts):
     """Reference time over espice time per deck: above 1, espice is faster."""
     fig, ax = plt.subplots(figsize=(9, 5.5))
-    for i, sim in enumerate(header[1:], 1):
+    for i, sim in enumerate(header[nesp:], nesp):
         xy = sorted((s, t[i] / t[0]) for _, s, t in pts if t[0] and t[i])
         if xy:
-            ax.plot(*zip(*xy), marker="o", ms=4, ls="none", alpha=0.6, label=f"{sim} / espice ({len(xy)})")
-    ax.axhline(1, color="k", lw=0.8)
+            ax.plot(*zip(*xy), marker=MARKERS[i % len(MARKERS)], ms=5, ls="none", alpha=0.6,
+                    color=SLOTS[i % len(SLOTS)], label=f"{sim} / {header[0]} ({len(xy)})")
+    ax.axhline(1, color="#52514e", lw=0.8)
     ax.set(xscale="log", yscale="log", xlabel="devices (subcircuits expanded)",
-           ylabel="speedup (reference ms / espice ms)", title="espice speedup: above 1 is faster")
-    ax.grid(True, which="both", alpha=0.3)
-    if ax.lines:
+           ylabel=f"speedup (reference ms / {header[0]} ms)", title="espice speedup: above 1 is faster")
+    ax.grid(True, which="major")
+    if ax.get_legend_handles_labels()[0]:
         ax.legend()
     fig.tight_layout()
     fig.savefig(out / "speedup.png", dpi=130)
@@ -153,10 +214,11 @@ def bars(pts):
     fig, ax = plt.subplots(figsize=(max(9, 0.6 * len(rows)), 5.5))
     w = 0.8 / len(header)
     for i, sim in enumerate(header):
-        ax.bar([k + i * w for k in range(len(rows))], [p[2][i] or 0 for p, _ in rows], w, label=sim)
+        ax.bar([k + i * w for k in range(len(rows))], [p[2][i] or 0 for p, _ in rows], w, label=sim,
+               color=SLOTS[i % len(SLOTS)])
     ax.set_xticks([k + 0.4 - w / 2 for k in range(len(rows))], [r.removesuffix(".sp") for _, r in rows], rotation=60, ha="right")
     ax.set(yscale="log", ylabel="median wall time, ms (missing bar: did not finish)", title="post-layout decks")
-    ax.grid(True, axis="y", which="both", alpha=0.3)
+    ax.grid(True, axis="y", which="major")
     ax.legend()
     fig.tight_layout()
     fig.savefig(out / "bars.png", dpi=130)
@@ -176,11 +238,11 @@ def headline(pts):
     with plt.rc_context({"svg.fonttype": "none", "font.size": 11, "text.color": "#777",
                          "axes.labelcolor": "#777", "xtick.color": "#777", "ytick.color": "#777"}):
         fig, ax = plt.subplots(figsize=(8, 4.2))
-        for i, sim in enumerate(header[1:], 1):
+        for i, sim in enumerate(header[nesp:], nesp):
             xy = [(s, t[i] / t[0]) for _, s, t in pts if t[0] and t[i]]
             if not xy:
                 continue
-            dots = ax.scatter(*zip(*xy), s=8, alpha=0.18, linewidths=0)
+            dots = ax.scatter(*zip(*xy), s=8, alpha=0.18, linewidths=0, color=SLOTS[i % len(SLOTS)])
             decades = defaultdict(list)
             for s, r in xy:
                 decades[int(math.log10(s))].append((s, r))
@@ -209,7 +271,7 @@ def summary(pts):
     then the largest decks by device count."""
     lines = ["| Compared with | Decks both ran | ESPice faster | Median speedup | Agree / differ |",
              "|---|---:|---:|---:|---:|"]
-    for i, sim in enumerate(header[1:], 1):
+    for i, sim in enumerate(header[nesp:], nesp):
         both = [(rel, t) for rel, t in rows_used if t[0] and t[i]]
         if not both:
             continue
@@ -229,32 +291,61 @@ def summary(pts):
 
 def update_readme(path):
     """Replace the <!-- bench:start --> ... <!-- bench:end --> block."""
-    import os, platform, subprocess, datetime
-    cpu = next((l.split(":", 1)[1].strip() for l in Path("/proc/cpuinfo").read_text().splitlines()
-                if l.startswith("model name")), platform.machine())
-    sha = os.environ.get("GITHUB_SHA") or subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    machine, sha, day = prov
     table = (out / "summary.md").read_text().split("\n\n")[0]
     img = os.path.relpath(out / "headline.svg", path.parent)
     block = (f"<!-- bench:start -->\n![ESPice speedup by circuit size]({img})\n\n{table}\n\n"
-             f"Median of 3 runs after a warm-up, process startup included, CPU backend, {os.cpu_count()} x {cpu}, "
-             f"commit `{sha[:8]}`, {datetime.date.today()}. Measured by `.github/workflows/bench.yml`.\n"
+             f"Median of 3 runs after a warm-up, process startup included, column `{header[0]}`, {machine}, "
+             f"commit `{sha}`, {day}. Measured by `.github/workflows/bench.yml`.\n\n"
+             f"![ESPice performance over releases]({HISTORY}/history-performance.png)\n"
              "<!-- bench:end -->")
     text = path.read_text()
     a, b = text.index("<!-- bench:start -->"), text.index("<!-- bench:end -->") + len("<!-- bench:end -->")
     path.write_text(text[:a] + block + text[b:])
 
 
-plot("all", points)
-summary(points)
-headline(points)
-if readme:
-    update_readme(readme)
-speedup(points)
-if len(points) <= 40:
-    bars(points)
-groups = defaultdict(list)
-for p in points:
-    groups[p[0]].append(p)
-for name, pts in sorted(groups.items()):
-    plot(name, pts)
-print(f"{len(points)} decks, {len(groups)} analyses -> {out}/")
+if __name__ == "__main__":
+    def option(name):
+        """Remove `name VALUE` from argv; the value, or None."""
+        if name not in argv:
+            return None
+        i = argv.index(name)
+        value = argv[i + 1]
+        del argv[i : i + 2]
+        return Path(value)
+
+    vendor = "--vendor" in sys.argv
+    argv = [a for a in sys.argv if a != "--vendor"]
+    readme, phases = option("--readme"), option("--gpu-phases")
+    report = Path(argv[1] if len(argv) > 1 else "zig-out/benchmark-results.md")
+    fixtures = Path(argv[2] if len(argv) > 2 else "tests/conformance/tests/netlist")
+    out = Path(argv[3] if len(argv) > 3 else "zig-out/bench-plots")
+    plt.rcParams.update(STYLE)
+    prov = provenance()
+
+    header, rows, verdict_cols, verdicts = read_report(report, vendor)
+    nesp = espice_columns(header)
+    points = []  # (analysis, size, times)
+    rows_used = []
+    for rel, times in rows:
+        deck = fixtures / rel
+        if deck.exists():
+            points.append((analysis(rel, fixtures), devices(deck), times))
+            rows_used.append((rel, times))
+    model, model_note = extrapolate(phases) if phases else ([], "")
+    out.mkdir(parents=True, exist_ok=True)
+
+    plot("all", points, model)
+    summary(points)
+    headline(points)
+    if readme:
+        update_readme(readme)
+    speedup(points)
+    if len(points) <= 40:
+        bars(points)
+    groups = defaultdict(list)
+    for p in points:
+        groups[p[0]].append(p)
+    for name, pts in sorted(groups.items()):
+        plot(name, pts, [m for m in model if m[0] == name])
+    print(f"{len(points)} decks, {len(groups)} analyses, {len(model)} extrapolated points -> {out}/")

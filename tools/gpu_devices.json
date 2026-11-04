@@ -1,0 +1,23 @@
+{
+ "_doc": "Per-device ceilings for extrapolate.py. fp64 = non-tensor FP64 FLOP/s (scalar DFMA code cannot use DMMA); issue = warp instructions/s = 4 schedulers x SMs x f; f = boost clock (the 4060's is inferred from its measured FFMA rate); dram, l2 = bytes/s; bus = achieved host<->device bytes/s; *_src says where each number comes from.",
+ "rtx4060_laptop": {
+  "sms": 24, "f": 2.04e9, "fp64": 207e9, "issue": 1.958e11, "dram": 227e9, "l2": 1.0e12, "l2_bytes": 32e6, "bus": 12.5e9,
+  "src": "measured on this machine: a100/ubench.out (dfma 207 GFLOP/s, ffma 12.55 TFLOP/s -> f = 12.55e12/(24*128*2) = 2.04 GHz, DRAM copy 227 GB/s, L2-resident copy 0.99-1.17 TB/s, H2D/D2H 12.6 GB/s on PCIe 4.0 x8); SM count https://www.techpowerup.com/gpu-specs/geforce-rtx-4060-mobile.c3946"
+ },
+ "rtx_a6000": {
+  "sms": 84, "f": 1.80e9, "fp64": 604.8e9, "issue": 6.048e11, "dram": 768e9, "l2": 2.0e12, "l2_bytes": 6e6, "bus": 25e9,
+  "src": "datasheet https://www.nvidia.com/content/dam/en-zz/Solutions/design-visualization/quadro-product-literature/proviz-print-nvidia-rtx-a6000-datasheet-us-nvidia-1454980-r9-web%20(1).pdf (768 GB/s, PCIe 4.0 x16); 84 SM, 1800 MHz boost, FP64 604.8 GFLOP/s (1:64) https://www.techpowerup.com/gpu-specs/rtx-a6000.c3686 and GA102 whitepaper https://www.nvidia.com/content/PDF/nvidia-ampere-ga-102-gpu-architecture-whitepaper-v2.pdf; l2 bandwidth ESTIMATE (no vendor number); bus = PCIe 4.0 x16 at the same 80% efficiency the 4060 measures on x8"
+ },
+ "a100_40_pcie": {
+  "sms": 108, "f": 1.41e9, "fp64": 9.7e12, "issue": 6.091e11, "dram": 1555e9, "l2": 4.5e12, "l2_bytes": 40e6, "bus": 25e9,
+  "src": "datasheet https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/a100/pdf/nvidia-a100-datasheet-us-nvidia-1758950-r4-web.pdf (FP64 9.7 TF, 1555 GB/s, PCIe 4.0); 108 SM, 1410 MHz, 40 MB L2, L2 read bandwidth 2.3x V100 https://images.nvidia.com/aem-dam/en-zz/Solutions/data-center/nvidia-ampere-architecture-whitepaper.pdf; V100 L2 measured 2155 GB/s https://arxiv.org/abs/1804.06826 -> 4.96 TB/s, derated to 4.5"
+ },
+ "a100_80_sxm": {
+  "sms": 108, "f": 1.41e9, "fp64": 9.7e12, "issue": 6.091e11, "dram": 2039e9, "l2": 4.5e12, "l2_bytes": 40e6, "bus": 25e9,
+  "src": "as a100_40_pcie; 80GB SXM: 2039 GB/s HBM2e, same datasheet https://www.nvidia.com/content/dam/en-zz/Solutions/Data-Center/a100/pdf/nvidia-a100-datasheet-us-nvidia-1758950-r4-web.pdf; host link PCIe 4.0 x16"
+ },
+ "h100_sxm": {
+  "sms": 132, "f": 1.98e9, "fp64": 34e12, "issue": 1.0454e12, "dram": 3.35e12, "l2": 6.0e12, "l2_bytes": 50e6, "bus": 50e9,
+  "src": "datasheet https://resources.nvidia.com/en-us-tensor-core/nvidia-tensor-core-gpu-datasheet (FP64 34 TF, 3.35 TB/s, PCIe 5.0); 132 SM, 1980 MHz boost, 50 MB L2 https://developer.nvidia.com/blog/nvidia-hopper-architecture-in-depth/; l2 bandwidth ESTIMATE (no vendor number); bus = PCIe 5.0 x16 at ~80%"
+ }
+}

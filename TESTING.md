@@ -63,8 +63,8 @@ and differential oracles come first; coverage and fuzzing alone cannot see it.
 | Merge gate | `test.yml`, `cross.yml`, `nix.yml` on every PR, push to `main` and merge queue | on Linux and macOS: `zig build test` in ReleaseSafe (every suite, fuzz-corpus replay, the corpus with its name list, metamorphic rewrites, codegen and HIP compile probes, the C API example, bench-adapter tests), every docs deck, release-matrix unit tests; every release target compiled; `nix flake check` and smoke |
 | Nightly | `nightly.yml`, 06:17 UTC | corpus with KCL certificates, the perturbed corpus (LOOSE list in the summary), `zig build test --fuzz=20M` (every fuzz target), `tools/determinism.sh` (1 thread against 8), `tools/adversarial.py`, `zig build bench` against ngspice, VACASK and Xyce |
 | Docs deploy | `pages.yml` on `main` | the playground's espice.wasm against native espice over the corpus |
-| Release | `release.yml` on `v*` | the merge gate via `workflow_call`, every target at every ISA level with `zig build test` run where the runner can, bundle smoke outside Nix, checksums; `bench.yml` attaches charts |
-| Local only | a machine with a card | `zig build test -- --backend cuda --jobs 1` before any change to a GPU path lands |
+| Release | `release.yml` on `v*` | the merge gate via `workflow_call`, every target at every ISA level with `zig build test` run where the runner can, bundle smoke outside Nix, checksums; `bench.yml` tests the chart scripts on a fixture (`tools/test_bench.py`), attaches the charts and appends the run to `history.tsv` on the `bench-history` release |
+| Local only | a machine with a card | `zig build test -- --backend cuda --jobs 1` before any change to a GPU path lands; `tools/gpu_phases.py` refreshes `docs/performance/gpu-phases.tsv`, the input of the charts' GPU extrapolation |
 
 A flaky test is fixed or quarantined the same day, never retried silently. A fuzz or determinism
 failure becomes a checked-in input (`src/frontend/tests/fuzz_corpus/`, or a deck in the conformance suite).
