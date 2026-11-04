@@ -282,7 +282,7 @@ pub fn sample(gpa: Allocator, io: std.Io, template: *const Prepared, knobs: Knob
         setAffinity(cpuSet(cpus.p.first, cpus.p.last));
         var us: [2]f64 = undefined;
         for ([_]u32{ 1, lanes }, &us) |l, *u| {
-            var par = try ParEval.init(gpa, io, c.batches, c.nnz, c.n, c.has_charge, l);
+            var par = try ParEval.init(gpa, io, c.batches, c.nnz, c.n, c.has_charge, l, .{});
             defer par.deinit();
             var walk = struct {
                 par: *ParEval,
