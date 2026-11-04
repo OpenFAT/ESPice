@@ -89,10 +89,63 @@ test "HSPICE line rules, by hspice-syntax.md rule" {
     // `$` as text, and `+` after a break is text.
     try expectLines(lines.hspice, "v1 a 0 'x $y \\\nz'\n", &.{"v1 a 0 'x $y z'"});
     try expectLines(lines.hspice, "r1 a \\\\\n+1\n", &.{"r1 a+1"});
+    // L5 then L6: a `+` line with a blank after the `+` still breaks at
+    // its backslashes, and the indented `+` after them is text, the
+    // expression's plus (a GF22FDX kit's beol.lib, reported by a user).
+    const quoted = ".param isa=1\n+ x = '1.55u*isa{s}\n\t   + 2.90u*isb{s}\n\t   + 1.385u*isb'   $ c\n+ y = 'x*2'\n";
+    try expectLines(lines.hspice, std.fmt.comptimePrint(quoted, .{ " \\\\", " \\\\" }), &.{".param isa=1 x = '1.55u*isa+ 2.90u*isb+ 1.385u*isb' y = 'x*2'"});
+    try expectLines(lines.hspice, std.fmt.comptimePrint(quoted, .{ " \\", " \\" }), &.{".param isa=1 x = '1.55u*isa + 2.90u*isb + 1.385u*isb' y = 'x*2'"});
     // L3: a `$` after a number token or a closing quote is a comment.
     try expectLines(lines.hspice, "r1 a 0 1k$c\nr2 a 0 'p'$c\n", &.{ "r1 a 0 1k", "r2 a 0 'p'" });
     // L2: `$` and `*` lead comment lines; L5 skips them before a `+`.
     try expectLines(lines.hspice, "$ x\nr1 a 0\n* y\n+ 1\n", &.{"r1 a 0 1"});
+}
+
+/// Pieces a generated HSPICE statement is cut into: no `$`, `*` or `\`,
+/// so only the break between two pieces decides what lies between them.
+const pieces = [_][]const u8{ "a", "x_n", "=", "'1.55u*isa", "(1 - isb)", "+ 2.90u*isb'", "+1", "'x'", "(a+b)" };
+
+test "HSPICE statements read as their pieces joined, however the lines break (L5, L6)" {
+    // Model oracle: a statement is a list of pieces. A column-1 `+` line
+    // and ` \` put one blank between two pieces, `\\` none; the blank
+    // after a `+` and an indent after ` \` change nothing.
+    var prng: std.Random.DefaultPrng = .init(0x6a22);
+    const r = prng.random();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const blanks = [_][]const u8{ "", " ", "\t", " \t " };
+    for (0..2000) |_| {
+        var src: std.ArrayList(u8) = .empty;
+        var want: std.ArrayList([]const u8) = .empty;
+        for (0..r.uintAtMost(usize, 3) + 1) |_| {
+            var line: std.ArrayList(u8) = .empty;
+            try src.appendSlice(a, "r1");
+            try line.appendSlice(a, "r1");
+            for (0..r.uintLessThan(usize, 6)) |_| {
+                const piece = pieces[r.uintLessThan(usize, pieces.len)];
+                const blank = blanks[r.uintLessThan(usize, blanks.len)];
+                const sep = switch (r.uintLessThan(u8, 3)) {
+                    0 => blk: {
+                        try src.print(a, "\n+{s}{s}", .{ blank, piece });
+                        break :blk " ";
+                    },
+                    1 => blk: {
+                        try src.print(a, " \\\n{s}{s}", .{ blank, piece });
+                        break :blk " ";
+                    },
+                    else => blk: {
+                        try src.print(a, "\\\\\n{s}", .{piece});
+                        break :blk "";
+                    },
+                };
+                try line.print(a, "{s}{s}", .{ sep, piece });
+            }
+            try src.append(a, '\n');
+            try want.append(a, line.items);
+        }
+        try expectLines(lines.hspice, src.items, want.items);
+    }
 }
 
 test "Spectre line rules, by spectre-syntax.md section" {

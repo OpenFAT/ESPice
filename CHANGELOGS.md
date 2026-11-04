@@ -2,6 +2,10 @@
 
 Newest first.
 
+## Unreleased
+
+- HSPICE: a `+` line with a blank after the `+` (`+ x = '1u \\`) continues at its trailing `\\` or ` \`, so a quoted expression broken across lines keeps its plus signs; a GF22FDX kit's `beol.lib` failed with `ParseError`, which stopped every GF22 deck from loading.
+
 ## 0.20.0 (2026-11-02)
 
 0.3.0 was never released; its entries are folded in below.
