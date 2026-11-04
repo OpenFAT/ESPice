@@ -279,8 +279,10 @@ are read as measurements too:
 
 On any analysis card, HSPICE's `SWEEP` tail runs the card once per point:
 `SWEEP DATA=name`, `SWEEP MONTE=n [FIRSTRUN=k]`, `SWEEP MONTE=list(10 20:30)`,
-`SWEEP OPTIMIZE=name RESULTS=m1,m2 MODEL=optmod`. On `.dc`, `DATA=` and
-`MONTE=` work without the word `SWEEP`. ESPice adds
+`SWEEP OPTIMIZE=name RESULTS=m1,m2 MODEL=optmod`. A `.dc` that sweeps no
+source takes `DATA=` or `MONTE=` without the word `SWEEP` (`.dc MONTE=5`);
+after a swept source it needs it (`.dc v1 0 1 0.1 SWEEP MONTE=5`), and the
+card without it is refused. ESPice adds
 `SWEEP MONTE=n SIGMA_SCALE=s1,s2,... FAIL='expr'` on `.tran`, `.ac` and a
 `.dc` with a sweep: scaled-sigma sampling of a rare failure, see
 [analyses](analyses.md#scaled-sigma). `.wcd m1 '>= L1' m2 '<= L2' ...

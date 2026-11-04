@@ -236,7 +236,7 @@ pub fn parseAnalyses(arena: Allocator, text: []const u8, lookup: anytype) (Error
         if (card.analysis == .temp and args.len == 1) return error.UnsupportedDirectiveMutation;
         const first = out.items.len;
         // As readDirective reads a deck's card: its SWEEP tail and the line as written (#64).
-        const swept = try r.readSweep(card.analysis, args);
+        const swept = try r.readSweep(card.analysis, args, line);
         try appendAnalysis(arena, &out, .{ .kind = card.analysis, .args = swept.args, .sweep = swept.sweep, .line = r.written(line), .sn = isSn(line) });
         for (out.items[first..]) |*a| resolve(a, lookup);
     }
