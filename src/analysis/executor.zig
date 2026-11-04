@@ -535,6 +535,8 @@ pub const Executor = struct {
             return null;
         };
         context.forced = forced;
+        context.io = self.circuit.solver_execution.io;
+        context.threads = self.circuit.solver_execution.lu_threads;
         self.circuit.lu = context;
         return context;
     }

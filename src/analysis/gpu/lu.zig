@@ -74,6 +74,10 @@ pub const GpuLu = struct {
     declined: bool = true,
     /// `ESPICE_GPU_LU=1`: skip the `min_per_col` bar.
     forced: bool = false,
+    /// `load`'s table fill workers (`K.Options.io` and `threads`), set by
+    /// the owner: the query's multicore LU budget.
+    io: ?std.Io = null,
+    threads: u32 = 1,
     tab: K.Tab = undefined,
     /// The device tables. Grow-only across epochs, as `host`: each holds
     /// at least the current epoch's bytes once one is admitted.
@@ -494,7 +498,7 @@ pub const GpuLu = struct {
         // E2 calibration knobs: ESPICE_GPU_LU_TAIL=m fixes the solves' tail
         // at m steps, ESPICE_GPU_LU_NOGATHER keeps every column in stored
         // order.
-        var opt: K.Options = .{ .gather = !self.knobs.gpu_lu_nogather };
+        var opt: K.Options = .{ .gather = !self.knobs.gpu_lu_nogather, .io = self.io, .threads = self.threads };
         if (self.knobs.gpu_lu_tail) |m| opt.tail = lu.n - @min(lu.n, m);
         const t = nowNs();
         const tab = try K.buildInto(self.gpa, &self.host, lu, slv.col_ptr, slv.params.refactor_growth_limit, opt);
