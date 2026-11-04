@@ -7,16 +7,19 @@
 //!
 //! Contents:
 //! - `pub const Options = struct`
+//! - `pub const fill_tasks_max = 16`
 //! - `pub const Tables = struct`
 //!   - `pub fn deinit(self: *Tables, gpa: std.mem.Allocator) void`
 //! - `pub fn build(gpa: std.mem.Allocator, lu: *const SparseLu, col_ptr: []const u32, growth: f64, opt: Options) !Tables`
+//! - `pub fn buildInto(gpa: std.mem.Allocator, out: *std.ArrayList(u32), lu: *const SparseLu, col_ptr: []const u32, growth: f64, opt: Options) !klu.Tab`
 
 const std = @import("std");
 const assert = std.debug.assert;
 const klu = @import("lu.zig");
 const SparseLu = @import("../sparse_lu.zig").SparseLu;
 
-/// Overrides of `build`'s own choices, for tests and E2 calibration.
+/// Overrides of `build`'s own choices, for tests and E2 calibration, and
+/// the workers of its `dmap` fill.
 pub const Options = struct {
     /// The solves' tail cut t0.
     tail: ?u32 = null,
@@ -24,7 +27,15 @@ pub const Options = struct {
     gather: bool = true,
     /// False keeps `dmap` at u32 even where u16 fits.
     dmap16: bool = true,
+    /// Tasks (the caller's included, at most `fill_tasks_max`) that fill
+    /// the stored-order columns' `dmap`, on `io`; one without `io`. The
+    /// tables are the same bytes whatever the count.
+    threads: u32 = 1,
+    io: ?std.Io = null,
 };
+
+/// `Options.threads`' cap.
+pub const fill_tasks_max = 16;
 
 /// The device tables of one pivot epoch.
 pub const Tables = struct {
@@ -63,14 +74,42 @@ const head_level_cost = 4;
 
 const tail_step_cost = 1;
 
-/// Builds the tables for `lu`'s current factor. O(F + nnz(L+U)) time; the
-/// narrow columns' `dmap` is 2 bytes per flop when every column has fewer
-/// than 65,535 slots, else 4. Asserts a successful
-/// `factor` and a tail of at most `tail_max` steps. `OutOfMemory` also
-/// means the tables passed u32 offsets. Caller owns the result; free with
-/// `Tables.deinit`. A later `factor` of `lu` (new `pattern_epoch`) makes
-/// them stale.
+/// What `fillColumns` reads, and the `dmap` it writes through.
+const Fill = struct {
+    lu: *const SparseLu,
+    coff: []const u32,
+    /// Column k's entries are `dmap[dcol[k]..dcol[k + 1]]`; a gather-form
+    /// column has none.
+    dcol: []const u32,
+    dmap16: bool,
+    discard: u32,
+    d16: [*]u16,
+    d32: [*]u32,
+};
+
+/// Builds the tables for `lu`'s current factor, as `buildInto`. Caller
+/// owns the result; free with `Tables.deinit`.
 pub fn build(gpa: std.mem.Allocator, lu: *const SparseLu, col_ptr: []const u32, growth: f64, opt: Options) !Tables {
+    var out: std.ArrayList(u32) = .empty;
+    errdefer out.deinit(gpa);
+    const tab = try buildInto(gpa, &out, lu, col_ptr, growth, opt);
+    const idx = try out.toOwnedSlice(gpa);
+    assert(idx.len == tab.n_idx);
+    return .{ .idx = idx, .tab = tab };
+}
+
+/// Builds the tables for `lu`'s current factor into `out`, replacing its
+/// items (`n_idx` words, laid out as the returned `Tab` says) and growing
+/// its capacity with `gpa` only when they do not fit: a caller that keeps
+/// `out` across pivot epochs pays for its pages once (#219: 8.4M page
+/// faults over logic_bsim4_10k's 19 operating-point epochs, 12 s of
+/// system time). O(F + nnz(L+U)) time; the narrow columns' `dmap` is 2
+/// bytes per flop when every column has fewer than 65,535 slots, else 4.
+/// Asserts a successful `factor` and a tail of at most `tail_max` steps.
+/// `OutOfMemory` also means the tables passed u32 offsets; `out` is then
+/// empty but keeps its capacity. A later `factor` of `lu` (new
+/// `pattern_epoch`) makes them stale.
+pub fn buildInto(gpa: std.mem.Allocator, out: *std.ArrayList(u32), lu: *const SparseLu, col_ptr: []const u32, growth: f64, opt: Options) !klu.Tab {
     const lanes = klu.refactor_block;
     assert(lu.factored);
     assert(col_ptr.len == @as(usize, lu.n) + 1);
@@ -117,8 +156,9 @@ pub fn build(gpa: std.mem.Allocator, lu: *const SparseLu, col_ptr: []const u32, 
     var widest: u32 = 0;
     for (0..n) |k| widest = @max(widest, coff[k + 1] - coff[k]);
     const dmap16 = opt.dmap16 and widest < klu.narrow_discard;
-    var dmap: std.ArrayList(u32) = .empty;
-    errdefer dmap.deinit(gpa);
+    const dmap = out;
+    dmap.clearRetainingCapacity();
+    errdefer dmap.clearRetainingCapacity();
     try dmap.ensureTotalCapacityPrecise(gpa, if (dmap16) (flops + 1) / 2 else flops);
     // Entries written; the words behind them are `dmap`'s capacity.
     var nd: usize = 0;
@@ -139,9 +179,7 @@ pub fn build(gpa: std.mem.Allocator, lu: *const SparseLu, col_ptr: []const u32, 
         const void_k = lu.void_col[k];
         const base = coff[k];
         const nuk = up[k + 1] - up[k];
-        for (up[k]..up[k + 1]) |p| pos[ui[p]] = base + @as(u32, @intCast(p)) - up[k];
-        pos[k] = base + nuk;
-        for (lp[k]..lp[k + 1]) |q| pos[li[q]] = base + nuk + 1 + @as(u32, @intCast(q)) - lp[k];
+        scatterPos(lu, k, base, pos);
         const c = lu.q[k];
         for (col_ptr[c]..col_ptr[c + 1]) |e| {
             const r = lu.prow[e];
@@ -164,22 +202,16 @@ pub fn build(gpa: std.mem.Allocator, lu: *const SparseLu, col_ptr: []const u32, 
         // which on a dense tail (logic_bsim4_10k) doubled the table build.
         const sparse_steps = col_flops * 2 < @as(u64, nuk) * lanes;
         const gathered = opt.gather and nuk >= gather_min_u and sparse_steps and try gatherColumn(ar, lu, k, base, coff[k + 1] - base, pos, lvl, cnt, pseq, &lev_ptr, &g_slot, &g_cptr, &g_l, &g_u);
+        // A stored-order column's `dmap` comes after this loop, in
+        // `fillStored`; here it only takes its place.
         if (!gathered) {
             assert(nd + col_flops <= flops);
-            for (up[k]..up[k + 1]) |p| {
-                const i = ui[p];
-                const rows = li[lp[i]..lp[i + 1]];
-                if (dmap16) {
-                    for (rows, d16[nd..][0..rows.len]) |r, *o| o.* = if (void_k and r > k) klu.narrow_discard else @intCast(pos[r] - base);
-                } else for (rows, d32[nd..][0..rows.len]) |r, *o| {
-                    o.* = if (void_k and r > k) discard else pos[r];
-                }
-                nd += rows.len;
-            }
+            nd += col_flops;
         }
     }
     dcol[n] = @intCast(nd);
     wlev[n] = @intCast(lev_ptr.items.len - 1);
+    try fillStored(ar, .{ .lu = lu, .coff = coff, .dcol = dcol, .dmap16 = dmap16, .discard = discard, .d16 = d16, .d32 = d32 }, opt);
     // An odd u16 count leaves half a word: zero it, so the tables are a
     // function of the factor.
     if (dmap16 and nd % 2 == 1) d16[nd] = 0;
@@ -337,13 +369,82 @@ pub fn build(gpa: std.mem.Allocator, lu: *const SparseLu, col_ptr: []const u32, 
     inline for (parts, 0..) |part, i| {
         if (i != 0) @memcpy(dmap.items[@field(tab, part[0])..][0..part[1].len], part[1]);
     }
-    const idx = try dmap.toOwnedSlice(gpa);
-    assert(idx.len == tab.n_idx);
+    assert(dmap.items.len == tab.n_idx);
     assert(tab.coff == dwords);
-    return .{ .idx = idx, .tab = tab };
+    return tab;
 }
 
 // ---- private ----
+
+/// Row -> slot of column k (U rows, its pivot, L rows), whose slots
+/// start at `base`, into `pos`; other rows' entries are left as they are.
+fn scatterPos(lu: *const SparseLu, k: u32, base: u32, pos: []u32) void {
+    const up = lu.up;
+    const lp = lu.lp;
+    assert(k < lu.n);
+    assert(pos.len >= lu.n);
+    const nuk = up[k + 1] - up[k];
+    for (up[k]..up[k + 1]) |p| pos[lu.ui.items[p]] = base + @as(u32, @intCast(p)) - up[k];
+    pos[k] = base + nuk;
+    for (lp[k]..lp[k + 1]) |q| pos[lu.li.items[q]] = base + nuk + 1 + @as(u32, @intCast(q)) - lp[k];
+}
+
+/// Fills `dmap` for every column with entries, on up to `opt.threads` io
+/// tasks over contiguous column runs of about equal entry counts. Each
+/// column's entries depend only on its own pattern, so the split changes
+/// no byte. #219: this fill was 96% of the table build on
+/// logic_bsim4_10k (F 214M), one thread per pivot epoch.
+fn fillStored(ar: std.mem.Allocator, f: Fill, opt: Options) !void {
+    const n = f.lu.n;
+    const total: u64 = f.dcol[n];
+    const io = opt.io orelse return fillColumns(&f, 0, n, try ar.alloc(u32, n));
+    const tasks: u32 = std.math.clamp(opt.threads, 1, fill_tasks_max);
+    const pos = try ar.alloc(u32, @as(usize, tasks) * n);
+    var futures: [fill_tasks_max - 1]std.Io.Future(void) = undefined;
+    var lo: u32 = 0;
+    for (0..tasks) |t| {
+        // The first column at or past this task's end share.
+        const target = total * @as(u64, t + 1) / tasks;
+        var hi = lo;
+        while (hi < n and f.dcol[hi] < target) hi += 1;
+        if (t + 1 == tasks) hi = n;
+        const scratch = pos[t * @as(usize, n) ..][0..n];
+        if (t + 1 < tasks) futures[t] = io.async(fillColumns, .{ &f, lo, hi, scratch }) else fillColumns(&f, lo, hi, scratch);
+        lo = hi;
+    }
+    for (futures[0 .. tasks - 1]) |*fu| fu.await(io);
+    assert(lo == n);
+}
+
+/// Columns lo..hi's stored-order `dmap` entries, with `pos` as scratch.
+fn fillColumns(f: *const Fill, lo: u32, hi: u32, pos: []u32) void {
+    const lu = f.lu;
+    const up = lu.up;
+    const lp = lu.lp;
+    const li = lu.li.items;
+    const ui = lu.ui.items;
+    assert(lo <= hi);
+    assert(hi <= lu.n);
+    for (lo..hi) |kk| {
+        const k: u32 = @intCast(kk);
+        var nd: usize = f.dcol[k];
+        if (nd == f.dcol[k + 1]) continue;
+        const base = f.coff[k];
+        const void_k = lu.void_col[k];
+        scatterPos(lu, k, base, pos);
+        for (up[k]..up[k + 1]) |p| {
+            const i = ui[p];
+            const rows = li[lp[i]..lp[i + 1]];
+            if (f.dmap16) {
+                for (rows, f.d16[nd..][0..rows.len]) |r, *o| o.* = if (void_k and r > k) klu.narrow_discard else @intCast(pos[r] - base);
+            } else for (rows, f.d32[nd..][0..rows.len]) |r, *o| {
+                o.* = if (void_k and r > k) f.discard else pos[r];
+            }
+            nd += rows.len;
+        }
+        assert(nd == f.dcol[k + 1]);
+    }
+}
 
 /// Levels of the head schedule for tail cut t0 into `level` (rows below
 /// t0 for U, all rows for L, whose tail rows run their head part) and the

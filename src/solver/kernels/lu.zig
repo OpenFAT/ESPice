@@ -38,6 +38,7 @@
 //! - `pub const Options = lu_tables.Options`
 //! - `pub const Tables = lu_tables.Tables`
 //! - `pub const build = lu_tables.build`
+//! - `pub const buildInto = lu_tables.buildInto`
 //! - `pub fn Kernels(comptime Sy: type, comptime cap: u32, comptime lanes: u32) type`
 //!     - `pub const Shared = struct`
 //!     - `pub const SolveShared = struct`
@@ -213,6 +214,9 @@ pub const Tables = lu_tables.Tables;
 
 /// See `lu_tables.build`.
 pub const build = lu_tables.build;
+
+/// See `lu_tables.buildInto`.
+pub const buildInto = lu_tables.buildInto;
 
 comptime {
     assert(sync_header * @sizeOf(u32) == 64);

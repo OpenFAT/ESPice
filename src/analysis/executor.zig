@@ -538,6 +538,8 @@ pub const Executor = struct {
         };
         context.forced = forced;
         context.place = place;
+        context.io = self.circuit.solver_execution.io;
+        context.threads = self.circuit.solver_execution.lu_threads;
         self.circuit.lu = context;
         return context;
     }

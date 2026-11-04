@@ -3627,6 +3627,40 @@ const LuKernelTests = struct {
         try testing.expectEqual(4, failed);
     }
 
+    test "lu kernels: buildInto writes build's bytes into a used buffer, whatever its fill tasks" {
+        // Oracle: `build`'s one-task fill into a fresh buffer. A gather-form
+        // rail, void steps and a tail cut, as above.
+        const gpa = testing.allocator;
+        var c = try circuit(gpa, 300, 0x11C0);
+        defer c.deinit(gpa);
+        const vals = try gpa.alloc(f64, c.col_ptr[c.n]);
+        defer gpa.free(vals);
+        var rng = std.Random.DefaultPrng.init(0x5EED);
+        values(c, rng.random(), vals);
+        var lu = try SparseLu.init(gpa, c.n, c.col_ptr, c.q);
+        defer lu.deinit(gpa);
+        try lu.factor(gpa, c.col_ptr, c.row_idx, vals, 1e-3);
+        var out: std.ArrayList(u32) = .empty;
+        defer out.deinit(gpa);
+        for ([_]bool{ true, false }) |dmap16| {
+            var ref = try K.build(gpa, &lu, c.col_ptr, 1e-12, .{ .dmap16 = dmap16 });
+            defer ref.deinit(gpa);
+            // Inline tasks (no async threads) and four real ones.
+            for ([_]std.Io.Limit{ .nothing, .limited(4) }) |limit| {
+                var threaded = std.Io.Threaded.init(gpa, .{ .async_limit = limit });
+                defer threaded.deinit();
+                // More tasks than columns with flops leaves some runs empty.
+                for ([_]u32{ 1, 2, 3, 16, 1000 }) |threads| {
+                    out.clearRetainingCapacity();
+                    try out.appendNTimes(gpa, 0xDEAD_BEEF, ref.idx.len + 7);
+                    const tab = try K.buildInto(gpa, &out, &lu, c.col_ptr, 1e-12, .{ .dmap16 = dmap16, .io = threaded.io(), .threads = threads });
+                    try testing.expectEqual(ref.tab, tab);
+                    try testing.expectEqualSlices(u32, ref.idx, out.items);
+                }
+            }
+        }
+    }
+
     test "lu kernels: HostRefactor on io tasks is bitwise refactor, failures included" {
         const gpa = testing.allocator;
         var c = try circuit(gpa, 300, 0x7A5C);
