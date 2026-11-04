@@ -148,6 +148,36 @@ test "a query past only the nnz gate borrows lanes but stamps serially" {
     try t.expectEqual(executor.LanePlan{ .want = lanes, .eval = true }, lanePlan(w, nnz));
 }
 
+test "lane gate by deck: parallel_inverters_2000 stamps serially, inverter_chain_4k and BSIM4 on lanes" {
+    // Oracle: measured lanes against serial (ESPICE_THREADS=8 vs 1, P-cores,
+    // base 1e6241db with parked lanes); each deck's devices as
+    // `deviceWeight` sums them. scaling_parallel_inverters_2000 (4,000
+    // mos1, 2,000 C): 0.79 s against 0.88 s alone, 2.6-3.0 s against
+    // 1.35-1.7 s under 8 corpus jobs. scaling_inverter_chain_4k (8,000
+    // mos1, 4,000 C): 4.6 s against 9.7 s alone. chain_bsim4_1k (1,000
+    // BSIM4, 10.5k RC): 1.0 s against 2.0 s. chain_bsim4_10k: eval 1.75x.
+    const executor = @import("../executor.zig");
+    const instanceWeight = @import("../par_eval.zig").instanceWeight;
+    const Kind = struct { name: []const u8, n_u: u32, linear: bool, count: u64 };
+    const decks = [_]struct { kinds: []const Kind, eval: bool }{
+        .{ .kinds = &.{ .{ .name = "mos1", .n_u = 8, .linear = false, .count = 4_000 }, .{ .name = "capacitor", .n_u = 2, .linear = true, .count = 2_000 } }, .eval = false },
+        .{ .kinds = &.{ .{ .name = "mos1", .n_u = 8, .linear = false, .count = 8_000 }, .{ .name = "capacitor", .n_u = 2, .linear = true, .count = 4_000 } }, .eval = true },
+        .{ .kinds = &.{ .{ .name = "bsim4va", .n_u = 18, .linear = false, .count = 1_000 }, .{ .name = "capacitor", .n_u = 2, .linear = true, .count = 6_428 }, .{ .name = "resistor", .n_u = 2, .linear = true, .count = 4_078 } }, .eval = true },
+        .{ .kinds = &.{ .{ .name = "bsim4va", .n_u = 18, .linear = false, .count = 10_000 }, .{ .name = "capacitor", .n_u = 2, .linear = true, .count = 64_244 }, .{ .name = "resistor", .n_u = 2, .linear = true, .count = 40_546 } }, .eval = true },
+    };
+    for (decks) |deck| {
+        var weight: u64 = 0;
+        for (deck.kinds) |k| {
+            var b: @import("device").abi.Batch = undefined;
+            b.type_name = k.name;
+            b.n_u = k.n_u;
+            b.has_const_jacobian = k.linear;
+            weight += k.count * instanceWeight(b);
+        }
+        try t.expectEqual(deck.eval, executor.lanePlan(weight, 0).eval);
+    }
+}
+
 test "backend validation refuses an explicit GPU this build has no kernels for" {
     const validateBackend = @import("../executor.zig").validateBackend;
     const requestSupported = @import("../gpu/context.zig").requestSupported;
