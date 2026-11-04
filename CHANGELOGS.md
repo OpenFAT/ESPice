@@ -4,8 +4,8 @@ Newest first.
 
 ## Unreleased
 
-- HSPICE: a `+` line with a blank after the `+` (`+ x = '1u \\`) continues at its trailing `\\` or ` \`, so a quoted expression broken across lines keeps its plus signs; a GF22FDX kit's `beol.lib` failed with `ParseError`, which stopped every GF22 deck from loading.
-- HSPICE: `.dc v1 0 1 0.1 MONTE=5` (a bare `MONTE=` or `DATA=` after the swept source, outside HSPICE's `.DC` forms) is refused as `UnsupportedCard` with the reason and the `SWEEP MONTE=` form to write; it failed later as `AnalysisSourceNotFound`, reading `monte` as a second source.
+- HSPICE: a `+` line with a blank after the `+` (`+ x = '1u \\`) continues at its trailing `\\` or ` \`, so a quoted expression broken across lines keeps its plus signs; a GF22FDX kit's `beol.lib` failed with `ParseError`, which stopped every GF22 deck from loading (#262).
+- HSPICE: `.dc v1 0 1 0.1 MONTE=5` (a bare `MONTE=` or `DATA=` after the swept source, outside HSPICE's `.DC` forms) is refused as `UnsupportedCard` with the reason and the `SWEEP MONTE=` form to write; it failed later as `AnalysisSourceNotFound`, reading `monte` as a second source (#262).
 
 ## 0.20.0 (2026-11-02)
 
