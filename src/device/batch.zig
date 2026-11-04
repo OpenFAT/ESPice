@@ -118,6 +118,8 @@ pub fn DeviceBatch(comptime D: type) type {
         q_tape: if (has_q) []f64 else void,
         /// Latency bypass records (`Hooks.set_bypass`), null when off.
         bypass: ?*Bp = null,
+        /// `Hooks.set_point_eval`: `pw` points per eval call, else one.
+        point_eval: bool = true,
 
         const Self = @This();
         const Bp = Bypass(D);
@@ -159,6 +161,7 @@ pub fn DeviceBatch(comptime D: type) type {
             .update_state = if (stages_update) St.updateState else null,
             .update_range = if (stages_update) St.updateRange else null,
             .set_bypass = if (Bp.bypassable) Bp.setBypass else null,
+            .set_point_eval = if (pw > 1) setPointEval else null,
             .update_done = if (stages_update) St.updateDone else null,
             .commit_state = if (@hasDecl(D, "updateState") and traits.hasAbsdelayState(D)) St.updateState else null,
             .state_ctl = if (@hasDecl(D, "stateCtl") and !traits.skipsTimerState(D)) St.stateCtl else null,
@@ -292,13 +295,24 @@ pub fn DeviceBatch(comptime D: type) type {
         /// `evalRange` over `[first, last)`, the narrow basis on the part
         /// below `narrow_count`: a ParEval slice may straddle the boundary.
         pub inline fn evalSplit(self: *const Self, sink: anytype, first: u32, last: u32, sim: SimState, limiting: bool) void {
+            if (pw > 1 and self.point_eval) return self.evalSplitAt(pw, sink, first, last, sim, limiting);
+            self.evalSplitAt(1, sink, first, last, sim, limiting);
+        }
+
+        inline fn evalSplitAt(self: *const Self, comptime w: usize, sink: anytype, first: u32, last: u32, sim: SimState, limiting: bool) void {
             if (comptime narrowable) {
                 const split = std.math.clamp(self.narrow_count, first, last);
-                if (split > first) stamp.evalRange(D, true, stamp.host_pad, pw, sink, first, split, sim, limiting);
-                if (last > split) stamp.evalRange(D, false, stamp.host_pad, pw, sink, split, last, sim, limiting);
+                if (split > first) stamp.evalRange(D, true, stamp.host_pad, w, sink, first, split, sim, limiting);
+                if (last > split) stamp.evalRange(D, false, stamp.host_pad, w, sink, split, last, sim, limiting);
             } else {
-                stamp.evalRange(D, false, stamp.host_pad, pw, sink, first, last, sim, limiting);
+                stamp.evalRange(D, false, stamp.host_pad, w, sink, first, last, sim, limiting);
             }
+        }
+
+        fn setPointEval(ctx: *anyopaque, on: bool) void {
+            const self: *Self = @ptrCast(@alignCast(ctx));
+            self.point_eval = on;
+            assert(self.point_eval == on);
         }
 
         /// Instance `id`'s Model.

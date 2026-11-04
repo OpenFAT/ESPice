@@ -47,10 +47,12 @@ pub const bypass_models = std.StaticStringMap(void).initComptime(.{
 /// (`points.zig`), each a VerA `batch_ok` device. Opt-in per model: a call
 /// over W points instantiates the whole eval body again, and a batch whose
 /// points branch apart (`batch_lead`) runs once per path, so only a model
-/// measured faster is listed.
+/// measured faster is listed. mesa: device_mesa_oscillator 6% fewer
+/// cycles. diode is out: vacask_graetz took 14% more (its bridge diodes
+/// sit in opposite regions, so a batch likely runs both paths).
 // ponytail: hand-kept list; drop it when every batch_ok model measures a win.
 pub const point_models = std.StaticStringMap(void).initComptime(.{
-    .{"mesa"}, .{"diode"},
+    .{"mesa"},
 });
 
 /// The points per batched call: AVX2's four f64 lanes. VerA measured W = 8

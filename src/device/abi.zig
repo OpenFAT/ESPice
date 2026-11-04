@@ -349,6 +349,10 @@ pub const Hooks = struct {
     /// values within the Newton tolerance, so it is opt-in. Null for a
     /// device it cannot serve (sources, history, mutable evaluation).
     set_bypass: ?*const fn (*anyopaque, ?BypassTol) void = null,
+    /// True (the default) evaluates `traits.point_width` instances per
+    /// call, false one at a time: the W == 1 oracle in the same binary.
+    /// Null for a model not in `traits.point_models`.
+    set_point_eval: ?*const fn (*anyopaque, bool) void = null,
     /// Advances Newton-history state between evaluated iterates, given the
     /// previous x.
     advance_iteration: ?*const fn (*anyopaque, []const f64) void = null,
@@ -783,7 +787,8 @@ pub const GpuPayload = struct {
 //     names its frozen instance (#237).
 // 39: `GpuPayload.held_initial`/`committed_initial`, the host batch's
 //     `analog initial` latch, which resident GPU batches advance.
-pub const abi_version: u32 = 39;
+// 40: `Hooks.set_point_eval`, W-point host evaluation on or off.
+pub const abi_version: u32 = 40;
 
 /// A device type's construction entry points, exported by each device object
 /// and by runtime-loaded `.so` devices. Every blob pointer it takes must be
