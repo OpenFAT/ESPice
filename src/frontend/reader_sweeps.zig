@@ -4,7 +4,7 @@
 //!
 //! Contents:
 //! - `pub fn Methods(comptime S: type) type`
-//! - `pub fn readSweep(r: *R, kind: Kind, args: []const Value) Error!struct { args: []const Value, sweep: Sweep }`
+//! - `pub fn readSweep(r: *R, kind: Kind, args: []const Value, line: []const u8) Error!struct { args: []const Value, sweep: Sweep }`
 //! - `pub fn readOptimize(r: *R, tail: []const Value) Error!Optimize`
 //! - `pub fn positiveCount(args: []const Value, i: usize) Error!u32`
 //! - `pub fn numbers(r: *R, args: []const Value) Error![]const f64`
@@ -55,8 +55,10 @@ pub fn Methods(comptime S: type) type {
         const R = reader.Reader(S);
 
         /// Splits an analysis card's HSPICE sweep tail (`SWEEP ...`, or a
-        /// bare `DATA=`/`MONTE=` on `.dc`) off its arguments.
-        pub fn readSweep(r: *R, kind: Kind, args: []const Value) Error!struct { args: []const Value, sweep: Sweep } {
+        /// bare `DATA=`/`MONTE=` on `.dc`) off its arguments. A bare one
+        /// after `.dc`'s swept source is `UnsupportedCard`, logged with
+        /// `line`.
+        pub fn readSweep(r: *R, kind: Kind, args: []const Value, line: []const u8) Error!struct { args: []const Value, sweep: Sweep } {
             var at: ?usize = null;
             for (args, 0..) |a, i| if (a == .name and std.mem.eql(u8, a.name, "sweep")) {
                 at = i;
@@ -64,6 +66,13 @@ pub fn Methods(comptime S: type) type {
             };
             if (at == null and kind == .dc and args.len >= 2 and args[0] == .name and
                 (std.mem.eql(u8, args[0].name, "data") or std.mem.eql(u8, args[0].name, "monte"))) at = 0;
+            // HSPICE takes a bare `DATA=`/`MONTE=` on `.dc` only as the whole
+            // sweep [CR .DC]; after a swept source it needs the word `SWEEP`,
+            // or the keyword would read as a second source.
+            if (at == null and kind == .dc) for (args[@min(1, args.len)..]) |a| {
+                if (a == .name and (std.mem.eql(u8, a.name, "data") or std.mem.eql(u8, a.name, "monte")))
+                    return r.unsupported(line, "DATA= or MONTE= after the swept source of a .dc needs the word SWEEP (.dc v1 0 1 0.1 SWEEP MONTE=n)");
+            };
             // HSPICE `.dc param start stop incr` [CR .DC]: a swept `.param`
             // and no source. Its points are the DC sweep, as `.dc DATA=`'s
             // rows are (#94).

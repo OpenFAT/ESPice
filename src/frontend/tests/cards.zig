@@ -128,6 +128,24 @@ test "HSPICE sweep tails: lin by count, poi by list, .dc over a bare .param (#94
     });
 }
 
+test "HSPICE .dc: a bare MONTE= or DATA= is the whole sweep; after a swept source it needs SWEEP [CR .DC]" {
+    // The manual's forms: `.DC MONTE=val`, `.DC DATA=name` and
+    // `.DC var start stop incr SWEEP MONTE=val`.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var nl = try netlist.parse(a, "t\nv1 a 0 1\nr1 a 0 1\n.dc monte=5\n", .hspice);
+    try std.testing.expectEqual(@as(usize, 0), nl.deck.analyses[0].args.len);
+    try std.testing.expectEqual(@as(u32, 5), nl.deck.analyses[0].sweep.monte.n);
+    nl = try netlist.parse(a, "t\nv1 a 0 1\nr1 a 0 1\n.dc v1 1 1 1 sweep monte=5\n", .hspice);
+    try std.testing.expectEqual(@as(usize, 4), nl.deck.analyses[0].args.len);
+    try std.testing.expectEqual(@as(u32, 5), nl.deck.analyses[0].sweep.monte.n);
+    try expectRefused(.hspice, error.UnsupportedCard, &.{
+        "t\nv1 a 0 1\nr1 a 0 1\n.dc v1 1 1 1 monte=5\n",
+        "t\nv1 a 0 1\nr1 a 0 1\n.data d\nx\n1\n.enddata\n.dc v1 0 1 0.1 data=d\n",
+    });
+}
+
 test ".mosra reads its keys; SimMode 1 and unknown keys are refused [SA Ch.29]" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -404,4 +422,27 @@ fn parseDialects(gpa: std.mem.Allocator) !void {
 
 test "HSPICE and Spectre decks: every allocation failure surfaces as OutOfMemory" {
     try std.testing.checkAllAllocationFailures(@import("core").testing.fixed_growth, parseDialects, .{});
+}
+
+test "HSPICE: a quoted expression broken by backslashes inside a `+` line keeps its plus signs" {
+    // A `+` line's quoted sum broken with `\\` (UG08 p. 40: no blank
+    // joins), each next line indented then `+`, the expression's own
+    // plus. By hand: 2u*1*(1 - 0) = 2u, and 3u*1*(1 - 0) + 1u*1 = 4u.
+    const indent = "\t   ";
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    for ([_][]const u8{ "\\\\", "\\" }) |brk| for ([_][2]f64{ .{ 1, 0 }, .{ 0, 1 } }, [_]f64{ 2e-6, 4e-6 }) |sel, want| {
+        const src = try std.fmt.allocPrint(arena.allocator(),
+            \\t
+            \\.param a={d} b={d}
+            \\+ x =  '2u*a*(1 - b) {s}
+            \\{s}+ 3u*b*(1 - a) {s}
+            \\{s}+ 1u*b'   $ trailing comment
+            \\+ y = 'x*2'
+            \\r1 n 0 'x'
+            \\
+        , .{ sel[0], sel[1], brk, indent, brk, indent });
+        const nl = try netlist.parse(arena.allocator(), src, .hspice);
+        try std.testing.expectApproxEqRel(want, (try device(nl, "r1")).positional[0].number().?, 1e-12);
+    };
 }

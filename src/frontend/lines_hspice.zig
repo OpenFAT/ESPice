@@ -81,7 +81,7 @@ pub const Lines = struct {
     /// continued by a backslash keeps its `$` signs.
     fn read(line: []const u8, quote: *u8) Part {
         const text = stripComment(line, quote);
-        if (text.len < std.mem.trimEnd(u8, line, " \t").len) return .{ .text = text, .brk = .none };
+        if (text.len < std.mem.trim(u8, line, " \t").len) return .{ .text = text, .brk = .none };
         return trailingBreak(text);
     }
 
